@@ -907,3 +907,165 @@ button {
 .overlay-card .btn {
   margin-top: 16px;
 }
+
+/* ---------------------------------------------------------------- draft */
+
+.draft-filters {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0;
+}
+.draft-filters select,
+.draft-filters input {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 8px;
+  font: inherit;
+}
+.draft-filters input {
+  flex: 1;
+}
+
+.draft-2col {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 16px;
+  min-height: 0;
+}
+.draft-candidates {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
+  max-height: 52vh;
+  overflow: auto;
+  padding-right: 4px;
+}
+.cand-card {
+  text-align: left;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+}
+.cand-card:hover:not(:disabled) {
+  border-color: var(--human);
+  background: var(--panel-raised);
+}
+.cand-card:disabled {
+  opacity: 0.4;
+}
+.cand-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+}
+.cand-name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cand-pts {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.cand-sub {
+  font-size: 11px;
+  color: var(--text-faint);
+  margin-top: 2px;
+}
+.cand-abil {
+  font-size: 10px;
+  color: var(--text-dim);
+  margin-top: 4px;
+}
+
+.draft-army {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px;
+  max-height: 52vh;
+  overflow: auto;
+}
+.army-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+.army-row .draft-name {
+  flex: 1;
+}
+.army-remove {
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 4px;
+}
+.army-remove:hover {
+  color: var(--bad);
+}
+
+/* sealed pack opening */
+.pack-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin: 16px 0;
+}
+.pack {
+  min-height: 180px;
+}
+.pack-back {
+  width: 100%;
+  height: 180px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 10px;
+  background: linear-gradient(160deg, var(--panel-2), var(--panel-raised));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.pack-back:hover {
+  border-color: var(--accent);
+}
+.pack-label {
+  font-weight: 600;
+  font-size: 16px;
+}
+.pack-hint {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.pack-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pull-card {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--human);
+  border-radius: var(--radius);
+  padding: 6px 8px;
+  animation: pullin 0.35s ease both;
+}
+.pull-name {
+  font-weight: 500;
+}
+.pull-meta {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+@keyframes pullin {
+  from { opacity: 0; transform: translateY(8px) scale(0.96); }
+  to { opacity: 1; transform: none; }
+}

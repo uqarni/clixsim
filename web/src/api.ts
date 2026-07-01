@@ -235,9 +235,23 @@ export function newGameStreamUrl(
   points: number,
   opponent: "llm" | "heuristic",
   seed: number,
+  humanIds?: number[],
 ): string {
   const p = new URLSearchParams({ mode, points: String(points), opponent, seed: String(seed) });
+  if (humanIds && humanIds.length) p.set("human_ids", humanIds.join(","));
   return `/api/new_game_stream?${p.toString()}`;
+}
+
+// GET /api/roster — full drafting roster (preconstructed).
+export async function getRoster(): Promise<ConstructFigure[]> {
+  if (USE_MOCK) return [];
+  return (await req<{ figures: ConstructFigure[] }>("/api/roster")).figures;
+}
+
+// GET /api/sealed_packs — the human's four booster packs to open.
+export async function getSealedPacks(seed: number): Promise<ConstructFigure[][]> {
+  if (USE_MOCK) return [];
+  return (await req<{ packs: ConstructFigure[][] }>(`/api/sealed_packs?seed=${seed}`)).packs;
 }
 
 // Toggle an optional ability off/on (P4-R34) — routes through /api/intent.

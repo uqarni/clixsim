@@ -5,6 +5,7 @@ import {
   explainAttack,
   getCandidates,
   getFormationCandidates,
+  getState,
   opponentTurn,
   toggleAbility,
   validateMove,
@@ -19,6 +20,7 @@ import ActionPanel from "./components/ActionPanel";
 import BoardCanvas from "./components/BoardCanvas";
 import Construction from "./components/Construction";
 import DialInspector from "./components/DialInspector";
+import Draft from "./components/Draft";
 import ForceRail from "./components/ForceRail";
 import LogLedger from "./components/LogLedger";
 import NewGame, { type GameConfig } from "./components/NewGame";
@@ -56,8 +58,9 @@ function intentField(c: Candidate, key: string): number | null {
 }
 
 export default function App() {
-  const [phase, setPhase] = useState<"menu" | "constructing" | "battle">("menu");
+  const [phase, setPhase] = useState<"menu" | "drafting" | "constructing" | "battle">("menu");
   const [config, setConfig] = useState<GameConfig | null>(null);
+  const [humanIds, setHumanIds] = useState<number[]>([]);
 
   const [view, setView] = useState<GameView | null>(null);
   const [selectedUid, setSelectedUid] = useState<number | null>(null);
@@ -69,7 +72,7 @@ export default function App() {
   const [moveGhost, setMoveGhost] = useState<MoveGhost | null>(null);
   const [pendingMove, setPendingMove] = useState<PendingMove | null>(null);
   const [busy, setBusy] = useState(false);
-  const oppRunning = useRef(false);
+  const lastOppTurn = useRef(-1); // turn number we've already run the opponent for
 
   const log = useCallback((items: GameEvent[]) => {
     if (items.length === 0) return;
@@ -95,10 +98,12 @@ export default function App() {
   }, [selectedUid]);
 
   // Auto-run the opponent whenever it's their turn (incl. LLM going first).
+  // Guarded by turn number so it runs exactly once per opponent turn (idempotent
+  // under React StrictMode's dev double-invoke); on any error we resync via state.
   useEffect(() => {
     if (!view || view.meta.ended || view.meta.active_player === "human") return;
-    if (oppRunning.current) return;
-    oppRunning.current = true;
+    if (lastOppTurn.current === view.meta.turn) return;
+    lastOppTurn.current = view.meta.turn;
     (async () => {
       setBusy(true);
       try {
@@ -109,10 +114,14 @@ export default function App() {
         log(lines.length ? lines : [{ type: "opponent", summary: "Opponent passed." }]);
         setView(r.view);
         log([{ type: "turn", summary: r.view.meta.ended ? `Game over — winner: ${r.view.meta.winner ?? "draw"}.` : "Your turn." }]);
-      } catch (err) {
-        log([{ type: "error", summary: `Opponent turn failed: ${String(err)}` }]);
+      } catch {
+        // Another call may have already advanced the turn — resync quietly.
+        try {
+          setView(await getState());
+        } catch (e2) {
+          log([{ type: "error", summary: `Opponent turn failed: ${String(e2)}` }]);
+        }
       } finally {
-        oppRunning.current = false;
         setBusy(false);
       }
     })();
@@ -339,13 +348,18 @@ export default function App() {
   }, [busy, view, log]);
 
   // --- new-game flow ---
-  const startConstruction = useCallback((c: GameConfig) => {
+  const startDraft = useCallback((c: GameConfig) => {
     setConfig(c);
+    setHumanIds([]);
+    setPhase("drafting");
+  }, []);
+  const onDraftConfirm = useCallback((ids: number[]) => {
+    setHumanIds(ids);
     setPhase("constructing");
   }, []);
 
   const onReady = useCallback((v: GameView) => {
-    oppRunning.current = false;
+    lastOppTurn.current = -1;
     setSelectedUid(null);
     setArmed(null);
     setMoveGhost(null);
@@ -360,10 +374,12 @@ export default function App() {
     setPhase("menu");
   }, []);
 
-  if (phase === "menu") return <NewGame onStart={startConstruction} />;
+  if (phase === "menu") return <NewGame onStart={startDraft} />;
+  if (phase === "drafting" && config)
+    return <Draft config={config} onConfirm={onDraftConfirm} onCancel={() => setPhase("menu")} />;
   if (phase === "constructing" && config)
-    return <Construction config={config} onReady={onReady} onCancel={() => setPhase("menu")} />;
-  if (!view) return <NewGame onStart={startConstruction} />;
+    return <Construction config={config} humanIds={humanIds} onReady={onReady} onCancel={() => setPhase("menu")} />;
+  if (!view) return <NewGame onStart={startDraft} />;
 
   const gameOver = view.meta.ended;
   const outcome = view.meta.winner === "human" ? "Victory" : view.meta.winner === "llm" ? "Defeat" : "Draw";

@@ -15,10 +15,12 @@ interface Pick {
 
 export default function Construction({
   config,
+  humanIds,
   onReady,
   onCancel,
 }: {
   config: GameConfig;
+  humanIds: number[];
   onReady: (v: GameView) => void;
   onCancel: () => void;
 }) {
@@ -33,7 +35,7 @@ export default function Construction({
   const readyView = useRef<GameView | null>(null);
 
   useEffect(() => {
-    const url = newGameStreamUrl(config.mode, config.points, config.opponent, config.seed);
+    const url = newGameStreamUrl(config.mode, config.points, config.opponent, config.seed, humanIds);
     const es = new EventSource(url);
     es.onmessage = (m) => {
       const e = JSON.parse(m.data) as ConstructEvent;
