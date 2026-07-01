@@ -798,12 +798,26 @@ class Engine:
         if dist > eff_speed + 1e-9:
             extra = " (halved by hindering)" if eff_speed < f.speed else ""
             return Rejection("too_far", f"distance {dist:.2f}\" exceeds speed {eff_speed}\"{extra}")
-        # Blocking terrain / deep water: non-fliers can't cross it or end in it.
-        if pieces and not flies:
+        # Blocking terrain / deep water: non-fliers can't cross it or end in it;
+        # a flier soars over it but may not END its move there (§Flight card text).
+        if pieces:
             if terr.base_in_blocking(pieces, dest, f.base_radius):
                 return Rejection("in_blocking", "destination is in impassable terrain")
-            if dist > 1e-9 and terr.blocking_between(pieces, f.position, dest, f.base_radius):
-                return Rejection("path_blocked", "path crosses impassable terrain")
+            if not flies:
+                # Escape hatch: a figure that somehow overlaps blocking terrain
+                # (a legacy/bug state — never reachable by legal play) may still
+                # walk OUT; only the destination legality is enforced for it.
+                stuck = terr.base_in_blocking(pieces, f.position, f.base_radius)
+                if not stuck and dist > 1e-9:
+                    if terr.blocking_between(pieces, f.position, dest, f.base_radius):
+                        return Rejection("path_blocked", "path crosses impassable terrain")
+                    hv = terr.hindering_entry_violation(pieces, f.position, dest, f.base_radius)
+                    if hv is not None:
+                        what = "the low wall" if hv.low_wall else "hindering terrain"
+                        return Rejection(
+                            "must_stop_in_hindering",
+                            f"entering {what} ends the move — stop there (§Hindering)",
+                        )
         if f.is_demoralized:
             already = {c.uid for c in self.state.opposing_contacts(f)}
             for opp in self.state.opponents_of(f):
@@ -1446,7 +1460,13 @@ class Engine:
         facings = list(intent.member_facings)
         if len(dests) != len(figs) or len(facings) != len(figs):
             return Rejection("bad_formation", "must give a destination and facing for each member")
-        speed = min(g.speed for g in figs)  # slowest member's speed (P4-R13)
+        pieces = self.state.terrain
+        # Slowest member's speed (P4-R13), with hindering halving applied per
+        # member before taking the minimum (§Hindering). Members never fly
+        # (Flight/Aquatic are rejected above), so no flier exemptions here.
+        speed = min(
+            terr.effective_speed(pieces, g.speed, g.position, g.base_radius) for g in figs
+        )
         member_uids = {g.uid for g in figs}
         for g, d in zip(figs, dests):
             if distance(g.position, d) > speed + 1e-9:
@@ -1466,6 +1486,23 @@ class Engine:
                 if distance(d, other.position) < g.base_radius + other.base_radius - 1e-6:
                     return Rejection("end_on_base",
                                      f"{g.short_name} would end on {other.short_name}'s base")
+            # Terrain is validated per member exactly like a single move — a
+            # formation may not carry its members into blocking terrain / deep
+            # water, and entering hindering ends the move there (P4-R30).
+            if pieces:
+                if terr.base_in_blocking(pieces, d, g.base_radius):
+                    return Rejection("in_blocking",
+                                     f"{g.short_name} would end in impassable terrain")
+                if distance(g.position, d) > 1e-9:
+                    if terr.blocking_between(pieces, g.position, d, g.base_radius):
+                        return Rejection("path_blocked",
+                                         f"{g.short_name}'s path crosses impassable terrain")
+                    hv = terr.hindering_entry_violation(pieces, g.position, d, g.base_radius)
+                    if hv is not None:
+                        return Rejection(
+                            "must_stop_in_hindering",
+                            f"{g.short_name} must stop on entering hindering terrain",
+                        )
         if not self._positions_cohesive(dests, [g.base_radius for g in figs]):
             return Rejection("bad_formation", "formation must stay cohesive (one touching group) at the end")
         events: list[dict] = []

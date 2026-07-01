@@ -311,9 +311,13 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
     eff_speed = figure.speed if flies else terr.effective_speed(
         pieces, figure.speed, figure.position, figure.base_radius)
 
+    stuck = bool(pieces) and not flies and terr.base_in_blocking(
+        pieces, figure.position, figure.base_radius)
+
     def _move_illegal(dest: Vec) -> bool:
-        """Mirror of the engine's _validate_move geometry (figure bases + blocking
-        terrain) so we never propose a move the engine would reject."""
+        """Mirror of the engine's _validate_move geometry (figure bases + terrain:
+        blocking, flier landings, hindering entry-stop) so we never propose a move
+        the engine would reject."""
         moving = distance(figure.position, dest) > 1e-9
         for other in engine.state.living():
             if other.uid == figure.uid:
@@ -324,11 +328,16 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
                 return True
             if flies and distance(dest, other.position) < figure.base_radius + other.base_radius - 1e-6:
                 return True
-        if pieces and not flies:
+        if pieces:
             if terr.base_in_blocking(pieces, dest, figure.base_radius):
-                return True
-            if moving and terr.blocking_between(pieces, figure.position, dest, figure.base_radius):
-                return True
+                return True  # nobody (flier included) may END in blocking / deep water
+            if not flies and not stuck and moving:
+                if terr.blocking_between(pieces, figure.position, dest, figure.base_radius):
+                    return True
+                if terr.hindering_entry_violation(
+                    pieces, figure.position, dest, figure.base_radius
+                ) is not None:
+                    return True
         return False
 
     def add_move(dest: Vec, facing: float, label: str, extra: dict) -> bool:
@@ -515,6 +524,8 @@ def _make_formation_move(engine: Engine, cluster: list[Figure]) -> Candidate | N
             if terr.base_in_blocking(pieces, nd, f.base_radius):
                 return None
             if terr.blocking_between(pieces, f.position, nd, f.base_radius):
+                return None
+            if terr.hindering_entry_violation(pieces, f.position, nd, f.base_radius) is not None:
                 return None
         dests.append((nd.x, nd.y))
         facings.append(_facing_toward(nd, tgt.position))

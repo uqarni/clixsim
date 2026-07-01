@@ -274,6 +274,27 @@ def _starts_in_speed_hindering(pieces: list[TerrainPiece], p: Vec, radius: float
     return any(t.halves_speed() and circle_intersects_polygon(p, radius, t.polygon) for t in pieces)
 
 
+def hindering_entry_violation(
+    pieces: list[TerrainPiece], p0: Vec, p1: Vec, radius: float
+) -> TerrainPiece | None:
+    """A hindering piece the move ENTERS without stopping in — §Hindering / P4-R30
+    ("a figure starting on clear must stop when its base crosses into hindering").
+    A move that starts clear of a hindering piece and whose swept base touches it
+    must END touching that piece (for a low wall this is the "stop at the far
+    side" rule — the wall is thin, so ending in contact with it is the far side).
+    Returns the violated piece, or None if the move is legal."""
+    for t in pieces:
+        if not t.is_hindering_move():
+            continue
+        if circle_intersects_polygon(p0, radius, t.polygon):
+            continue  # started touching it — the halved speed already applied
+        if swept_base_crosses_polygon(p0, p1, radius, t.polygon) and not (
+            circle_intersects_polygon(p1, radius, t.polygon)
+        ):
+            return t
+    return None
+
+
 def effective_speed(pieces: list[TerrainPiece], speed: int, start: Vec, radius: float) -> int:
     """Speed for the turn, halved (round up) if the figure begins its move touching
     speed-halving hindering (§Hindering; low walls are exempt)."""

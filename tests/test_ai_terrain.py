@@ -115,6 +115,107 @@ def test_best_decision_exclusion_repicks(db):
     assert repr(second.candidate.intent) != repr(first.candidate.intent)
 
 
+# --- terrain vs formations, entry-stop, fliers, escape hatch ------------------
+from clixengine.intents import MoveIntent  # noqa: E402
+
+
+def _formation_engine(db, terrain_piece):
+    """Three touching same-faction figures pointed at an enemy, with a piece of
+    terrain directly in their path."""
+    e = build_engine(db, [
+        ("human", "Werebear", (18, 30), math.pi / 2, 0),
+        ("llm", "Brass Golem", (16.9, 10), math.pi / 2, 0),
+        ("llm", "Brass Golem", (18.0, 10), math.pi / 2, 0),
+        ("llm", "Brass Golem", (19.1, 10), math.pi / 2, 0),
+    ], active="llm")
+    e.state.terrain.append(terrain_piece)
+    return e
+
+
+def _formation_intent(e, dy):
+    uids = (1, 2, 3)
+    dests = tuple((e.state.figure(u).position.x, e.state.figure(u).position.y + dy) for u in uids)
+    facings = (math.pi / 2,) * 3
+    return MoveIntent(1, dests[0], facings[0], formation_uids=uids,
+                      member_dests=dests, member_facings=facings)
+
+
+def test_formation_cannot_enter_blocking_terrain(db):
+    wall = TerrainPiece(0, "blocking", (Vec(14, 13), Vec(22, 13), Vec(22, 15), Vec(14, 15)))
+    e = _formation_engine(db, wall)
+    r = e.apply(_formation_intent(e, 4.0))  # would march the line into the wall
+    assert not r.ok and r.reason in ("in_blocking", "path_blocked")
+    assert all(e.state.figure(u).position.y == 10 for u in (1, 2, 3))  # nobody moved
+
+
+def test_formation_cannot_enter_deep_water(db):
+    pond = TerrainPiece(0, "clear", (Vec(14, 13), Vec(22, 13), Vec(22, 17), Vec(14, 17)),
+                        water="deep")
+    e = _formation_engine(db, pond)
+    r = e.apply(_formation_intent(e, 4.0))
+    assert not r.ok and r.reason in ("in_blocking", "path_blocked")
+
+
+def test_formation_speed_halved_when_starting_in_hindering(db):
+    woods = TerrainPiece(0, "hindering", (Vec(14, 8), Vec(22, 8), Vec(22, 12), Vec(14, 12)))
+    e = _formation_engine(db, woods)  # the line starts inside the woods
+    sp = min(e.state.figure(u).speed for u in (1, 2, 3))
+    half = max(1, math.ceil(sp / 2))
+    r = e.apply(_formation_intent(e, half + 1.0))
+    assert not r.ok and r.reason == "too_far"
+    r2 = e.apply(_formation_intent(e, float(half)))
+    assert r2.ok, f"{getattr(r2, 'reason', '')}: {getattr(r2, 'detail', '')}"
+
+
+def test_single_move_must_stop_on_entering_hindering(db):
+    e = build_engine(db, [
+        ("human", "Amazon Blademistress", (18, 10), math.pi / 2, 0),  # speed 10
+        ("llm", "Werebear", (18, 30), -math.pi / 2, 0),
+    ], active="human")
+    e.state.terrain.append(TerrainPiece(
+        0, "hindering", (Vec(15, 13), Vec(21, 13), Vec(21, 16), Vec(15, 16))))
+    sp = e.state.figure(0).speed
+    assert sp >= 8  # needs to be able to overshoot the 3"-deep woods
+    # Blowing straight through the woods is illegal...
+    v = e.validate_move(0, (18, 10 + sp))
+    assert not v["ok"] and v["reason"] == "must_stop_in_hindering"
+    # ...but stopping inside them is fine.
+    assert e.validate_move(0, (18, 14.5))["ok"] is True
+
+
+def test_flier_may_cross_but_not_land_in_blocking(db):
+    e = build_engine(db, [
+        ("human", "Feral Bloodsucker", (18, 10), math.pi / 2, 0),  # Flight, speed 10
+        ("llm", "Werebear", (18, 30), -math.pi / 2, 0),
+    ], active="human")
+    flier = e.state.figure(0)
+    assert 98 in flier.active_ability_ids(), "test needs a figure with Flight"
+    e.state.terrain.append(TerrainPiece(
+        0, "blocking", (Vec(15, 12), Vec(21, 12), Vec(21, 15), Vec(15, 15))))
+    sp = flier.speed
+    # Soaring OVER the block is legal...
+    assert e.validate_move(0, (18, min(10 + sp, 17.0)))["ok"] is True
+    # ...but landing IN it is not (§Flight card text).
+    v = e.validate_move(0, (18, 13.5))
+    assert not v["ok"] and v["reason"] == "in_blocking"
+
+
+def test_stuck_figure_can_escape_blocking(db):
+    """Figures trapped inside blocking by the old formation hole must be able to
+    walk out (the path check is waived for an illegally-overlapping start)."""
+    e = build_engine(db, [
+        ("human", "Werebear", (18, 14), math.pi / 2, 0),
+        ("llm", "Werebear", (18, 30), -math.pi / 2, 0),
+    ], active="human")
+    e.state.terrain.append(TerrainPiece(
+        0, "blocking", (Vec(15, 12), Vec(21, 12), Vec(21, 16), Vec(15, 16))))
+    # (18,14) is inside the block — the bug state. Walking out is legal...
+    v = e.validate_move(0, (18, 18))
+    assert v["ok"], f"trapped figure cannot escape: {v}"
+    # ...but ending still-inside is not.
+    assert not e.validate_move(0, (17, 14))["ok"]
+
+
 # --- drawn-terrain size caps -------------------------------------------------
 def _placing_engine(db):
     e = build_engine(db, [
