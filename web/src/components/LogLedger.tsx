@@ -58,8 +58,11 @@ function eventLine(e: GameEvent, name: (uid: unknown) => string): string {
       return `${name(e.figure)} rallies ${name(e.target)}`;
     case "pass":
       return `${name(e.figure)} passes`;
+    case "toggle_ability":
+      return `${name(e.figure)} ${e.off ? "cancels" : "restores"} ${e.name}`;
     case "eliminated":
       return `${name(e.figure)} eliminated`;
+    case "formation_move": // the per-member move events carry the detail
     case "begin_turn":
     case "end_turn":
       return "";

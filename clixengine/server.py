@@ -62,8 +62,9 @@ class Session:
         self.opponent = None  # controller for the "llm" side
         self.human_side = "human"
 
-    def new_game(self, points: int, seed: int, board: float = 36.0, opponent: str = "llm"):
-        human_army, llm_army = demo_armies(points, seed=seed)
+    def new_game(self, points: int, seed: int, board: float = 36.0, opponent: str = "llm",
+                 single_faction: bool = False):
+        human_army, llm_army = demo_armies(points, seed=seed, single_faction=single_faction)
         self.engine = build_game(human_army, llm_army, build_total=points, seed=seed,
                                  board_size=board)
         if opponent == "heuristic":
@@ -141,6 +142,7 @@ class NewGameReq(BaseModel):
     seed: int = 1
     board: float = 36.0
     opponent: str = "llm"  # "llm" | "heuristic"
+    single_faction: bool = False  # same-faction armies (enables formations)
 
 
 class ValidateMoveReq(BaseModel):
@@ -162,7 +164,7 @@ class ExplainReq(BaseModel):
 # ------------------------------------------------------------------ #
 @app.post("/api/new_game")
 def new_game(req: NewGameReq):
-    eng = SESSION.new_game(req.points, req.seed, req.board, req.opponent)
+    eng = SESSION.new_game(req.points, req.seed, req.board, req.opponent, req.single_faction)
     return game_view(eng)
 
 

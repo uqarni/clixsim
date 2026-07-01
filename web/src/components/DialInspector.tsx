@@ -2,6 +2,8 @@ import type { DialClick, FigureView } from "../api";
 
 interface Props {
   fig: FigureView | null;
+  canToggle?: boolean;
+  onToggle?: (abilityId: number, off: boolean) => void;
 }
 
 function AbilityChips({ abilities }: { abilities: DialClick["abilities"] }) {
@@ -22,7 +24,7 @@ function AbilityChips({ abilities }: { abilities: DialClick["abilities"] }) {
 }
 
 // Zone B: full combat dial for the selected figure + stat block + abilities.
-export default function DialInspector({ fig }: Props) {
+export default function DialInspector({ fig, canToggle, onToggle }: Props) {
   return (
     <div className="zone">
       <div className="zone-head">
@@ -75,6 +77,26 @@ export default function DialInspector({ fig }: Props) {
                   </span>
                 ))}
               </div>
+            )}
+
+            {fig.optional_abilities && fig.optional_abilities.length > 0 && (
+              <>
+                <div className="section-label">Optional — click to cancel / restore</div>
+                <div className="ability-chips">
+                  {fig.optional_abilities.map((a) => (
+                    <button
+                      key={a.id}
+                      className={`chip toggle${a.disabled ? " off" : ""}`}
+                      onClick={() => canToggle && onToggle?.(a.id, !a.disabled)}
+                      disabled={!canToggle}
+                      title={a.disabled ? "Cancelled — click to restore" : "On — click to cancel"}
+                    >
+                      <span aria-hidden="true">{a.disabled ? "○ " : "● "}</span>
+                      {a.name}
+                    </button>
+                  ))}
+                </div>
+              </>
             )}
 
             <div className="section-label">Combat dial</div>

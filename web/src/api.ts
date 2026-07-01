@@ -73,8 +73,18 @@ export interface FigureView {
   damage: number;
 
   active_abilities: ActiveAbility[];
+  optional_abilities?: { id: number; name: string; disabled: boolean }[];
   in_base_contact_with: number[];
   dial: DialClick[];
+}
+
+export interface AttackExplain {
+  attack: number;
+  rear: boolean;
+  defense: { base: number; battle_armor: number; defend: number; effective: number };
+  damage: { base: number; enhancement: number; toughness: number; per_hit: number };
+  hit_odds: number;
+  expected_clicks: number;
 }
 
 export interface GameMeta {
@@ -168,6 +178,44 @@ export async function newGame(points: number, seed: number): Promise<GameView> {
 export async function getCandidates(uid: number): Promise<Candidate[]> {
   if (USE_MOCK) return [];
   return req<Candidate[]>(`/api/candidates/${uid}`);
+}
+
+// GET /api/formation_candidates — turn-level movement/combat formations.
+export async function getFormationCandidates(): Promise<Candidate[]> {
+  if (USE_MOCK) return [];
+  return req<Candidate[]>("/api/formation_candidates");
+}
+
+// POST /api/explain — modifier breakdown for a prospective attack.
+export async function explainAttack(
+  attackerUid: number,
+  targetUid: number,
+  attackType: "close" | "ranged",
+  rear = false,
+): Promise<AttackExplain> {
+  if (USE_MOCK) {
+    return {
+      attack: 0,
+      rear,
+      defense: { base: 0, battle_armor: 0, defend: 0, effective: 0 },
+      damage: { base: 0, enhancement: 0, toughness: 0, per_hit: 0 },
+      hit_odds: 0,
+      expected_clicks: 0,
+    };
+  }
+  return req<AttackExplain>("/api/explain", {
+    method: "POST",
+    body: JSON.stringify({ attacker_uid: attackerUid, target_uid: targetUid, attack_type: attackType, rear }),
+  });
+}
+
+// Toggle an optional ability off/on (P4-R34) — routes through /api/intent.
+export async function toggleAbility(
+  figureUid: number,
+  abilityId: number,
+  off: boolean,
+): Promise<ApplyResult> {
+  return applyIntent({ kind: "toggle_ability", figure_uid: figureUid, ability_id: abilityId, off });
 }
 
 // POST /api/intent

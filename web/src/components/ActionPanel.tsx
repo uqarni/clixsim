@@ -1,38 +1,63 @@
-import type { Candidate, FigureView, GameView } from "../api";
+import type { AttackExplain, Candidate, FigureView, GameView } from "../api";
+
+interface PendingMove {
+  dest: [number, number];
+  facing: number;
+}
 
 interface Props {
   view: GameView;
   selectedFig: FigureView | null;
   candidates: Candidate[];
+  formations: Candidate[];
   armed: Candidate | null;
+  explain: AttackExplain | null;
+  pendingMove: PendingMove | null;
   busy: boolean;
   onArm: (c: Candidate) => void;
   onConfirm: () => void;
   onCancel: () => void;
+  onConfirmMove: () => void;
+  onCancelMove: () => void;
 }
 
-type Group = "Move" | "Attack" | "Support" | "Turn";
+const ATTACK_KINDS = new Set([
+  "ranged",
+  "close",
+  "weapon_master",
+  "magic_blast",
+  "flame_lightning",
+  "shockwave",
+]);
 
-function groupOf(kind: string): Group {
-  if (kind === "pass") return "Turn";
-  if (kind === "move" || kind === "formation_move") return "Move";
-  if (["heal", "regenerate", "necromancy", "levitate"].includes(kind)) return "Support";
-  return "Attack";
+function variantName(kind: string): string {
+  switch (kind) {
+    case "ranged":
+      return "Shoot";
+    case "close":
+      return "Attack";
+    case "weapon_master":
+      return "Weapon Master";
+    case "magic_blast":
+      return "Magic Blast";
+    case "flame_lightning":
+      return "Flame / Lightning";
+    case "shockwave":
+      return "Shockwave";
+    default:
+      return kind;
+  }
 }
 
-const GROUP_ORDER: Group[] = ["Attack", "Support", "Move", "Turn"];
-
-function num(ann: Record<string, unknown>, key: string): number | null {
-  const v = ann[key];
-  return typeof v === "number" ? v : null;
+function num(a: Record<string, unknown>, k: string): number | null {
+  return typeof a[k] === "number" ? (a[k] as number) : null;
 }
 
-// A compact, human line of the engine-computed facts a candidate carries.
 function annLine(c: Candidate): string {
   const a = c.annotation;
   const bits: string[] = [];
   const hit = num(a, "hit_odds");
-  if (hit != null) bits.push(`${Math.round(hit * 100)}% hit`);
+  if (hit != null) bits.push(`${Math.round(hit * 100)}%`);
   const exp = num(a, "expected_clicks");
   if (exp != null) bits.push(`~${exp.toFixed(1)} clk`);
   const heal = a["heal_amount"];
@@ -41,100 +66,230 @@ function annLine(c: Candidate): string {
   if (dist != null) bits.push(`${dist.toFixed(1)}"`);
   if (a["rear"] === true) bits.push("rear +1");
   if (a["free"] === true) bits.push("free");
-  const rev = num(a, "revive_points");
-  if (rev != null) bits.push(`${rev} pts`);
   return bits.join(" · ");
+}
+
+function targetUid(c: Candidate): number | null {
+  const a = c.annotation;
+  if (typeof a.target === "number") return a.target;
+  if (Array.isArray(a.targets) && typeof a.targets[0] === "number") return a.targets[0];
+  return null;
+}
+
+function Breakdown({ x }: { x: AttackExplain }) {
+  const d = x.defense;
+  const g = x.damage;
+  const defMods: string[] = [];
+  if (d.battle_armor) defMods.push(`Battle Armor +${d.battle_armor}`);
+  if (d.defend) defMods.push(`Defend +${d.defend}`);
+  const dmgMods: string[] = [];
+  if (g.enhancement) dmgMods.push(`Enhancement +${g.enhancement}`);
+  if (g.toughness) dmgMods.push(`Toughness ${g.toughness}`);
+  return (
+    <div className="explain">
+      <div className="explain-row">
+        <span className="k">Defense</span>
+        <span>
+          {d.base}
+          {d.effective !== d.base && ` → ${d.effective}`}
+          {defMods.length > 0 && <span className="explain-mod up"> ({defMods.join(", ")})</span>}
+        </span>
+      </div>
+      <div className="explain-row">
+        <span className="k">Damage / hit</span>
+        <span>
+          {g.base}
+          {g.per_hit !== g.base && ` → ${g.per_hit}`}
+          {dmgMods.length > 0 && (
+            <span className={`explain-mod ${g.toughness < 0 ? "down" : "up"}`}> ({dmgMods.join(", ")})</span>
+          )}
+        </span>
+      </div>
+      <div className="explain-row">
+        <span className="k">Outcome</span>
+        <span>
+          {Math.round(x.hit_odds * 100)}% hit · ~{x.expected_clicks.toFixed(1)} clk
+        </span>
+      </div>
+    </div>
+  );
 }
 
 export default function ActionPanel({
   view,
   selectedFig,
   candidates,
+  formations,
   armed,
+  explain,
+  pendingMove,
   busy,
   onArm,
   onConfirm,
   onCancel,
+  onConfirmMove,
+  onCancelMove,
 }: Props) {
   const isHumanTurn = view.meta.active_player === "human" && !view.meta.ended;
 
-  let hint: string | null = null;
-  if (view.meta.ended) hint = `Game over — winner: ${view.meta.winner ?? "draw"}.`;
-  else if (!isHumanTurn) hint = "Opponent's turn.";
-  else if (!selectedFig) hint = "Select one of your figures to act.";
-  else if (selectedFig.owner !== "human") hint = `${selectedFig.short_name} is an opponent (read-only).`;
-  else if (!selectedFig.can_act) hint = `${selectedFig.short_name} has no action left this turn.`;
+  if (view.meta.ended) {
+    return (
+      <div className="action-panel">
+        <div className="action-head"><span>Actions</span></div>
+        <div className="empty">Game over — winner: {view.meta.winner ?? "draw"}.</div>
+      </div>
+    );
+  }
+  if (!isHumanTurn) {
+    return (
+      <div className="action-panel">
+        <div className="action-head"><span>Actions</span></div>
+        <div className="empty">Opponent's turn.</div>
+      </div>
+    );
+  }
 
-  const groups = new Map<Group, Candidate[]>();
-  if (!hint) {
-    for (const c of candidates) {
-      const g = groupOf(c.kind);
-      if (!groups.has(g)) groups.set(g, []);
-      groups.get(g)!.push(c);
+  const nameOf = (uid: number | null) =>
+    uid == null ? "" : view.figures.find((f) => f.uid === uid)?.short_name ?? `#${uid}`;
+
+  // Group the selected figure's attack candidates by target for the variant chooser.
+  const attacks = candidates.filter((c) => ATTACK_KINDS.has(c.kind));
+  const supports = candidates.filter((c) => ["heal", "regenerate", "necromancy", "levitate"].includes(c.kind));
+  const moves = candidates.filter((c) => c.kind === "move");
+  const passes = candidates.filter((c) => c.kind === "pass");
+  const byTarget = new Map<number, Candidate[]>();
+  const areaAttacks: Candidate[] = [];
+  for (const c of attacks) {
+    const t = targetUid(c);
+    if (t == null) areaAttacks.push(c);
+    else {
+      if (!byTarget.has(t)) byTarget.set(t, []);
+      byTarget.get(t)!.push(c);
     }
   }
+
+  const armedIsAttack = armed != null && ATTACK_KINDS.has(armed.kind);
 
   return (
     <div className="action-panel">
       <div className="action-head">
         <span>Actions</span>
-        {selectedFig && !hint && (
-          <span className="fig-sub">{selectedFig.short_name}</span>
-        )}
+        {selectedFig && <span className="fig-sub">{selectedFig.short_name}</span>}
       </div>
 
-      {hint && <div className="empty">{hint}</div>}
-
-      {!hint && armed && (
+      {/* Pending free move: place -> aim -> confirm */}
+      {pendingMove && (
         <div className="armed">
-          <div className="armed-title">{armed.label}</div>
-          {annLine(armed) && <div className="armed-stats">{annLine(armed)}</div>}
+          <div className="armed-title">
+            Move to ({pendingMove.dest[0].toFixed(1)}, {pendingMove.dest[1].toFixed(1)})
+          </div>
+          <div className="armed-stats">Drag the handle on the board to aim, then confirm.</div>
           <div className="armed-btns">
-            <button className="btn primary" onClick={onConfirm} disabled={busy}>
-              Confirm
-            </button>
-            <button className="btn" onClick={onCancel} disabled={busy}>
-              Cancel
-            </button>
+            <button className="btn primary" onClick={onConfirmMove} disabled={busy}>Confirm</button>
+            <button className="btn" onClick={onCancelMove} disabled={busy}>Cancel</button>
           </div>
         </div>
       )}
 
-      {!hint && !armed && (
-        <div className="action-groups">
-          {candidates.length === 0 && (
-            <div className="empty">No legal actions (drag on the board to move).</div>
-          )}
-          {GROUP_ORDER.map((g) => {
-            const list = groups.get(g);
-            if (!list || list.length === 0) return null;
-            return (
-              <div className="action-group" key={g}>
-                <div className="action-group-label">{g}</div>
-                {list.map((c, i) => (
-                  <button
-                    className="action-btn"
-                    key={`${c.kind}-${i}`}
-                    onClick={() => onArm(c)}
-                    disabled={busy}
-                    title={c.label}
-                  >
-                    <span className="action-label">{c.label}</span>
-                    {annLine(c) && <span className="action-stats">{annLine(c)}</span>}
-                  </button>
-                ))}
-              </div>
-            );
-          })}
+      {/* Armed candidate (attack / support / etc.) */}
+      {!pendingMove && armed && (
+        <div className="armed">
+          <div className="armed-title">{armed.label}</div>
+          {armedIsAttack && explain ? <Breakdown x={explain} /> : annLine(armed) && <div className="armed-stats">{annLine(armed)}</div>}
+          <div className="armed-btns">
+            <button className="btn primary" onClick={onConfirm} disabled={busy}>Confirm</button>
+            <button className="btn" onClick={onCancel} disabled={busy}>Cancel</button>
+          </div>
         </div>
       )}
 
-      {!hint && (
-        <div className="action-foot">
-          {view.meta.actions_remaining} action
-          {view.meta.actions_remaining === 1 ? "" : "s"} left
+      {/* Candidate menu */}
+      {!pendingMove && !armed && (
+        <div className="action-groups">
+          {!selectedFig && formations.length === 0 && (
+            <div className="empty">Select one of your figures, or drag it on the board to move.</div>
+          )}
+
+          {selectedFig && selectedFig.owner === "human" && !selectedFig.can_act && (
+            <div className="empty">{selectedFig.short_name} has no action left.</div>
+          )}
+
+          {(byTarget.size > 0 || areaAttacks.length > 0) && (
+            <div className="action-group">
+              <div className="action-group-label">Attack</div>
+              {[...byTarget.entries()].map(([t, variants]) => (
+                <div className="target-group" key={t}>
+                  <span className="target-name">{nameOf(t)}</span>
+                  <div className="variant-row">
+                    {variants.map((c, i) => (
+                      <button className="variant-btn" key={i} onClick={() => onArm(c)} disabled={busy} title={c.label}>
+                        {variantName(c.kind)} <span className="vstat">{annLine(c)}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+              {areaAttacks.map((c, i) => (
+                <button className="action-btn" key={`area-${i}`} onClick={() => onArm(c)} disabled={busy} title={c.label}>
+                  <span className="action-label">{c.label}</span>
+                  <span className="action-stats">{annLine(c)}</span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {supports.length > 0 && (
+            <div className="action-group">
+              <div className="action-group-label">Support</div>
+              {supports.map((c, i) => (
+                <button className="action-btn" key={i} onClick={() => onArm(c)} disabled={busy} title={c.label}>
+                  <span className="action-label">{c.label}</span>
+                  <span className="action-stats">{annLine(c)}</span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {moves.length > 0 && (
+            <div className="action-group">
+              <div className="action-group-label">Move</div>
+              {moves.map((c, i) => (
+                <button className="action-btn" key={i} onClick={() => onArm(c)} disabled={busy} title={c.label}>
+                  <span className="action-label">{c.label}</span>
+                  <span className="action-stats">{annLine(c)}</span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {formations.length > 0 && (
+            <div className="action-group">
+              <div className="action-group-label">Formations</div>
+              {formations.map((c, i) => (
+                <button className="action-btn" key={i} onClick={() => onArm(c)} disabled={busy} title={c.label}>
+                  <span className="action-label">{c.label}</span>
+                  <span className="action-stats">{annLine(c)}</span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {passes.length > 0 && (
+            <div className="action-group">
+              <div className="action-group-label">Turn</div>
+              {passes.map((c, i) => (
+                <button className="action-btn" key={i} onClick={() => onArm(c)} disabled={busy} title={c.label}>
+                  <span className="action-label">{c.label}</span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       )}
+
+      <div className="action-foot">
+        {view.meta.actions_remaining} action{view.meta.actions_remaining === 1 ? "" : "s"} left
+      </div>
     </div>
   );
 }

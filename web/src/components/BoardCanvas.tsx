@@ -8,6 +8,11 @@ interface MoveGhost {
   breakAway: boolean;
 }
 
+interface PendingMove {
+  dest: [number, number];
+  facing: number;
+}
+
 interface Props {
   view: GameView;
   selectedUid: number | null;
@@ -16,10 +21,15 @@ interface Props {
   activeUid: number | null;
   // Figures currently targeted by an armed action — highlighted as reticles.
   armedTargets: number[];
+  // Friendly formation members of an armed formation — highlighted.
+  armedMembers: number[];
   moveGhost: MoveGhost | null;
   onMoveDrag: (dest: [number, number]) => void;
   onMoveDrop: (dest: [number, number]) => void;
   onMoveCancel: () => void;
+  // A placed-but-uncommitted move whose facing is being aimed via the handle.
+  pendingMove: PendingMove | null;
+  onFaceDrag: (facing: number) => void;
 }
 
 interface Transform {
@@ -175,10 +185,13 @@ export default function BoardCanvas({
   onSelect,
   activeUid,
   armedTargets,
+  armedMembers,
   moveGhost,
   onMoveDrag,
   onMoveDrop,
   onMoveCancel,
+  pendingMove,
+  onFaceDrag,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -186,6 +199,7 @@ export default function BoardCanvas({
   const [hoverUid, setHoverUid] = useState<number | null>(null);
   const transformRef = useRef<Transform | null>(null);
   const dragRef = useRef<{ moved: boolean } | null>(null);
+  const faceRef = useRef<boolean>(false);
 
   useEffect(() => {
     const wrap = wrapRef.current;
@@ -312,13 +326,47 @@ export default function BoardCanvas({
       ctx.restore();
     }
 
-    // Armed-action target reticles.
+    // Pending move: placed ghost with a draggable facing handle (aim, then confirm).
+    if (pendingMove && active) {
+      const [gx, gy] = worldToScreen(t, pendingMove.dest[0], pendingMove.dest[1]);
+      const r = Math.max(6, active.base_radius * t.scale);
+      const arc = toRad(active.arc_deg);
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(gx, gy);
+      ctx.arc(gx, gy, r * 2.4, pendingMove.facing - arc, pendingMove.facing + arc, false);
+      ctx.closePath();
+      ctx.fillStyle = "rgba(124,156,255,0.18)";
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(gx, gy, r, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(124,156,255,0.5)";
+      ctx.fill();
+      ctx.strokeStyle = COLORS.select;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      const hr = r * 2.4;
+      const hx = gx + Math.cos(pendingMove.facing) * hr;
+      const hy = gy + Math.sin(pendingMove.facing) * hr;
+      ctx.beginPath();
+      ctx.moveTo(gx, gy);
+      ctx.lineTo(hx, hy);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(hx, hy, 6, 0, Math.PI * 2);
+      ctx.fillStyle = COLORS.select;
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // Armed-action highlights: red reticle on targets, blue ring on formation members.
     const armedSet = new Set(armedTargets);
+    const memberSet = new Set(armedMembers);
     for (const f of live) {
       drawFigure(ctx, t, f, f.uid === selectedUid, f.uid === hoverUid, false);
+      const [cx, cy] = worldToScreen(t, f.pos[0], f.pos[1]);
+      const rr = Math.max(6, f.base_radius * t.scale) + 7;
       if (armedSet.has(f.uid)) {
-        const [cx, cy] = worldToScreen(t, f.pos[0], f.pos[1]);
-        const rr = Math.max(6, f.base_radius * t.scale) + 7;
         ctx.save();
         ctx.beginPath();
         ctx.arc(cx, cy, rr, 0, Math.PI * 2);
@@ -327,8 +375,18 @@ export default function BoardCanvas({
         ctx.stroke();
         ctx.restore();
       }
+      if (memberSet.has(f.uid)) {
+        ctx.save();
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.arc(cx, cy, rr, 0, Math.PI * 2);
+        ctx.strokeStyle = COLORS.select;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.restore();
+      }
     }
-  }, [view, size, selectedUid, hoverUid, activeUid, armedTargets, moveGhost]);
+  }, [view, size, selectedUid, hoverUid, activeUid, armedTargets, armedMembers, moveGhost, pendingMove]);
 
   function hitTest(clientX: number, clientY: number): number | null {
     const canvas = canvasRef.current;
@@ -358,7 +416,36 @@ export default function BoardCanvas({
     ];
   }
 
+  function nearHandle(clientX: number, clientY: number): boolean {
+    const t = transformRef.current;
+    const canvas = canvasRef.current;
+    if (!t || !canvas || !pendingMove) return false;
+    const active = view.figures.find((f) => f.uid === activeUid);
+    if (!active) return false;
+    const [gx, gy] = worldToScreen(t, pendingMove.dest[0], pendingMove.dest[1]);
+    const hr = Math.max(6, active.base_radius * t.scale) * 2.4;
+    const hx = gx + Math.cos(pendingMove.facing) * hr;
+    const hy = gy + Math.sin(pendingMove.facing) * hr;
+    const rect = canvas.getBoundingClientRect();
+    return Math.hypot(clientX - rect.left - hx, clientY - rect.top - hy) <= 13;
+  }
+
+  function facingFromCursor(clientX: number, clientY: number): number {
+    const t = transformRef.current!;
+    const canvas = canvasRef.current!;
+    const rect = canvas.getBoundingClientRect();
+    const [wx, wy] = screenToWorld(t, clientX - rect.left, clientY - rect.top);
+    return Math.atan2(wy - pendingMove!.dest[1], wx - pendingMove!.dest[0]);
+  }
+
   function onPointerDown(e: RPE) {
+    if (pendingMove) {
+      if (nearHandle(e.clientX, e.clientY)) {
+        faceRef.current = true;
+        (e.target as Element).setPointerCapture?.(e.pointerId);
+      }
+      return; // a move is placed — only the facing handle is interactive
+    }
     const hit = hitTest(e.clientX, e.clientY);
     if (hit != null && hit === activeUid) {
       dragRef.current = { moved: false };
@@ -367,6 +454,11 @@ export default function BoardCanvas({
   }
 
   function onPointerMove(e: RPE) {
+    if (faceRef.current) {
+      onFaceDrag(facingFromCursor(e.clientX, e.clientY));
+      return;
+    }
+    if (pendingMove) return;
     if (dragRef.current) {
       dragRef.current.moved = true;
       onMoveDrag(clampedWorld(e.clientX, e.clientY));
@@ -376,6 +468,11 @@ export default function BoardCanvas({
   }
 
   function onPointerUp(e: RPE) {
+    if (faceRef.current) {
+      faceRef.current = false;
+      return;
+    }
+    if (pendingMove) return;
     if (dragRef.current) {
       const moved = dragRef.current.moved;
       dragRef.current = null;
@@ -394,7 +491,9 @@ export default function BoardCanvas({
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerLeave={() => {
-          if (dragRef.current) {
+          if (faceRef.current) {
+            faceRef.current = false;
+          } else if (dragRef.current) {
             dragRef.current = null;
             onMoveCancel();
           } else {

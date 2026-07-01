@@ -638,3 +638,82 @@ button {
   border-top: 1px solid var(--border-soft);
   padding-top: 5px;
 }
+
+/* optional-ability toggle chips */
+.chip.toggle {
+  cursor: pointer;
+}
+.chip.toggle:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--panel-raised);
+}
+.chip.toggle.off {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+.chip.toggle:disabled {
+  cursor: default;
+}
+
+/* variant chooser (attacks grouped by target) */
+.target-group {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+.target-name {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.variant-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.variant-btn {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 7px;
+  font-size: 11px;
+  text-align: left;
+  color: var(--text);
+}
+.variant-btn:hover:not(:disabled) {
+  background: var(--panel-raised);
+}
+.variant-btn .vstat {
+  color: var(--text-dim);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* attack modifier breakdown */
+.explain {
+  border-top: 1px solid var(--border-soft);
+  margin-top: 4px;
+  padding-top: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.explain-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.explain-row .k {
+  color: var(--text-faint);
+}
+.explain-mod.up {
+  color: var(--bad);
+}
+.explain-mod.down {
+  color: var(--good);
+}

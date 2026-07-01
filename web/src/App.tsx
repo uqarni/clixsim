@@ -2,11 +2,15 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   applyIntent,
   endTurn,
+  explainAttack,
   getCandidates,
+  getFormationCandidates,
   getState,
   opponentTurn,
+  toggleAbility,
   validateMove,
   type ApplyResult,
+  type AttackExplain,
   type Candidate,
   type FigureView,
   type GameEvent,
@@ -26,11 +30,28 @@ interface MoveGhost {
   ok: boolean;
   breakAway: boolean;
 }
+interface PendingMove {
+  dest: [number, number];
+  facing: number;
+}
 
 const MAX_LOG = 200;
+const CLOSE_KINDS = ["close", "weapon_master"];
+const RANGED_KINDS = ["ranged", "magic_blast", "flame_lightning", "shockwave"];
 
 function facingToward(from: [number, number], to: [number, number]): number {
   return Math.atan2(to[1] - from[1], to[0] - from[0]);
+}
+function annTarget(c: Candidate): number | null {
+  const a = c.annotation;
+  if (typeof a.target === "number") return a.target;
+  if (Array.isArray(a.targets) && typeof a.targets[0] === "number") return a.targets[0];
+  if (typeof a.toward === "number") return a.toward;
+  return null;
+}
+function intentField(c: Candidate, key: string): number | null {
+  const v = (c.intent as Record<string, unknown> | null)?.[key];
+  return typeof v === "number" ? v : null;
 }
 
 export default function App() {
@@ -38,8 +59,11 @@ export default function App() {
   const [selectedUid, setSelectedUid] = useState<number | null>(null);
   const [events, setEvents] = useState<GameEvent[]>([]);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
+  const [formations, setFormations] = useState<Candidate[]>([]);
   const [armed, setArmed] = useState<Candidate | null>(null);
+  const [explain, setExplain] = useState<AttackExplain | null>(null);
   const [moveGhost, setMoveGhost] = useState<MoveGhost | null>(null);
+  const [pendingMove, setPendingMove] = useState<PendingMove | null>(null);
   const [busy, setBusy] = useState(false);
 
   const log = useCallback((items: GameEvent[]) => {
@@ -73,14 +97,16 @@ export default function App() {
     selectedFig && selectedFig.owner === "human" && selectedFig.can_act && isHumanTurn
       ? selectedFig.uid
       : null;
+  const canToggle = !!selectedFig && selectedFig.owner === "human" && isHumanTurn;
 
-  // Clear any armed action / ghost when the selection changes.
+  // Reset transient interaction state when the selection changes.
   useEffect(() => {
     setArmed(null);
     setMoveGhost(null);
+    setPendingMove(null);
   }, [selectedUid]);
 
-  // Refetch the selected figure's legal candidates whenever it can act.
+  // Selected figure's legal candidates (when it can act).
   useEffect(() => {
     if (!view || selectedUid == null) {
       setCandidates([]);
@@ -102,43 +128,111 @@ export default function App() {
     };
   }, [view, selectedUid]);
 
+  // Turn-level formation candidates.
+  useEffect(() => {
+    if (!view || view.meta.active_player !== "human" || view.meta.ended) {
+      setFormations([]);
+      return;
+    }
+    let cancelled = false;
+    getFormationCandidates()
+      .then((cs) => !cancelled && setFormations(cs))
+      .catch(() => !cancelled && setFormations([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [view]);
+
+  // Fetch the modifier breakdown when an attack is armed.
+  useEffect(() => {
+    if (!armed || !view) {
+      setExplain(null);
+      return;
+    }
+    const isClose = CLOSE_KINDS.includes(armed.kind);
+    const isRanged = RANGED_KINDS.includes(armed.kind);
+    const t = annTarget(armed);
+    const attacker = intentField(armed, "attacker_uid") ?? selectedUid;
+    if (t == null || attacker == null || (!isClose && !isRanged)) {
+      setExplain(null);
+      return;
+    }
+    let cancelled = false;
+    explainAttack(attacker, t, isClose ? "close" : "ranged", armed.annotation.rear === true)
+      .then((x) => !cancelled && setExplain(x))
+      .catch(() => !cancelled && setExplain(null));
+    return () => {
+      cancelled = true;
+    };
+  }, [armed, view, selectedUid]);
+
   const armedTargets = useMemo<number[]>(() => {
     if (!armed) return [];
     const a = armed.annotation;
-    if (Array.isArray(a.targets)) return a.targets.filter((x): x is number => typeof x === "number");
     if (typeof a.target === "number") return [a.target];
+    if (Array.isArray(a.targets)) return a.targets.filter((x): x is number => typeof x === "number");
     if (typeof a.toward === "number") return [a.toward];
     return [];
   }, [armed]);
 
+  const armedMembers = useMemo<number[]>(() => {
+    const m = armed?.annotation.members;
+    return Array.isArray(m) ? m.filter((x): x is number => typeof x === "number") : [];
+  }, [armed]);
+
   const handleApply = useCallback(
     (res: ApplyResult) => {
+      // Prefer the granular formatted events; fall back to the summary only when
+      // an OK result produced no events (avoids double-logging each action).
       const out: GameEvent[] = res.events.slice();
-      if (res.summary) out.push({ type: "summary", summary: res.summary });
+      if (res.ok && out.length === 0 && res.summary) out.push({ type: "summary", summary: res.summary });
       if (!res.ok) out.push({ type: "rejected", summary: `Rejected: ${res.reason ?? "illegal"}${res.detail ? ` — ${res.detail}` : ""}` });
       log(out);
       if (res.ok) {
         setView(res.view);
         setArmed(null);
         setMoveGhost(null);
+        setPendingMove(null);
       }
     },
     [log],
   );
 
-  const confirmArmed = useCallback(async () => {
-    if (!armed || busy) return;
-    setBusy(true);
-    try {
-      handleApply(await applyIntent(armed.intent));
-    } catch (err) {
-      log([{ type: "error", summary: `Action failed: ${String(err)}` }]);
-    } finally {
-      setBusy(false);
-    }
-  }, [armed, busy, handleApply, log]);
+  const runIntent = useCallback(
+    async (intent: unknown) => {
+      if (busy) return;
+      setBusy(true);
+      try {
+        handleApply(await applyIntent(intent));
+      } catch (err) {
+        log([{ type: "error", summary: `Action failed: ${String(err)}` }]);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [busy, handleApply, log],
+  );
 
-  // --- free-placement move (board drag) ---
+  const confirmArmed = useCallback(() => {
+    if (armed) runIntent(armed.intent);
+  }, [armed, runIntent]);
+
+  const onToggle = useCallback(
+    async (abilityId: number, off: boolean) => {
+      if (!selectedFig || busy) return;
+      setBusy(true);
+      try {
+        handleApply(await toggleAbility(selectedFig.uid, abilityId, off));
+      } catch (err) {
+        log([{ type: "error", summary: `Toggle failed: ${String(err)}` }]);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [selectedFig, busy, handleApply, log],
+  );
+
+  // --- free-placement move (drag to place, aim via handle, confirm) ---
   const nearestEnemy = useCallback(
     (from: [number, number], owner: string): FigureView | null => {
       if (!view) return null;
@@ -160,7 +254,6 @@ export default function App() {
   const ghostFor = useCallback(
     (fig: FigureView, dest: [number, number]): MoveGhost => {
       const dist = Math.hypot(dest[0] - fig.pos[0], dest[1] - fig.pos[1]);
-      const moving = dist > 1e-6;
       const enemy = nearestEnemy(dest, fig.owner);
       const facing = enemy ? facingToward(dest, [enemy.pos[0], enemy.pos[1]]) : (fig.facing_deg * Math.PI) / 180;
       const inEnemyContact =
@@ -169,7 +262,7 @@ export default function App() {
           const o = view.figures.find((f) => f.uid === uid);
           return o && o.owner !== fig.owner;
         });
-      return { dest, facing, ok: dist <= fig.speed + 1e-6, breakAway: moving && inEnemyContact };
+      return { dest, facing, ok: dist <= fig.speed + 1e-6, breakAway: dist > 1e-6 && inEnemyContact };
     },
     [nearestEnemy, view],
   );
@@ -177,49 +270,53 @@ export default function App() {
   const onMoveDrag = useCallback(
     (dest: [number, number]) => {
       const fig = view?.figures.find((f) => f.uid === activeUid);
-      if (!fig) return;
-      setMoveGhost(ghostFor(fig, dest));
+      if (fig) setMoveGhost(ghostFor(fig, dest));
     },
     [view, activeUid, ghostFor],
   );
 
   const onMoveDrop = useCallback(
-    async (dest: [number, number]) => {
+    (dest: [number, number]) => {
       const fig = view?.figures.find((f) => f.uid === activeUid);
-      if (!fig || busy) {
-        setMoveGhost(null);
-        return;
-      }
-      const g = ghostFor(fig, dest);
       setMoveGhost(null);
+      if (!fig) return;
+      const g = ghostFor(fig, dest);
       if (!g.ok) {
         log([{ type: "rejected", summary: `Too far — beyond ${fig.speed}" speed.` }]);
         return;
       }
-      setBusy(true);
-      try {
-        const check = await validateMove(fig.uid, dest, g.facing);
-        if (!check.ok) {
-          log([{ type: "rejected", summary: `Rejected: ${check.reason ?? "illegal move"}${check.detail ? ` — ${check.detail}` : ""}` }]);
-          return;
-        }
-        handleApply(
-          await applyIntent({ kind: "move", figure_uid: fig.uid, dest, facing: g.facing, free: false }),
-        );
-      } catch (err) {
-        log([{ type: "error", summary: `Move failed: ${String(err)}` }]);
-      } finally {
-        setBusy(false);
-      }
+      setPendingMove({ dest, facing: g.facing }); // place; aim via the handle, then confirm
     },
-    [view, activeUid, busy, ghostFor, handleApply, log],
+    [view, activeUid, ghostFor, log],
   );
+
+  const confirmMove = useCallback(async () => {
+    const fig = view?.figures.find((f) => f.uid === activeUid);
+    if (!fig || !pendingMove || busy) return;
+    setBusy(true);
+    try {
+      const check = await validateMove(fig.uid, pendingMove.dest, pendingMove.facing);
+      if (!check.ok) {
+        log([{ type: "rejected", summary: `Rejected: ${check.reason ?? "illegal move"}${check.detail ? ` — ${check.detail}` : ""}` }]);
+        setPendingMove(null);
+        return;
+      }
+      handleApply(
+        await applyIntent({ kind: "move", figure_uid: fig.uid, dest: pendingMove.dest, facing: pendingMove.facing, free: false }),
+      );
+    } catch (err) {
+      log([{ type: "error", summary: `Move failed: ${String(err)}` }]);
+    } finally {
+      setBusy(false);
+    }
+  }, [view, activeUid, pendingMove, busy, handleApply, log]);
 
   const handleEndTurn = useCallback(async () => {
     if (busy || !view || view.meta.ended) return;
     setBusy(true);
     setArmed(null);
     setMoveGhost(null);
+    setPendingMove(null);
     setSelectedUid(null);
     try {
       let v = await endTurn();
@@ -235,8 +332,7 @@ export default function App() {
           .map((s) => ({ type: "opponent", summary: s }));
         log(lines.length ? lines : [{ type: "opponent", summary: "Opponent passed." }]);
       }
-      if (!v.meta.ended) log([{ type: "turn", summary: "Your turn." }]);
-      else log([{ type: "turn", summary: `Game over — winner: ${v.meta.winner ?? "draw"}.` }]);
+      log([{ type: "turn", summary: v.meta.ended ? `Game over — winner: ${v.meta.winner ?? "draw"}.` : "Your turn." }]);
     } catch (err) {
       log([{ type: "error", summary: `End turn failed: ${String(err)}` }]);
     } finally {
@@ -261,7 +357,7 @@ export default function App() {
       <TurnHud view={view} onEndTurn={handleEndTurn} />
       <div className="zones">
         <ForceRail figures={view.figures} selectedUid={selectedUid} onSelect={setSelectedUid} />
-        <DialInspector fig={selectedFig} />
+        <DialInspector fig={selectedFig} canToggle={canToggle} onToggle={onToggle} />
         <div className="zone board-zone">
           <div className="zone-head">
             <span>Board</span>
@@ -276,20 +372,28 @@ export default function App() {
               onSelect={setSelectedUid}
               activeUid={activeUid}
               armedTargets={armedTargets}
+              armedMembers={armedMembers}
               moveGhost={moveGhost}
               onMoveDrag={onMoveDrag}
               onMoveDrop={onMoveDrop}
               onMoveCancel={() => setMoveGhost(null)}
+              pendingMove={pendingMove}
+              onFaceDrag={(facing) => setPendingMove((pm) => (pm ? { ...pm, facing } : pm))}
             />
             <ActionPanel
               view={view}
               selectedFig={selectedFig}
               candidates={candidates}
+              formations={formations}
               armed={armed}
+              explain={explain}
+              pendingMove={pendingMove}
               busy={busy}
               onArm={setArmed}
               onConfirm={confirmArmed}
               onCancel={() => setArmed(null)}
+              onConfirmMove={confirmMove}
+              onCancelMove={() => setPendingMove(null)}
             />
           </div>
         </div>
