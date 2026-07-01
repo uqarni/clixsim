@@ -1,7 +1,8 @@
-"""Game setup: instantiate a GameState + Engine from two armies (Phase 3 lite).
+"""Game setup: instantiate a GameState + Engine from two armies (Phase 3).
 
-v1 uses no terrain. Figures deploy in a 3"-deep band along each owner's edge
-(P3-R5), spread along the board width, facing the centre.
+Figures deploy in a 3"-deep band along each owner's edge (P3-R5), spread along the
+board width, facing the centre. With ``with_terrain`` the game opens in a terrain
+setup phase (players alternate placing pieces) before the first battle turn.
 """
 
 from __future__ import annotations
@@ -45,6 +46,8 @@ def build_game(
     seed: int = 0,
     board_size: float = 36.0,
     db: FigureDB | None = None,
+    with_terrain: bool = False,
+    terrain_per_player: int = 3,
 ) -> Engine:
     db = db or load_db()
     board = Board(board_size, board_size)
@@ -81,6 +84,14 @@ def build_game(
     state.active_player = first
     engine.log.emit("setup", first_player=first, build_total=build_total,
                     board=[board.width, board.height])
-    engine._begin_player_turn(first)
-    engine.log.emit("begin_turn", player=first, turn=1)
+    if with_terrain and terrain_per_player > 0:
+        # Setup phase: the initiative winner places terrain first, then players
+        # alternate. The first battle turn begins only once placement completes.
+        state.phase = "terrain"
+        state.terrain_budget = {"human": terrain_per_player, "llm": terrain_per_player}
+        state.terrain_turn = first
+        engine.log.emit("terrain_setup", first_placer=first, per_player=terrain_per_player)
+    else:
+        engine._begin_player_turn(first)
+        engine.log.emit("begin_turn", player=first, turn=1)
     return engine

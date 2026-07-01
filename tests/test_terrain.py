@@ -8,7 +8,13 @@ from clixengine.geometry import (
     rotate_polygon,
     segment_crosses_polygon,
 )
-from clixengine.terrain import TerrainPiece, elevation_at
+from clixengine.terrain import (
+    TerrainPiece,
+    elevation_at,
+    instantiate,
+    placement_reason,
+    template,
+)
 
 SQUARE = (Vec(2, 2), Vec(6, 2), Vec(6, 6), Vec(2, 6))
 
@@ -135,3 +141,59 @@ def test_height_advantage_vs_elevated_target(db):
     assert x["defense"]["effective"] == base + x["defense"]["terrain"]
     # height advantage applies to close combat too (target elevated, attacker not).
     assert e.terrain_defense_mod(e.state.figure(0), e.state.figure(1), "close") == 1
+
+
+# --- terrain library + placement ------------------------------------------
+def test_library_instantiate_and_placement_reason():
+    boulder = template("boulder")
+    assert boulder is not None and boulder.blocks_move_kind()
+    p = instantiate(boulder, Vec(18, 18), 0.0, 0, "human")
+    assert p.kind == "blocking" and p.contains(Vec(18, 18))
+    # legal in the open midfield of a 36x36 board
+    assert placement_reason(p.polygon, [], 36, 36) is None
+    # off the board / in a starting band / too close to an existing piece
+    edge = instantiate(boulder, Vec(0.5, 18), 0.0, 1, "human")
+    assert placement_reason(edge.polygon, [], 36, 36) == "off_board"
+    start = instantiate(boulder, Vec(18, 2), 0.0, 2, "human")
+    assert placement_reason(start.polygon, [], 36, 36) == "in_starting_area"
+    near = instantiate(boulder, Vec(19.5, 18), 0.0, 3, "human")
+    assert placement_reason(near.polygon, [p], 36, 36) == "too_close"
+
+
+def _terrain_engine(db):
+    e = build_engine(db, [
+        ("human", "Werebear", (18, 2), math.pi / 2, 0),
+        ("llm", "Werebear", (18, 34), -math.pi / 2, 0),
+    ], active="human")
+    e.state.phase = "terrain"
+    e.state.first_player = "human"
+    e.state.terrain_budget = {"human": 1, "llm": 1}
+    e.state.terrain_turn = "human"
+    return e
+
+
+def test_place_terrain_alternates_then_starts_battle(db):
+    e = _terrain_engine(db)
+    # Not the llm's turn yet.
+    assert e.place_terrain("llm", "boulder", (10, 18)).reason == "not_your_turn"
+    # Human places -> turn passes to the llm, human's budget spent.
+    r = e.place_terrain("human", "boulder", (10, 18))
+    assert r.ok and len(e.state.terrain) == 1
+    assert e.state.terrain_turn == "llm" and e.state.terrain_budget["human"] == 0
+    assert e.state.phase == "terrain"  # still placing
+    # LLM places the last piece -> battle begins, first player is to act.
+    r2 = e.place_terrain("llm", "forest", (26, 18))
+    assert r2.ok and len(e.state.terrain) == 2
+    assert e.state.phase == "battle" and e.state.active_player == "human"
+    # No more placing once the battle is on.
+    assert e.place_terrain("human", "pond", (18, 18)).reason == "not_placing"
+
+
+def test_terrain_placement_candidates_are_legal(db):
+    e = _terrain_engine(db)
+    cands = e.terrain_placement_candidates("human")
+    assert cands, "expected at least one candidate placement"
+    for c in cands:
+        tmpl = template(c["key"])
+        piece = instantiate(tmpl, Vec(*c["center"]), c["rotation"], 99, "human")
+        assert placement_reason(piece.polygon, e.state.terrain, 36, 36) is None

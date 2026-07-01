@@ -165,6 +165,97 @@ class Engine:
             mod += 1
         return mod
 
+    # ------------------------------------------------------------------ #
+    # Terrain placement (setup phase) — players alternate placing pieces
+    # ------------------------------------------------------------------ #
+    def _where_label(self, c: Vec) -> str:
+        """Human/AI-readable rough position for a candidate placement."""
+        w, h = self.state.board.width, self.state.board.height
+        col = "left" if c.x < w / 3 else "right" if c.x > 2 * w / 3 else "center"
+        if c.y < h / 3:
+            row = "near your side"
+        elif c.y > 2 * h / 3:
+            row = "near the enemy side"
+        else:
+            row = "midfield"
+        return f"{row}, {col}" if col != "center" else row
+
+    def terrain_placement_candidates(self, owner: str, max_n: int = 6) -> list[dict]:
+        """Propose a spread of LEGAL placements (one per library shape where it
+        fits) for an AI placer to choose among — the engine owns geometry, so the
+        placer only ever selects a pre-validated option."""
+        w, h = self.state.board.width, self.state.board.height
+        xs = [w * 0.22, w * 0.5, w * 0.78]
+        ys = [h * 0.42, h * 0.5, h * 0.58]
+        rots = [0.0, math.pi / 4, math.pi / 2]
+        placed = len(self.state.terrain)
+        out: list[dict] = []
+        for i, tmpl in enumerate(terr.TERRAIN_LIBRARY):
+            combos = [(x, y, r) for x in xs for y in ys for r in rots]
+            off = (i + placed) % len(combos)
+            combos = combos[off:] + combos[:off]  # rotate the scan start for variety
+            for x, y, r in combos:
+                center = Vec(x, y)
+                poly = tuple(
+                    v + center for v in terr.rotate_polygon(tmpl.polygon, Vec(0.0, 0.0), r)
+                )
+                if terr.placement_reason(poly, self.state.terrain, w, h) is None:
+                    out.append({
+                        "key": tmpl.key, "label": tmpl.label, "kind": tmpl.kind,
+                        "blurb": tmpl.blurb, "center": [round(x, 2), round(y, 2)],
+                        "rotation": round(r, 4), "where": self._where_label(center),
+                    })
+                    break
+            if len(out) >= max_n:
+                break
+        return out
+
+    def _advance_terrain_turn(self, just_placed: str) -> None:
+        """After ``just_placed`` places a piece, hand off (alternate; a player with
+        no budget left is skipped). When both are done, start the battle."""
+        budget = self.state.terrain_budget
+        other = self.state.other_player(just_placed)
+        if budget.get(other, 0) > 0:
+            self.state.terrain_turn = other
+        elif budget.get(just_placed, 0) > 0:
+            self.state.terrain_turn = just_placed
+        else:
+            self._begin_battle_after_terrain()
+
+    def _begin_battle_after_terrain(self) -> None:
+        """Placement complete: leave setup and start the first battle turn."""
+        self.state.phase = "battle"
+        self.log.emit("terrain_done", pieces=len(self.state.terrain))
+        self._begin_player_turn(self.state.first_player)
+        self.log.emit("begin_turn", player=self.state.first_player, turn=self.state.turn_number)
+
+    def place_terrain(
+        self, owner: str, key: str, center: tuple[float, float], rotation: float = 0.0,
+    ) -> Result | Rejection:
+        """Place one terrain piece for ``owner`` during the setup phase."""
+        if self.state.phase != "terrain":
+            return Rejection("not_placing", "terrain is not being placed right now")
+        if owner != self.state.terrain_turn:
+            return Rejection("not_your_turn", f"it is {self.state.terrain_turn}'s turn to place")
+        if self.state.terrain_budget.get(owner, 0) <= 0:
+            return Rejection("no_budget", f"{owner} has no terrain left to place")
+        tmpl = terr.template(key)
+        if tmpl is None:
+            return Rejection("no_such_terrain", str(key))
+        c = Vec(*center)
+        piece = terr.instantiate(tmpl, c, float(rotation), len(self.state.terrain), owner)
+        reason = terr.placement_reason(
+            piece.polygon, self.state.terrain, self.state.board.width, self.state.board.height
+        )
+        if reason is not None:
+            return Rejection(reason, f"cannot place {tmpl.label} there")
+        self.state.terrain.append(piece)
+        self.state.terrain_budget[owner] = self.state.terrain_budget.get(owner, 0) - 1
+        ev = self.log.emit("place_terrain", owner=owner, kind=key, id=piece.id,
+                           center=[round(c.x, 2), round(c.y, 2)], rotation=round(float(rotation), 4))
+        self._advance_terrain_turn(owner)
+        return Result("place_terrain", [ev], f"{owner} places {tmpl.label} ({self._where_label(c)})")
+
     def hit_odds(
         self,
         attacker_uid: int,

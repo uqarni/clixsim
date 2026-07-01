@@ -21,6 +21,9 @@ from .geometry import (
     Vec,
     circle_intersects_polygon,
     point_in_polygon,
+    polygon_polygon_distance,
+    rotate_point,
+    rotate_polygon,
     segment_crosses_polygon,
     swept_base_crosses_polygon,
 )
@@ -77,6 +80,132 @@ class TerrainPool:
 
     owner: str
     pieces: list[TerrainPiece] = field(default_factory=list)
+
+
+# --------------------------------------------------------------------------- #
+# Terrain library (curated shapes) + placement
+# --------------------------------------------------------------------------- #
+def _poly(pts: list[tuple[float, float]]) -> tuple[Vec, ...]:
+    return tuple(Vec(x, y) for x, y in pts)
+
+
+def _ngon(sides: int, r: float, squash: float = 1.0) -> tuple[Vec, ...]:
+    """A convex n-gon centred at the origin (used for organic blobs/rocks)."""
+    step = 2 * math.pi / sides
+    # start a little off-axis so shapes read as irregular, not clock-perfect
+    return tuple(
+        Vec(math.cos(step * i + 0.35) * r, math.sin(step * i + 0.35) * r * squash)
+        for i in range(sides)
+    )
+
+
+@dataclass(frozen=True)
+class TerrainTemplate:
+    """A placeable terrain shape: an origin-centred polygon plus its rule flags.
+    Placement bakes a translation + rotation into a concrete ``TerrainPiece``."""
+
+    key: str
+    label: str
+    kind: str  # "clear" | "hindering" | "blocking"
+    polygon: tuple[Vec, ...]
+    elevated: bool = False
+    water: str | None = None
+    low_wall: bool = False
+    abrupt: bool = False
+    access_points: tuple[Vec, ...] = ()  # origin-relative (abrupt elevated)
+    blurb: str = ""  # one-line palette/AI hint
+
+    def rule_summary(self) -> str:
+        if self.blurb:
+            return self.blurb
+        if self.blocks_move_kind():
+            return "impassable — blocks movement and line of fire"
+        return "passable"
+
+    def blocks_move_kind(self) -> bool:
+        return self.kind == "blocking" or self.water == "deep"
+
+
+# Six mechanically-distinct pieces (the palette the player chose):
+#   Boulder  — blocking (blocks move + LoF)
+#   Forest   — hindering (halves speed, +1 defense vs ranged crossing it)
+#   Pond     — shallow water (halves speed; no line-of-fire effect)
+#   Hill     — elevated clear (height advantage; blocks a ground shot crossing it)
+#   Low wall — thin hindering wall (+1 vs ranged; never halves speed)
+#   Plateau  — abrupt elevated (on/off only via access points)
+TERRAIN_LIBRARY: tuple[TerrainTemplate, ...] = (
+    TerrainTemplate(
+        "boulder", "Boulder", "blocking", _ngon(6, 1.7, 0.85),
+        blurb="Impassable rock — blocks movement and line of fire.",
+    ),
+    TerrainTemplate(
+        "forest", "Forest", "hindering", _ngon(8, 2.4, 0.9),
+        blurb="Woods — halve speed to move through; +1 defense to targets shot through it.",
+    ),
+    TerrainTemplate(
+        "pond", "Pond", "clear", _ngon(7, 2.3, 0.8), water="shallow",
+        blurb="Shallow water — halve speed to wade through; no effect on shooting.",
+    ),
+    TerrainTemplate(
+        "hill", "Hill", "clear", _ngon(7, 3.0, 0.9), elevated=True,
+        blurb="Elevated ground — height advantage (+1 defense) and a longer view.",
+    ),
+    TerrainTemplate(
+        "low_wall", "Low wall", "hindering", _poly(
+            [(-3.0, -0.3), (3.0, -0.3), (3.0, 0.3), (-3.0, 0.3)]
+        ), low_wall=True,
+        blurb="Low wall — +1 defense to targets behind it; never slows a figure leaving it.",
+    ),
+    TerrainTemplate(
+        "plateau", "Plateau", "clear", _poly(
+            [(-2.4, -2.4), (2.4, -2.4), (2.4, 2.4), (-2.4, 2.4)]
+        ), elevated=True, abrupt=True,
+        access_points=(Vec(0.0, -2.4), Vec(0.0, 2.4)),
+        blurb="Steep plateau — elevated, but climbed on/off only at its access points.",
+    ),
+)
+
+_LIBRARY_BY_KEY = {t.key: t for t in TERRAIN_LIBRARY}
+
+
+def template(key: str) -> TerrainTemplate | None:
+    return _LIBRARY_BY_KEY.get(key)
+
+
+def instantiate(
+    tmpl: TerrainTemplate, center: Vec, rotation: float, piece_id: int, owner: str
+) -> TerrainPiece:
+    """Bake ``tmpl`` at ``center`` rotated by ``rotation`` into a concrete piece."""
+    origin = Vec(0.0, 0.0)
+    poly = tuple(v + center for v in rotate_polygon(tmpl.polygon, origin, rotation))
+    aps = tuple(center + rotate_point(a, origin, rotation) for a in tmpl.access_points)
+    return TerrainPiece(
+        id=piece_id, kind=tmpl.kind, polygon=poly, elevated=tmpl.elevated,
+        water=tmpl.water, low_wall=tmpl.low_wall, abrupt=tmpl.abrupt,
+        access_points=aps, owner=owner,
+    )
+
+
+def placement_reason(
+    poly: tuple[Vec, ...], existing: list[TerrainPiece],
+    board_w: float, board_h: float,
+    edge_margin: float = 1.0, start_band: float = 3.0, min_gap: float = 2.0,
+) -> str | None:
+    """Why a candidate polygon may NOT be placed, or None if it's legal.
+
+    Rules (§Terrain setup, adapted): a piece must sit wholly on the board (with a
+    small edge margin), clear of BOTH players' starting bands (the 3"-deep deploy
+    zones), and at least ``min_gap`` inches from every already-placed piece. All
+    library shapes are convex, so vertex containment is exact."""
+    for v in poly:
+        if not (edge_margin <= v.x <= board_w - edge_margin):
+            return "off_board"
+        if not (start_band <= v.y <= board_h - start_band):
+            return "in_starting_area"
+    for t in existing:
+        if polygon_polygon_distance(poly, t.polygon) < min_gap - 1e-9:
+            return "too_close"
+    return None
 
 
 def elevation_at(pieces: list[TerrainPiece], p: Vec) -> int:
