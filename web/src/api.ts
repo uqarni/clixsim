@@ -246,14 +246,26 @@ export async function explainAttack(
 }
 
 // --- new-game construction stream (Server-Sent Events) ---------------------
+export interface FigureStats {
+  speed: number;
+  attack: number;
+  defense: number;
+  damage: number;
+  range: number;
+  targets: number;
+}
 export interface ConstructFigure {
   id: number;
   name: string;
   faction: string;
   points: number;
   role: string;
-  rank: string;
+  rank: string; // Weak | Standard | Tough | Unique
+  rarity?: string;
+  unique?: boolean;
   abilities: string[];
+  stats?: FigureStats;
+  clicks?: number;
 }
 export type ConstructEvent =
   | { type: "start"; mode: string; budget: number }

@@ -2,6 +2,79 @@ import { useEffect, useMemo, useState } from "react";
 import { getRoster, getSealedPacks, type ConstructFigure } from "../api";
 import type { GameConfig } from "./NewGame";
 
+// Rank -> star tier (Weak * / Standard ** / Tough ***); Unique shown as a badge.
+const RANK_TIER: Record<string, number> = { Weak: 1, Standard: 2, Tough: 3 };
+
+function RankBadge({ rank }: { rank: string }) {
+  if (rank === "Unique") return <span className="cand-rank uniq" title="Unique">◆ U</span>;
+  const n = RANK_TIER[rank] ?? 0;
+  return (
+    <span className="cand-rank" title={rank}>
+      {"★".repeat(n)}
+      <span className="rank-dim">{"★".repeat(3 - n)}</span>
+    </span>
+  );
+}
+
+function StatLine({ f }: { f: ConstructFigure }) {
+  if (!f.stats) return null;
+  const s = f.stats;
+  return (
+    <div className="cand-stats">
+      <span title="Speed">S{s.speed}</span>
+      <span title="Attack">A{s.attack}</span>
+      <span title="Defense">D{s.defense}</span>
+      <span title="Damage">Dm{s.damage}</span>
+      {s.range > 0 && <span title="Range / targets" className="stat-range">R{s.range}{s.targets > 1 ? `×${s.targets}` : ""}</span>}
+      {f.clicks != null && <span title="Life (clicks)" className="stat-life">♥{f.clicks}</span>}
+    </div>
+  );
+}
+
+function ArmyComposition({ army }: { army: ConstructFigure[] }) {
+  const byFaction = new Map<string, number>();
+  let melee = 0;
+  let ranged = 0;
+  for (const f of army) {
+    byFaction.set(f.faction, (byFaction.get(f.faction) ?? 0) + 1);
+    if (f.role === "ranged") ranged++;
+    else melee++;
+  }
+  const factions = [...byFaction.entries()].sort((a, b) => b[1] - a[1]);
+  const maxF = Math.max(1, ...factions.map(([, n]) => n));
+  if (army.length === 0) return null;
+  return (
+    <div className="army-comp">
+      <div className="comp-block">
+        <div className="comp-label">Roles</div>
+        <div className="comp-split">
+          <div className="comp-seg melee" style={{ flex: melee || 0.0001 }} title={`${melee} melee`}>
+            {melee > 0 && `⚔ ${melee}`}
+          </div>
+          <div className="comp-seg ranged" style={{ flex: ranged || 0.0001 }} title={`${ranged} ranged`}>
+            {ranged > 0 && `➶ ${ranged}`}
+          </div>
+        </div>
+      </div>
+      <div className="comp-block">
+        <div className="comp-label">Factions</div>
+        {factions.map(([fac, n]) => (
+          <div className="comp-row" key={fac}>
+            <span className="comp-name" title={fac}>{fac}</span>
+            <span className="comp-bar-wrap">
+              <span className="comp-bar" style={{ width: `${(n / maxF) * 100}%` }} />
+            </span>
+            <span className="comp-n">{n}</span>
+          </div>
+        ))}
+      </div>
+      <div className="comp-foot">
+        {army.length} figure{army.length === 1 ? "" : "s"} · {byFaction.size} faction{byFaction.size === 1 ? "" : "s"}
+      </div>
+    </div>
+  );
+}
+
 export default function Draft({
   config,
   onConfirm,
@@ -62,6 +135,18 @@ export default function Draft({
         (q === "" || f.name.toLowerCase().includes(q.toLowerCase())),
     );
   }, [isSealed, pool, roster, faction, role, q]);
+
+  // Organize the candidate list into faction sections (sorted; figures priciest first).
+  const groups = useMemo(() => {
+    const m = new Map<string, ConstructFigure[]>();
+    for (const f of candidates) {
+      if (!m.has(f.faction)) m.set(f.faction, []);
+      m.get(f.faction)!.push(f);
+    }
+    return [...m.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([fac, figs]) => [fac, figs.slice().sort((x, y) => y.points - x.points)] as const);
+  }, [candidates]);
 
   const legal = army.length > 0 && spent <= budget;
   const pct = Math.min(100, Math.round((spent / budget) * 100));
@@ -149,33 +234,45 @@ export default function Draft({
 
         <div className="draft-2col">
           <div className="draft-candidates">
-            {candidates.map((f) => {
-              const left = isSealed ? poolCount(f.id) - armyCount(f.id) : null;
-              return (
-                <button
-                  className="cand-card"
-                  key={f.id}
-                  onClick={() => canAdd(f) && setArmy((a) => [...a, f])}
-                  disabled={!canAdd(f)}
-                  type="button"
-                  title={f.abilities.join(", ")}
-                >
-                  <div className="cand-top">
-                    <span className="cand-name">{f.name}</span>
-                    <span className="cand-pts">{f.points}</span>
-                  </div>
-                  <div className="cand-sub">
-                    {f.faction} · {f.role}
-                    {left != null && ` · ${left} left`}
-                  </div>
-                  {f.abilities.length > 0 && <div className="cand-abil">{f.abilities.join(" · ")}</div>}
-                </button>
-              );
-            })}
+            {groups.map(([fac, figs]) => (
+              <div className="cand-group" key={fac}>
+                <div className="cand-group-head">
+                  {fac} <span className="cand-group-n">{figs.length}</span>
+                </div>
+                <div className="cand-group-grid">
+                {figs.map((f) => {
+                  const left = isSealed ? poolCount(f.id) - armyCount(f.id) : null;
+                  return (
+                    <button
+                      className="cand-card"
+                      key={f.id}
+                      onClick={() => canAdd(f) && setArmy((a) => [...a, f])}
+                      disabled={!canAdd(f)}
+                      type="button"
+                      title={f.abilities.join(", ")}
+                    >
+                      <div className="cand-top">
+                        <span className="cand-name">{f.name}</span>
+                        <RankBadge rank={f.rank} />
+                        <span className="cand-pts">{f.points}</span>
+                      </div>
+                      <div className="cand-sub">
+                        {f.role}
+                        {left != null && ` · ${left} left`}
+                      </div>
+                      <StatLine f={f} />
+                      {f.abilities.length > 0 && <div className="cand-abil">{f.abilities.join(" · ")}</div>}
+                    </button>
+                  );
+                })}
+                </div>
+              </div>
+            ))}
           </div>
 
           <div className="draft-army">
             <div className="menu-section-label"><span className="dot human" /> Your army — {army.length} figs · {spent} pts</div>
+            <ArmyComposition army={army} />
             {army.length === 0 && <div className="empty">Click figures to add them.</div>}
             {army.map((f, i) => (
               <div className="army-row" key={i}>

@@ -36,14 +36,23 @@ def _top_abilities(db: FigureDB, f: FigureDef) -> list[str]:
 
 
 def _fig_brief(db: FigureDB, f: FigureDef) -> dict:
+    cs = f.dial[f.starting_click]
     return {
         "id": f.id,
         "name": f.short_name,
         "faction": f.faction,
         "points": f.points,
         "role": _role(f),
-        "rank": f.rank,
+        "rank": f.rank,          # Weak | Standard | Tough | Unique
+        "rarity": f.rarity,      # "1".."6"
+        "unique": f.is_unique,
         "abilities": _top_abilities(db, f),
+        # starting-click stats + printed range so the drafter can compare figures
+        "stats": {
+            "speed": cs.speed, "attack": cs.attack, "defense": cs.defense,
+            "damage": cs.damage, "range": f.range, "targets": f.targets,
+        },
+        "clicks": f.num_live_clicks,
     }
 
 
