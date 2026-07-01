@@ -86,3 +86,16 @@ def test_hint_formation_needs_three(db):
     ], active="human")
     hints = _hints(e, 0)
     assert any("3" in h and "same-faction" in h for h in hints), hints
+
+
+def test_hint_flight_blocks_movement_formation(db):
+    # Three touching Necropolis figures, but one flies (Order of Vladd): the hint
+    # explains the exclusion AND that cancelling the optional ability fixes it.
+    e = build_engine(db, [
+        ("human", "Seething Knight", (10, 10), math.pi / 2, 0),
+        ("human", "Seething Knight", (11.1, 10), math.pi / 2, 0),
+        ("human", "Order Of Vladd", (12.2, 10), math.pi / 2, 0),
+        ("llm", "Werebear", (20, 20), -math.pi / 2, 0),
+    ], active="human")
+    hints = _hints(e, 0)
+    assert any("Flight" in h and "Vladd" in h and "cancel" in h.lower() for h in hints), hints

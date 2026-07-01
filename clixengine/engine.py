@@ -503,13 +503,13 @@ class Engine:
                 out.append(t)
         return out
 
-    def _same_faction_cluster_size(self, figure: Figure) -> int:
-        """Size of the base-contact-connected group of same-faction friendlies
-        (incl. ``figure``) — used to explain when a pair is short of a formation."""
+    def _same_faction_cluster(self, figure: Figure) -> list[Figure]:
+        """The base-contact-connected group of same-faction friendlies (incl.
+        ``figure``) — used to explain why a group isn't a legal formation."""
         same = {f.uid: f for f in self.state.living(figure.owner)
                 if f.definition.faction == figure.definition.faction}
         if figure.uid not in same:
-            return 0
+            return []
         seen, stack = set(), [figure.uid]
         while stack:
             u = stack.pop()
@@ -522,7 +522,10 @@ class Engine:
                     fu.position, fu.base_radius, fv.position, fv.base_radius
                 ):
                     stack.append(v)
-        return len(seen)
+        return [same[u] for u in seen]
+
+    def _same_faction_cluster_size(self, figure: Figure) -> int:
+        return len(self._same_faction_cluster(figure))
 
     def figure_action_hints(self, figure: Figure) -> list[str]:
         """Human-readable reasons an *expected* action isn't offered, so the UI can
@@ -606,10 +609,22 @@ class Engine:
                                      f"— move adjacent first.")
                         break
 
-        # --- formation short of the minimum ----------------------------------
-        if not figure.is_demoralized and self._same_faction_cluster_size(figure) == 2:
-            hints.append("Form up: a movement formation needs 3–5 same-faction figures in "
-                         "base contact — you have 2, so bring one more alongside.")
+        # --- formation short of the minimum / blocked by an ability ----------
+        if not figure.is_demoralized:
+            cluster = self._same_faction_cluster(figure)
+            barred = [g for g in cluster
+                      if g.active_ability_ids() & (ab.FREE_MOVEMENT_IDS | {ab.QUICKNESS})]
+            eligible = len(cluster) - len(barred)
+            if barred and len(cluster) >= 2:
+                names = ", ".join(sorted(g.short_name for g in barred))
+                hints.append(
+                    f"Movement formations exclude Flight/Aquatic/Quickness (card text): "
+                    f"{names}. Those are optional abilities — cancel them (dial panel) "
+                    f"and the group can form up."
+                )
+            elif eligible == 2:
+                hints.append("Form up: a movement formation needs 3–5 same-faction figures "
+                             "in base contact — you have 2, so bring one more alongside.")
         return hints[:4]
 
     # ------------------------------------------------------------------ #

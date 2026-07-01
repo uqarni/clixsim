@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type PointerEvent as RPE, type WheelEvent as RWE } from "react";
 import type { FigureView, GameView } from "../api";
+import { effectiveSpeed } from "../terrainGeom";
 
 // A terrain shape being dragged during the placement phase (world coords).
 export interface PlacingGhost {
@@ -18,6 +19,7 @@ interface MoveGhost {
   facing: number; // radians
   ok: boolean;
   breakAway: boolean;
+  reason?: string; // why the drop is illegal — drawn at the ghost
 }
 
 interface PendingMove {
@@ -570,7 +572,22 @@ export default function BoardCanvas({
     }
     if (active && active.speed > 0) {
       const [cx, cy] = worldToScreen(t, active.pos[0], active.pos[1]);
-      dashedRing(ctx, cx, cy, active.speed * t.scale, "rgba(91,214,138,0.5)");
+      // The reach ring reflects the hindering-halved speed (fliers exempt).
+      const activeFlies = active.active_abilities.some(
+        (a) => a.name === "Flight" || a.name === "Aquatic",
+      );
+      const reach = activeFlies
+        ? active.speed
+        : effectiveSpeed(active.speed, active.pos, active.base_radius, view.terrain);
+      dashedRing(ctx, cx, cy, reach * t.scale, "rgba(91,214,138,0.5)");
+      if (reach < active.speed) {
+        ctx.save();
+        ctx.fillStyle = "rgba(224,192,74,0.9)";
+        ctx.font = "500 11px system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText(`speed halved: ${reach}″`, cx, cy - reach * t.scale - 5);
+        ctx.restore();
+      }
     }
 
     // Line of fire on hover (friendly selected -> hovered enemy).
@@ -617,12 +634,17 @@ export default function BoardCanvas({
       ctx.moveTo(gx, gy);
       ctx.lineTo(gx + Math.cos(-moveGhost.facing) * gr, gy + Math.sin(-moveGhost.facing) * gr);
       ctx.stroke();
-      if (moveGhost.breakAway) {
-        ctx.fillStyle = COLORS.warn;
+      const ghostLabel = !moveGhost.ok && moveGhost.reason
+        ? moveGhost.reason
+        : moveGhost.breakAway
+          ? "break-away"
+          : null;
+      if (ghostLabel) {
+        ctx.fillStyle = moveGhost.ok ? COLORS.warn : COLORS.bad;
         ctx.font = "500 11px system-ui, sans-serif";
         ctx.textAlign = "center";
         ctx.textBaseline = "bottom";
-        ctx.fillText("break-away", gx, gy - gr - 3);
+        ctx.fillText(ghostLabel, gx, gy - gr - 3);
       }
       ctx.restore();
     }

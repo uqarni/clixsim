@@ -29,12 +29,14 @@ import NewGame, { type GameConfig } from "./components/NewGame";
 import OpponentPanel from "./components/OpponentPanel";
 import TerrainPlacement from "./components/TerrainPlacement";
 import TurnHud from "./components/TurnHud";
+import { effectiveSpeed, moveBlockReason } from "./terrainGeom";
 
 interface MoveGhost {
   dest: [number, number];
   facing: number;
   ok: boolean;
   breakAway: boolean;
+  reason?: string; // why the drop is illegal (terrain/speed), shown at the ghost
 }
 interface PendingMove {
   dest: [number, number];
@@ -437,7 +439,18 @@ export default function App() {
           const o = view.figures.find((f) => f.uid === uid);
           return o && o.owner !== fig.owner;
         });
-      return { dest, facing, ok: dist <= fig.speed + 1e-6, breakAway: dist > 1e-6 && inEnemyContact };
+      // Live terrain truth for the ghost (the engine re-validates on confirm):
+      // hindering-halved speed, blocking endpoints/paths, the entry-stop rule.
+      const terrain = view?.terrain ?? [];
+      const flies = fig.active_abilities.some((a) => a.name === "Flight" || a.name === "Aquatic");
+      const eff = flies ? fig.speed : effectiveSpeed(fig.speed, fig.pos, fig.base_radius, terrain);
+      let reason: string | undefined;
+      if (dist > eff + 1e-6) {
+        reason = eff < fig.speed ? `too far — speed halved to ${eff}″ by hindering` : `too far — speed ${eff}″`;
+      } else {
+        reason = moveBlockReason(fig.pos, dest, fig.base_radius, terrain, flies) ?? undefined;
+      }
+      return { dest, facing, ok: !reason, breakAway: dist > 1e-6 && inEnemyContact, reason };
     },
     [nearestEnemy, view],
   );
@@ -497,7 +510,7 @@ export default function App() {
       const candidate = snapped && ghostFor(fig, snapped).ok ? snapped : dest;
       const g = ghostFor(fig, candidate);
       if (!g.ok) {
-        log([{ type: "rejected", summary: `Too far — beyond ${fig.speed}" speed.` }]);
+        log([{ type: "rejected", summary: `Can't move there — ${g.reason ?? "illegal move"}.` }]);
         return;
       }
       setPendingMove({ dest: candidate, facing: g.facing });

@@ -99,6 +99,83 @@ export function polygonSimple(poly: Pt[]): boolean {
   return true;
 }
 
+// --- movement-rule mirrors (clixengine/terrain.py predicates) ---------------
+// The engine stays authoritative; these give the drag ghost live truth.
+export function blocksMove(t: TerrainPiece): boolean {
+  return t.kind === "blocking" || t.water === "deep";
+}
+function hindersMove(t: TerrainPiece): boolean {
+  return !blocksMove(t) && (t.kind === "hindering" || t.water === "shallow" || t.low_wall);
+}
+function halvesSpeed(t: TerrainPiece): boolean {
+  return hindersMove(t) && !t.low_wall;
+}
+
+function circleTouchesPoly(c: Pt, r: number, poly: Pt[]): boolean {
+  if (pointInPoly(c, poly)) return true;
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i];
+    const b = poly[(i + 1) % poly.length];
+    if (segDist(c, c, a, b) <= r + 1e-6) return true;
+  }
+  return false;
+}
+
+function capsuleCrossesPoly(p0: Pt, p1: Pt, r: number, poly: Pt[]): boolean {
+  if (circleTouchesPoly(p0, r, poly) || circleTouchesPoly(p1, r, poly)) return true;
+  if (pointInPoly(p0, poly) || pointInPoly(p1, poly)) return true;
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i];
+    const b = poly[(i + 1) % poly.length];
+    if (segDist(p0, p1, a, b) <= r + 1e-6) return true;
+  }
+  return false;
+}
+
+// Speed for the turn: halved (round up) when starting in speed-halving hindering.
+export function effectiveSpeed(speed: number, pos: Pt, radius: number, terrain: TerrainPiece[]): number {
+  const slowed = terrain.some((t) => halvesSpeed(t) && circleTouchesPoly(pos, radius, t.polygon as Pt[]));
+  return slowed ? Math.max(1, Math.ceil(speed / 2)) : speed;
+}
+
+// Why the engine would reject this move's geometry, or null — mirrors
+// _validate_move's terrain rules (endpoint blocking for everyone; path blocking
+// and the hindering entry-stop for non-fliers; a stuck start may walk out).
+export function moveBlockReason(
+  from: Pt,
+  dest: Pt,
+  radius: number,
+  terrain: TerrainPiece[],
+  flies: boolean,
+): string | null {
+  for (const t of terrain) {
+    if (blocksMove(t) && circleTouchesPoly(dest, radius, t.polygon as Pt[])) {
+      return t.water === "deep" ? "can't end in deep water" : "can't end in blocking terrain";
+    }
+  }
+  if (flies) return null;
+  const stuck = terrain.some((t) => blocksMove(t) && circleTouchesPoly(from, radius, t.polygon as Pt[]));
+  if (stuck) return null; // escaping an illegal overlap — endpoint check only
+  const moving = Math.hypot(dest[0] - from[0], dest[1] - from[1]) > 1e-9;
+  if (!moving) return null;
+  for (const t of terrain) {
+    if (blocksMove(t) && capsuleCrossesPoly(from, dest, radius, t.polygon as Pt[])) {
+      return t.water === "deep" ? "path crosses deep water" : "path crosses blocking terrain";
+    }
+  }
+  for (const t of terrain) {
+    if (!hindersMove(t)) continue;
+    if (circleTouchesPoly(from, radius, t.polygon as Pt[])) continue; // started in it
+    if (
+      capsuleCrossesPoly(from, dest, radius, t.polygon as Pt[]) &&
+      !circleTouchesPoly(dest, radius, t.polygon as Pt[])
+    ) {
+      return t.low_wall ? "stop at the low wall" : "entering hindering ends the move — stop inside";
+    }
+  }
+  return null;
+}
+
 // Drawn-terrain size caps — mirrors clixengine/terrain.py MAX_POLYGON_* so the
 // drawing UI can show live legality before the server confirms.
 export const MAX_POLYGON_AREA = 24; // in²
