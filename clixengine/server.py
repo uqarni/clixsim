@@ -288,7 +288,7 @@ def _construct_stream(mode: str, points: int, opponent: str, seed: int,
 
         # LLM army — drafted one figure at a time, streamed with reasoning.
         # "Heuristic (fast)" opponent drafts heuristically too (no LLM latency).
-        builder = ArmyBuilder()
+        builder = ArmyBuilder(seed=seed)  # per-game doctrine => varied armies
         if opponent == "heuristic":
             builder.available = False
         yield sse({"type": "llm_start", "available": builder.available})

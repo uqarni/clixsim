@@ -147,13 +147,26 @@ def heuristic_army(
 # LLM builder — picks one figure at a time, with reasoning
 # --------------------------------------------------------------------------- #
 _SYSTEM = """You are drafting a Mage Knight (2002) army for the 'llm' side to fight \
-a human. Build a synergistic, competitive force within the points budget: mix \
-ranged and melee, value strong abilities (Command for extra actions, Toughness \
-and Battle Armor for durability, Flight for mobility, Magic Blast/Enhancement for \
-punch), and don't leave large points unspent. You pick ONE figure at a time from \
-the offered candidates. You may take the same non-unique more than once. Reply \
+a human. Build a synergistic, competitive force within the points budget and don't \
+leave large points unspent. You pick ONE figure at a time from the offered \
+candidates (each comes with its starting stats, rank, and abilities — the official \
+ability card text is below). You may take the same non-unique more than once. Reply \
 with the chosen candidate id and a short, punchy one-sentence reason, or -1 to \
 stop when the army is strong and the budget is nearly spent."""
+
+# A per-game drafting doctrine keeps armies varied across games (the model
+# otherwise converges on the same "best" picks every time).
+DOCTRINES = (
+    "Elite few: a handful of expensive, hard-hitting figures. Quality over numbers.",
+    "Horde: as many cheap figures as the budget allows — win on action economy and bodies.",
+    "Gunline: maximize ranged attackers and keep them in a mutually-supporting block.",
+    "Wings: prioritize Flight and high speed — mobility, flanking, and rear-arc strikes.",
+    "Anvil: durability first (Toughness, Battle Armor, deep dials) — grind the enemy down.",
+    "Synergy: build around ability combos — Command for actions, Magic Enhancement behind "
+    "shooters, Defend to share a high defense, healers to sustain.",
+    "Combined arms: a balanced core of melee bruisers screening ranged support.",
+    "Glass cannons: maximum damage output per point, defense be damned.",
+)
 
 _SCHEMA = {
     "type": "object",
@@ -168,15 +181,19 @@ _SCHEMA = {
 
 @dataclass
 class ArmyBuilder:
-    """Iterative army builder. ``pick`` returns (figure_def | None, reasoning, used_llm)."""
+    """Iterative army builder. ``pick`` returns (figure_def | None, reasoning, used_llm).
+    ``seed`` selects a per-game drafting doctrine so armies vary between games."""
 
     model: str = MODEL
     effort: str = "low"
+    seed: int = 0
     _client: object | None = field(default=None, init=False)
     available: bool = field(default=False, init=False)
     last_error: str = field(default="", init=False)
+    doctrine: str = field(default="", init=False)
 
     def __post_init__(self) -> None:
+        self.doctrine = random.Random(self.seed).choice(DOCTRINES)
         key = get_api_key()
         if not key:
             self.last_error = "no ANTHROPIC_API_KEY"
@@ -189,18 +206,31 @@ class ArmyBuilder:
         except Exception as e:  # pragma: no cover
             self.last_error = f"anthropic init failed: {e}"
 
+    def system_prompt(self, db: FigureDB) -> str:
+        """Base directive + this game's doctrine + rules digest + the ability card."""
+        from .chat import abilities_card, rules_digest
+
+        return (
+            f"{_SYSTEM}\n\nYour drafting doctrine this game (lean into it, even at "
+            f"some cost): {self.doctrine}\n\n{rules_digest()}\n\n{abilities_card(db)}"
+        )
+
     def _ask(self, db: FigureDB, cands: list[FigureDef], army_brief: list[dict],
-             remaining: int, budget: int) -> tuple[int | None, str] | None:
+             remaining: int, budget: int, seed: int = 0) -> tuple[int | None, str] | None:
+        # Shuffle the presentation so the priciest-first ordering doesn't anchor
+        # the model to the same opening pick every game.
+        briefs = [_fig_brief(db, f) for f in cands]
+        random.Random(seed).shuffle(briefs)
         payload = {
             "budget": budget,
             "remaining": remaining,
             "current_army": army_brief,
-            "candidates": [_fig_brief(db, f) for f in cands],
+            "candidates": briefs,
             "note": "Choose one candidate id to add, or -1 to stop.",
         }
         try:
             resp = self._client.messages.create(
-                model=self.model, max_tokens=512, system=_SYSTEM,
+                model=self.model, max_tokens=512, system=self.system_prompt(db),
                 output_config={"effort": self.effort,
                                "format": {"type": "json_schema", "schema": _SCHEMA}},
                 messages=[{"role": "user", "content": json.dumps(payload)}],
@@ -221,7 +251,7 @@ class ArmyBuilder:
         """Return the next figure to add (or None to stop), a reasoning string, and
         whether the LLM made the call (False => heuristic fallback)."""
         if self.available:
-            ans = self._ask(db, cands, army_brief, remaining, budget)
+            ans = self._ask(db, cands, army_brief, remaining, budget, seed)
             if ans is not None:
                 cid, reason = ans
                 if cid == -1:

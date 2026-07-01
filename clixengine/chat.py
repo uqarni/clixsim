@@ -36,13 +36,22 @@ an attack (+2 per extra ranged member; +1 per extra close member; +1 for a rear 
 figure. Optional abilities may be switched off until end of turn."""
 
 
-def build_system(db) -> str:
+def abilities_card(db) -> str:
+    """The official special-abilities card text (shared by chat + the drafter)."""
     lines = []
     for a in db.all_abilities():
         if getattr(a, "used_in_rebellion", False) and a.description:
             lines.append(f"- {a.name}: {a.description.strip()}")
-    abilities = "Special abilities (the official card text):\n" + "\n".join(lines)
-    return f"{_PERSONA}\n\n{_RULES}\n\n{abilities}"
+    return "Special abilities (the official card text):\n" + "\n".join(lines)
+
+
+def rules_digest() -> str:
+    """A compact rules summary (shared by chat + the drafter)."""
+    return _RULES
+
+
+def build_system(db) -> str:
+    return f"{_PERSONA}\n\n{_RULES}\n\n{abilities_card(db)}"
 
 
 def chat_reply(client, system: str, message: str, history: list[dict], engine) -> str:

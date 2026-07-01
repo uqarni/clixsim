@@ -40,3 +40,16 @@ def test_demo_armies_are_legal(db):
         assert validate_army(l, db, pts).ok
         assert h.total_points(db) <= pts
         assert l.total_points(db) <= pts
+
+
+def test_army_builder_doctrine_varies_and_knows_the_rules(db):
+    from clixengine.build import DOCTRINES, ArmyBuilder
+
+    doctrines = {ArmyBuilder(seed=s).doctrine for s in range(10)}
+    assert len(doctrines) >= 3, f"doctrines barely vary across seeds: {doctrines}"
+    assert doctrines <= set(DOCTRINES)
+    b = ArmyBuilder(seed=3)
+    sysprompt = b.system_prompt(db)
+    assert b.doctrine in sysprompt                 # the per-game directive
+    assert "Special abilities" in sysprompt        # official card text
+    assert "Formations" in sysprompt or "formation" in sysprompt  # rules digest
