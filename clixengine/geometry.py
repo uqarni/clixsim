@@ -244,6 +244,25 @@ def swept_base_crosses_polygon(p0: Vec, p1: Vec, r: float, poly: tuple[Vec, ...]
     return any(segment_segment_distance(p0, p1, a, b) <= r + eps for a, b in polygon_edges(poly))
 
 
+def polygon_is_simple(poly: tuple[Vec, ...]) -> bool:
+    """True if the polygon is a simple (non-self-intersecting) ring of >=3 vertices.
+    Adjacent edges (sharing a vertex) may touch; any other edge crossing => not simple.
+    Used to validate a hand-drawn terrain polygon before accepting it."""
+    n = len(poly)
+    if n < 3:
+        return False
+    edges = polygon_edges(poly)
+    for i in range(n):
+        a0, a1 = edges[i]
+        for j in range(i + 1, n):
+            if j == i or (i + 1) % n == j or (j + 1) % n == i:
+                continue  # adjacent edges share a vertex — skip
+            b0, b1 = edges[j]
+            if segments_intersect(a0, a1, b0, b1):
+                return False
+    return True
+
+
 def polygon_polygon_distance(a: tuple[Vec, ...], b: tuple[Vec, ...]) -> float:
     """Minimum gap between two polygons (0 if they overlap). Used for the >=2\"
     terrain-placement spacing rule."""

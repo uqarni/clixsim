@@ -24,6 +24,7 @@ from .geometry import (
     in_base_contact,
     in_front_arc,
     in_rear_arc,
+    polygon_is_simple,
     segment_circle_intersects,
 )
 from .intents import (
@@ -337,6 +338,36 @@ class Engine:
                            center=[round(c.x, 2), round(c.y, 2)], rotation=round(float(rotation), 4))
         self._advance_terrain_turn(owner)
         return Result("place_terrain", [ev], f"{owner} places {tmpl.label} ({self._where_label(c)})")
+
+    def place_terrain_polygon(
+        self, owner: str, type_key: str, polygon: list[tuple[float, float]],
+    ) -> Result | Rejection:
+        """Place one hand-drawn terrain polygon of ``type_key`` for ``owner``."""
+        if self.state.phase != "terrain":
+            return Rejection("not_placing", "terrain is not being placed right now")
+        if owner != self.state.terrain_turn:
+            return Rejection("not_your_turn", f"it is {self.state.terrain_turn}'s turn to place")
+        if self.state.terrain_budget.get(owner, 0) <= 0:
+            return Rejection("no_budget", f"{owner} has no terrain left to place")
+        if type_key not in terr.POLYGON_TYPES:
+            return Rejection("no_such_terrain", str(type_key))
+        if len(polygon) < 3:
+            return Rejection("bad_polygon", "a terrain polygon needs at least 3 points")
+        poly = tuple(Vec(float(x), float(y)) for x, y in polygon)
+        if not polygon_is_simple(poly):
+            return Rejection("self_intersecting", "the shape crosses itself — draw a simple outline")
+        piece = terr.piece_from_polygon(type_key, poly, len(self.state.terrain), owner)
+        reason = terr.placement_reason(
+            piece.polygon, self.state.terrain, self.state.board.width, self.state.board.height
+        )
+        if reason is not None:
+            return Rejection(reason, f"cannot place that shape there ({reason})")
+        self.state.terrain.append(piece)
+        self.state.terrain_budget[owner] = self.state.terrain_budget.get(owner, 0) - 1
+        label = terr.POLYGON_TYPES[type_key]["label"]
+        ev = self.log.emit("place_terrain", owner=owner, kind=type_key, id=piece.id, custom=True)
+        self._advance_terrain_turn(owner)
+        return Result("place_terrain", [ev], f"{owner} places {label}")
 
     def hit_odds(
         self,

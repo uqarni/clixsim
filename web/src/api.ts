@@ -308,6 +308,32 @@ export async function getTerrainLibrary(): Promise<TerrainTemplate[]> {
   return (await req<{ pieces: TerrainTemplate[] }>("/api/terrain_library")).pieces;
 }
 
+// Terrain TYPES for the draw-your-own-polygon tool.
+export interface TerrainType {
+  key: string;
+  kind: "clear" | "hindering" | "blocking";
+  elevated: boolean;
+  water: "shallow" | "deep" | null;
+  low_wall: boolean;
+  label: string;
+  blurb: string;
+}
+export async function getTerrainTypes(): Promise<TerrainType[]> {
+  if (USE_MOCK) return [];
+  return (await req<{ types: TerrainType[] }>("/api/terrain_types")).types;
+}
+
+// POST /api/place_terrain_polygon — the human places a hand-drawn polygon.
+export async function placeTerrainPolygon(
+  type: string,
+  polygon: [number, number][],
+): Promise<PlaceTerrainResult> {
+  return req<PlaceTerrainResult>("/api/place_terrain_polygon", {
+    method: "POST",
+    body: JSON.stringify({ type, polygon }),
+  });
+}
+
 export interface PlaceTerrainResult {
   ok: boolean;
   reason?: string;

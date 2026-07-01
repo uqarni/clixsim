@@ -77,6 +77,28 @@ function polyDist(a: Pt[], b: Pt[]): number {
   return best;
 }
 
+function segsIntersect(p1: Pt, p2: Pt, p3: Pt, p4: Pt): boolean {
+  const o = (a: Pt, b: Pt, c: Pt) => (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+  const d1 = o(p3, p4, p1);
+  const d2 = o(p3, p4, p2);
+  const d3 = o(p1, p2, p3);
+  const d4 = o(p1, p2, p4);
+  return d1 > 0 !== d2 > 0 && d3 > 0 !== d4 > 0;
+}
+
+// A simple (non-self-intersecting) ring of >=3 vertices — mirrors the engine check.
+export function polygonSimple(poly: Pt[]): boolean {
+  const n = poly.length;
+  if (n < 3) return false;
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      if (j === i || (i + 1) % n === j || (j + 1) % n === i) continue;
+      if (segsIntersect(poly[i], poly[(i + 1) % n], poly[j], poly[(j + 1) % n])) return false;
+    }
+  }
+  return true;
+}
+
 // Why a candidate polygon may NOT be placed, or null if legal. Mirrors the engine
 // (edge margin 1", starting bands 3" deep at both ends, >=2" from other pieces).
 export function placementReason(

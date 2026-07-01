@@ -199,6 +199,33 @@ def test_terrain_placement_candidates_are_legal(db):
         assert placement_reason(piece.polygon, e.state.terrain, 36, 36) is None
 
 
+def test_polygon_is_simple():
+    from clixengine.geometry import polygon_is_simple
+    square = (Vec(0, 0), Vec(4, 0), Vec(4, 4), Vec(0, 4))
+    bowtie = (Vec(0, 0), Vec(4, 4), Vec(4, 0), Vec(0, 4))  # self-intersecting
+    assert polygon_is_simple(square)
+    assert not polygon_is_simple(bowtie)
+    assert not polygon_is_simple((Vec(0, 0), Vec(1, 1)))  # too few
+
+
+def test_place_terrain_polygon(db):
+    e = _terrain_engine(db)  # human first, 1 piece each
+    good = [(14, 16), (22, 16), (22, 22), (14, 22)]
+    # rejections (none consume budget)
+    assert e.place_terrain_polygon("human", "blocking", good[:2]).reason == "bad_polygon"
+    assert e.place_terrain_polygon("human", "nope", good).reason == "no_such_terrain"
+    assert e.place_terrain_polygon("human", "blocking",
+                                   [(14, 16), (22, 22), (22, 16), (14, 22)]).reason == "self_intersecting"
+    assert e.place_terrain_polygon("human", "blocking",
+                                   [(14, 0.5), (18, 0.5), (16, 2)]).reason == "in_starting_area"
+    # success: an elevated hill in midfield
+    r = e.place_terrain_polygon("human", "elevated", good)
+    assert r.ok and len(e.state.terrain) == 1
+    p = e.state.terrain[0]
+    assert p.elevated and p.kind == "clear" and p.owner == "human"
+    assert e.state.terrain_turn == "llm" and e.state.terrain_budget["human"] == 0
+
+
 def test_skip_terrain_forfeits_and_hands_off(db):
     e = _terrain_engine(db)  # human first, both have 1 piece
     r = e.skip_terrain_placement("human")

@@ -379,6 +379,33 @@ def terrain_library():
     return {"pieces": [terrain_template_view(t) for t in TERRAIN_LIBRARY]}
 
 
+@app.get("/api/terrain_types")
+def terrain_types():
+    """Terrain TYPES for the draw-your-own-polygon tool (key + rule flags + display)."""
+    from .terrain import POLYGON_TYPES
+    return {"types": [{"key": k, **v} for k, v in POLYGON_TYPES.items()]}
+
+
+class PlaceTerrainPolygonReq(BaseModel):
+    type: str
+    polygon: list[tuple[float, float]]
+
+
+@app.post("/api/place_terrain_polygon")
+def place_terrain_polygon(req: PlaceTerrainPolygonReq):
+    """The human places one hand-drawn terrain polygon during the setup phase."""
+    eng = SESSION.require()
+    with SESSION.terrain_lock:
+        result = eng.place_terrain_polygon(SESSION.human_side, req.type, req.polygon)
+    return {
+        "ok": result.ok,
+        "reason": getattr(result, "reason", None),
+        "detail": getattr(result, "detail", None),
+        "summary": getattr(result, "summary", ""),
+        "view": game_view(eng),
+    }
+
+
 @app.get("/api/terrain_candidates")
 def terrain_candidates(owner: str = "human"):
     """Legal example placements for ``owner`` (renderer hint / AI options)."""

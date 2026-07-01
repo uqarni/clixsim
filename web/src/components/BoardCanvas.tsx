@@ -63,6 +63,21 @@ interface Props {
   onSpinFace?: (facing: number) => void;
   // Deploy setup: shade the human's 3" starting band as the legal deploy zone.
   deployBand?: boolean;
+  // Terrain draw tool: an in-progress hand-drawn polygon + click/move/undo hooks.
+  draw?: DrawGhost | null;
+  onDrawPoint?: (world: [number, number]) => void;
+  onDrawMove?: (world: [number, number]) => void;
+  onDrawUndo?: () => void;
+}
+
+export interface DrawGhost {
+  poly: [number, number][]; // committed vertices (world inches)
+  cursor: [number, number] | null;
+  ok: boolean;
+  kind: string;
+  elevated: boolean;
+  water: string | null;
+  lowWall: boolean;
 }
 
 export interface SpinGhost {
@@ -446,6 +461,10 @@ export default function BoardCanvas({
   spin = null,
   onSpinFace,
   deployBand = false,
+  draw = null,
+  onDrawPoint,
+  onDrawMove,
+  onDrawUndo,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const fxCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -706,6 +725,58 @@ export default function BoardCanvas({
       }
     }
 
+    // Terrain draw tool: the in-progress hand-drawn polygon (committed vertices
+    // form the shape; a dashed rubber-band trails the cursor to the next point).
+    if (draw) {
+      const pts = draw.poly.map(([x, y]) => worldToScreen(t, x, y));
+      const style = terrainStyle({
+        polygon: [], kind: draw.kind, elevated: draw.elevated, water: draw.water,
+        low_wall: draw.lowWall, abrupt: false,
+      });
+      const col = draw.ok ? COLORS.good : COLORS.bad;
+      ctx.save();
+      if (pts.length >= 3) {
+        polyPath(ctx, pts);
+        ctx.globalAlpha = 0.45;
+        ctx.fillStyle = draw.ok ? style.fill : "rgba(224,90,90,0.4)";
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        polyPath(ctx, pts);
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      } else if (pts.length === 2) {
+        ctx.beginPath();
+        ctx.moveTo(pts[0][0], pts[0][1]);
+        ctx.lineTo(pts[1][0], pts[1][1]);
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+      if (pts.length >= 1 && draw.cursor) {
+        const [cx, cy] = worldToScreen(t, draw.cursor[0], draw.cursor[1]);
+        ctx.setLineDash([5, 4]);
+        ctx.beginPath();
+        ctx.moveTo(pts[pts.length - 1][0], pts[pts.length - 1][1]);
+        ctx.lineTo(cx, cy);
+        if (pts.length >= 2) ctx.lineTo(pts[0][0], pts[0][1]); // hint the closing edge
+        ctx.strokeStyle = "rgba(231,235,242,0.5)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      pts.forEach(([x, y], i) => {
+        ctx.beginPath();
+        ctx.arc(x, y, i === 0 ? 6 : 4, 0, Math.PI * 2);
+        ctx.fillStyle = i === 0 ? COLORS.warn : "#e7ebf2";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(0,0,0,0.5)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      });
+      ctx.restore();
+    }
+
     // Terrain placement ghost, drawn last so it sits above everything.
     if (placingGhost) {
       drawTerrainPiece(
@@ -722,7 +793,7 @@ export default function BoardCanvas({
         { ok: placingGhost.ok },
       );
     }
-  }, [view, size, selectedUid, hoverUid, activeUid, armedTargets, armedMembers, moveGhost, pendingMove, placementMode, placingGhost, spin, deployBand]);
+  }, [view, size, selectedUid, hoverUid, activeUid, armedTargets, armedMembers, moveGhost, pendingMove, placementMode, placingGhost, spin, deployBand, draw]);
 
   // Combat-effect overlay: an independent rAF that draws fx on a top canvas,
   // reusing the transform the base render computed. Keyed on fxSeq.
@@ -836,6 +907,10 @@ export default function BoardCanvas({
   }
 
   function onPointerDown(e: RPE) {
+    if (draw) {
+      if (e.button === 0 && onDrawPoint) onDrawPoint(worldPoint(e.clientX, e.clientY));
+      return;
+    }
     if (placementMode) {
       if (e.button === 0 && onPlacePointer) onPlacePointer(worldPoint(e.clientX, e.clientY), true);
       return;
@@ -855,6 +930,10 @@ export default function BoardCanvas({
   }
 
   function onPointerMove(e: RPE) {
+    if (draw) {
+      if (onDrawMove) onDrawMove(worldPoint(e.clientX, e.clientY));
+      return;
+    }
     if (placementMode) {
       if (onPlacePointer) onPlacePointer(worldPoint(e.clientX, e.clientY), false);
       return;
@@ -877,6 +956,7 @@ export default function BoardCanvas({
   }
 
   function onPointerUp(e: RPE) {
+    if (draw) return;
     if (placementMode) return;
     if (faceRef.current) {
       faceRef.current = false;
@@ -901,9 +981,12 @@ export default function BoardCanvas({
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onWheel={onWheel}
-        onContextMenu={(e) => placementMode && e.preventDefault()}
+        onContextMenu={(e) => {
+          if (placementMode || draw) e.preventDefault();
+          if (draw && onDrawUndo) onDrawUndo(); // right-click removes the last point
+        }}
         onPointerLeave={() => {
-          if (placementMode) return;
+          if (placementMode || draw) return;
           if (faceRef.current) {
             faceRef.current = false;
           } else if (dragRef.current) {

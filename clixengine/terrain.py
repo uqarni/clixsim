@@ -168,6 +168,35 @@ TERRAIN_LIBRARY: tuple[TerrainTemplate, ...] = (
 _LIBRARY_BY_KEY = {t.key: t for t in TERRAIN_LIBRARY}
 
 
+# Terrain TYPES for the draw-your-own-polygon tool: a type key -> the rule flags a
+# hand-drawn piece of that type carries (kind/elevated/water/low_wall) + display.
+POLYGON_TYPES: dict[str, dict] = {
+    "blocking": {"kind": "blocking", "elevated": False, "water": None, "low_wall": False,
+                 "label": "Blocking", "blurb": "Impassable — blocks movement and line of fire."},
+    "hindering": {"kind": "hindering", "elevated": False, "water": None, "low_wall": False,
+                  "label": "Hindering (woods)", "blurb": "Halve speed to cross; +1 defense to targets shot through it."},
+    "shallow_water": {"kind": "clear", "elevated": False, "water": "shallow", "low_wall": False,
+                      "label": "Shallow water", "blurb": "Halve speed to wade; no effect on shooting."},
+    "deep_water": {"kind": "clear", "elevated": False, "water": "deep", "low_wall": False,
+                   "label": "Deep water", "blurb": "Impassable to non-fliers; no effect on shooting."},
+    "elevated": {"kind": "clear", "elevated": True, "water": None, "low_wall": False,
+                 "label": "Elevated (hill)", "blurb": "Height advantage (+1 defense) and longer sightlines."},
+    "low_wall": {"kind": "hindering", "elevated": False, "water": None, "low_wall": True,
+                 "label": "Low wall", "blurb": "+1 defense to targets behind it; never slows a figure leaving it."},
+}
+
+
+def piece_from_polygon(type_key: str, polygon: tuple[Vec, ...], piece_id: int, owner: str) -> TerrainPiece | None:
+    """Build a TerrainPiece of ``type_key`` from a hand-drawn world-space polygon."""
+    spec = POLYGON_TYPES.get(type_key)
+    if spec is None:
+        return None
+    return TerrainPiece(
+        id=piece_id, kind=spec["kind"], polygon=tuple(polygon), elevated=spec["elevated"],
+        water=spec["water"], low_wall=spec["low_wall"], abrupt=False, owner=owner,
+    )
+
+
 def template(key: str) -> TerrainTemplate | None:
     return _LIBRARY_BY_KEY.get(key)
 
