@@ -14,6 +14,7 @@ from __future__ import annotations
 import math
 
 from . import abilities as ab
+from . import terrain as terr
 from .data import FigureDB, load_db
 from .gamelog import GameLog
 from .geometry import (
@@ -384,9 +385,20 @@ class Engine:
         Rejection or None if legal."""
         if not self.state.board.contains(dest, f.base_radius):
             return Rejection("off_board", "destination is off the board")
+        flies = ab.ignores_figure_bases(f)  # Flight/Aquatic pass through bases & terrain
+        pieces = self.state.terrain
+        # Speed may be halved by starting in hindering terrain (§Hindering; fliers exempt).
+        eff_speed = f.speed if flies else terr.effective_speed(pieces, f.speed, f.position, f.base_radius)
         dist = distance(f.position, dest)
-        if dist > f.speed + 1e-9:
-            return Rejection("too_far", f"distance {dist:.2f}\" exceeds speed {f.speed}\"")
+        if dist > eff_speed + 1e-9:
+            extra = " (halved by hindering)" if eff_speed < f.speed else ""
+            return Rejection("too_far", f"distance {dist:.2f}\" exceeds speed {eff_speed}\"{extra}")
+        # Blocking terrain / deep water: non-fliers can't cross it or end in it.
+        if pieces and not flies:
+            if terr.base_in_blocking(pieces, dest, f.base_radius):
+                return Rejection("in_blocking", "destination is in impassable terrain")
+            if dist > 1e-9 and terr.blocking_between(pieces, f.position, dest, f.base_radius):
+                return Rejection("path_blocked", "path crosses impassable terrain")
         if f.is_demoralized:
             already = {c.uid for c in self.state.opposing_contacts(f)}
             for opp in self.state.opponents_of(f):
@@ -397,7 +409,6 @@ class Engine:
                         "demoralized_contact",
                         f"{f.short_name} is demoralized and may not move into contact",
                     )
-        flies = ab.ignores_figure_bases(f)  # Flight/Aquatic pass through bases
         for other in self.state.living():
             if other.uid == f.uid:
                 continue

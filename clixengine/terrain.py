@@ -14,9 +14,16 @@ close combat on/off; formations can't span it.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
-from .geometry import Vec, point_in_polygon
+from .geometry import (
+    Vec,
+    circle_intersects_polygon,
+    point_in_polygon,
+    segment_crosses_polygon,
+    swept_base_crosses_polygon,
+)
 
 
 @dataclass(frozen=True)
@@ -79,3 +86,68 @@ def elevation_at(pieces: list[TerrainPiece], p: Vec) -> int:
 
 def terrain_at(pieces: list[TerrainPiece], p: Vec) -> list[TerrainPiece]:
     return [t for t in pieces if t.contains(p)]
+
+
+# --------------------------------------------------------------------------- #
+# Movement queries (used by the engine's move validation)
+# --------------------------------------------------------------------------- #
+def blocking_between(pieces: list[TerrainPiece], p0: Vec, p1: Vec, radius: float) -> TerrainPiece | None:
+    """A blocking / deep-water piece the moving base would enter en route; None if clear."""
+    for t in pieces:
+        if t.blocks_move() and swept_base_crosses_polygon(p0, p1, radius, t.polygon):
+            return t
+    return None
+
+
+def base_in_blocking(pieces: list[TerrainPiece], p: Vec, radius: float) -> bool:
+    """Would a base centred at p overlap blocking terrain / deep water (illegal end)?"""
+    return any(t.blocks_move() and circle_intersects_polygon(p, radius, t.polygon) for t in pieces)
+
+
+def _starts_in_speed_hindering(pieces: list[TerrainPiece], p: Vec, radius: float) -> bool:
+    return any(t.halves_speed() and circle_intersects_polygon(p, radius, t.polygon) for t in pieces)
+
+
+def effective_speed(pieces: list[TerrainPiece], speed: int, start: Vec, radius: float) -> int:
+    """Speed for the turn, halved (round up) if the figure begins its move touching
+    speed-halving hindering (§Hindering; low walls are exempt)."""
+    if _starts_in_speed_hindering(pieces, start, radius):
+        return max(1, math.ceil(speed / 2))
+    return speed
+
+
+# --------------------------------------------------------------------------- #
+# Line-of-fire terrain verdict (used by the engine's LoF + combat modifiers)
+# --------------------------------------------------------------------------- #
+def lof_terrain(
+    pieces: list[TerrainPiece], p0: Vec, p1: Vec, elev_a: int, elev_t: int,
+    stand_a: list[TerrainPiece], stand_t: list[TerrainPiece],
+) -> tuple[bool, bool]:
+    """(blocked, hindering) for a line of fire p0->p1 given firer/target elevations
+    and the elevated pieces each stands on. Blocking terrain always blocks; an
+    elevated feature blocks unless a shooter is elevated (the feature they stand on
+    never blocks their own shot); hindering crossed adds +1 (capped, boolean)."""
+    both_elev = elev_a == 1 and elev_t == 1
+    stand_ids = {id(s) for s in stand_a} | {id(s) for s in stand_t}
+    blocked = False
+    hindering = False
+    for t in pieces:
+        if not segment_crosses_polygon(p0, p1, t.polygon):
+            continue
+        if t.blocks_lof_ground():  # blocking terrain (ground or elevated) always blocks
+            blocked = True
+            continue
+        if t.elevated and t.kind in ("clear", "hindering"):
+            if id(t) in stand_ids:  # you can always see out of the feature you stand on
+                if t.kind == "hindering":
+                    hindering = True
+                continue
+            if both_elev:  # both up high: elevated clear is seen over; elevated hindering still +1
+                if t.kind == "hindering":
+                    hindering = True
+            else:  # a shot involving the ground crosses an elevated feature it isn't standing on
+                blocked = True
+            continue
+        if t.hinders_lof():  # ground hindering / low wall
+            hindering = True
+    return blocked, hindering

@@ -195,8 +195,62 @@ def polygon_edges(poly: tuple[Vec, ...]):
 
 def segment_crosses_polygon(p0: Vec, p1: Vec, poly: tuple[Vec, ...]) -> bool:
     """True if the segment p0->p1 enters or crosses the polygon (either endpoint
-    inside, or the segment intersects a boundary edge). Used for movement blocking
-    and line-of-fire blocking against blocking terrain."""
+    inside, or the segment intersects a boundary edge). Used for line-of-fire
+    blocking against blocking terrain."""
     if point_in_polygon(p0, poly) or point_in_polygon(p1, poly):
         return True
     return any(segments_intersect(p0, p1, a, b) for a, b in polygon_edges(poly))
+
+
+def point_segment_distance(p: Vec, a: Vec, b: Vec) -> float:
+    ab = b - a
+    l2 = ab.dot(ab)
+    if l2 <= 0:
+        return distance(p, a)
+    t = max(0.0, min(1.0, (p - a).dot(ab) / l2))
+    return distance(p, a + ab * t)
+
+
+def segment_segment_distance(a0: Vec, a1: Vec, b0: Vec, b1: Vec) -> float:
+    if segments_intersect(a0, a1, b0, b1):
+        return 0.0
+    return min(
+        point_segment_distance(a0, b0, b1), point_segment_distance(a1, b0, b1),
+        point_segment_distance(b0, a0, a1), point_segment_distance(b1, a0, a1),
+    )
+
+
+def circle_intersects_polygon(c: Vec, r: float, poly: tuple[Vec, ...], eps: float = CONTACT_EPS) -> bool:
+    """A base of radius r centred at c overlaps the polygon (touches or is inside)."""
+    if point_in_polygon(c, poly):
+        return True
+    return any(point_segment_distance(c, a, b) <= r + eps for a, b in polygon_edges(poly))
+
+
+def circle_in_polygon(c: Vec, r: float, poly: tuple[Vec, ...], eps: float = CONTACT_EPS) -> bool:
+    """The whole base of radius r centred at c lies inside the polygon."""
+    if not point_in_polygon(c, poly):
+        return False
+    return all(point_segment_distance(c, a, b) >= r - eps for a, b in polygon_edges(poly))
+
+
+def swept_base_crosses_polygon(p0: Vec, p1: Vec, r: float, poly: tuple[Vec, ...], eps: float = CONTACT_EPS) -> bool:
+    """A base of radius r sweeping from p0 to p1 touches the polygon at any point
+    (capsule vs polygon). Used to forbid a move that would enter blocking terrain."""
+    if circle_intersects_polygon(p0, r, poly, eps) or circle_intersects_polygon(p1, r, poly, eps):
+        return True
+    if segment_crosses_polygon(p0, p1, poly):
+        return True
+    return any(segment_segment_distance(p0, p1, a, b) <= r + eps for a, b in polygon_edges(poly))
+
+
+def polygon_polygon_distance(a: tuple[Vec, ...], b: tuple[Vec, ...]) -> float:
+    """Minimum gap between two polygons (0 if they overlap). Used for the >=2\"
+    terrain-placement spacing rule."""
+    if any(point_in_polygon(v, b) for v in a) or any(point_in_polygon(v, a) for v in b):
+        return 0.0
+    best = float("inf")
+    for ea in polygon_edges(a):
+        for eb in polygon_edges(b):
+            best = min(best, segment_segment_distance(ea[0], ea[1], eb[0], eb[1]))
+    return best

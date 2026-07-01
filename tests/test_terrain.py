@@ -68,3 +68,33 @@ def test_elevation_lookup():
     hill = TerrainPiece(5, "clear", SQUARE, elevated=True)
     assert elevation_at([hill], Vec(4, 4)) == 1
     assert elevation_at([hill], Vec(0, 0)) == 0
+
+
+# --- terrain effects on the engine's move validation -----------------------
+from .conftest import build_engine  # noqa: E402
+
+
+def test_blocking_terrain_blocks_and_bounds_a_move(db):
+    e = build_engine(db, [
+        ("human", "Werebear", (10, 10), 0.0, 0),
+        ("llm", "Werebear", (30, 30), 0.0, 0),
+    ], active="human")
+    # A blocking wall just east of the mover.
+    e.state.terrain.append(TerrainPiece(0, "blocking", (Vec(11.5, 5), Vec(12.5, 5), Vec(12.5, 20), Vec(11.5, 20))))
+    assert e.validate_move(0, (14, 10))["reason"] == "path_blocked"   # straight through the wall
+    assert e.validate_move(0, (12, 10))["reason"] == "in_blocking"    # ends inside the wall
+    assert e.validate_move(0, (10, 13))["ok"] is True                 # stays on the near side
+
+
+def test_hindering_halves_speed(db):
+    e = build_engine(db, [
+        ("human", "Werebear", (10, 10), 0.0, 0),
+        ("llm", "Werebear", (30, 30), 0.0, 0),
+    ], active="human")
+    sp = e.state.figure(0).speed
+    half = max(1, math.ceil(sp / 2))
+    assert sp > half  # Werebear is fast enough for the test to be meaningful
+    # A hindering patch covering the mover's start halves its speed for the turn.
+    e.state.terrain.append(TerrainPiece(0, "hindering", (Vec(6, 6), Vec(14, 6), Vec(14, 14), Vec(6, 14))))
+    assert e.validate_move(0, (10, 10 + sp))["reason"] == "too_far"   # full speed now too far
+    assert e.validate_move(0, (10, 10 + half))["ok"] is True          # within halved speed
