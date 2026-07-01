@@ -56,5 +56,12 @@ def chat_reply(client, system: str, message: str, history: list[dict], engine) -
     if engine is not None:
         content += "\n\n[Live board state]\n" + json.dumps(board_snapshot(engine))
     msgs.append({"role": "user", "content": content})
-    resp = client.messages.create(model=MODEL, max_tokens=400, system=system, messages=msgs)
-    return next((b.text for b in resp.content if getattr(b, "type", "") == "text"), "")
+    # Snappy 1-3 sentence banter: disable thinking so the whole token budget goes to
+    # visible text. (On Sonnet 5 thinking is adaptive-on when omitted, and with a small
+    # max_tokens it consumes the budget, leaving no text block — a blank reply.)
+    resp = client.messages.create(
+        model=MODEL, max_tokens=1024, system=system,
+        thinking={"type": "disabled"}, messages=msgs,
+    )
+    text = next((b.text for b in resp.content if getattr(b, "type", "") == "text"), "").strip()
+    return text or "(Hmm, lost my train of thought — say that again?)"
