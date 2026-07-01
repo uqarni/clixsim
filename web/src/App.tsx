@@ -374,12 +374,49 @@ export default function App() {
     [nearestEnemy, view],
   );
 
+  // Snap a drop point onto exact base contact with the nearest same-faction ally,
+  // so two figures can line up for a future 3+ movement formation. Only snaps to
+  // friendlies of the same faction, never into enemy contact, and never onto a spot
+  // that would overlap another base (returns null when no snap applies).
+  const snapToFriendly = useCallback(
+    (fig: FigureView, dest: [number, number]): [number, number] | null => {
+      if (!view) return null;
+      const SNAP = 1.0; // inches of slack around the base-contact ring
+      let best: [number, number] | null = null;
+      let bestErr = Infinity;
+      for (const nf of view.figures) {
+        if (nf.eliminated || nf.uid === fig.uid) continue;
+        if (nf.owner !== fig.owner || nf.faction !== fig.faction) continue;
+        const dx = dest[0] - nf.pos[0];
+        const dy = dest[1] - nf.pos[1];
+        const dlen = Math.hypot(dx, dy) || 1e-9;
+        const gap = fig.base_radius + nf.base_radius;
+        const err = Math.abs(dlen - gap);
+        if (err > SNAP || err >= bestErr) continue;
+        const cp: [number, number] = [nf.pos[0] + (dx / dlen) * gap, nf.pos[1] + (dy / dlen) * gap];
+        const overlaps = view.figures.some(
+          (o) =>
+            !o.eliminated &&
+            o.uid !== fig.uid &&
+            o.uid !== nf.uid &&
+            Math.hypot(cp[0] - o.pos[0], cp[1] - o.pos[1]) < fig.base_radius + o.base_radius - 1e-3,
+        );
+        if (!overlaps) {
+          best = cp;
+          bestErr = err;
+        }
+      }
+      return best;
+    },
+    [view],
+  );
+
   const onMoveDrag = useCallback(
     (dest: [number, number]) => {
       const fig = view?.figures.find((f) => f.uid === activeUid);
-      if (fig) setMoveGhost(ghostFor(fig, dest));
+      if (fig) setMoveGhost(ghostFor(fig, snapToFriendly(fig, dest) ?? dest));
     },
-    [view, activeUid, ghostFor],
+    [view, activeUid, ghostFor, snapToFriendly],
   );
 
   const onMoveDrop = useCallback(
@@ -387,14 +424,17 @@ export default function App() {
       const fig = view?.figures.find((f) => f.uid === activeUid);
       setMoveGhost(null);
       if (!fig) return;
-      const g = ghostFor(fig, dest);
+      // Prefer a snapped-to-contact destination when it's legal; otherwise the raw drop.
+      const snapped = snapToFriendly(fig, dest);
+      const candidate = snapped && ghostFor(fig, snapped).ok ? snapped : dest;
+      const g = ghostFor(fig, candidate);
       if (!g.ok) {
         log([{ type: "rejected", summary: `Too far — beyond ${fig.speed}" speed.` }]);
         return;
       }
-      setPendingMove({ dest, facing: g.facing });
+      setPendingMove({ dest: candidate, facing: g.facing });
     },
-    [view, activeUid, ghostFor, log],
+    [view, activeUid, ghostFor, snapToFriendly, log],
   );
 
   const confirmMove = useCallback(async () => {
