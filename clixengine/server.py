@@ -33,6 +33,8 @@ from .build import (
     sample_sealed_pool,
 )
 from .candidates import generate_candidates, generate_formation_candidates
+from .chat import build_system, chat_reply
+from .config import get_api_key
 from .data import load_db
 from .demo import demo_armies
 from .engine import Engine
@@ -72,6 +74,22 @@ class Session:
         self.engine: Engine | None = None
         self.opponent = None  # controller for the "llm" side
         self.human_side = "human"
+        self._chat_client = None
+        self._chat_system: str | None = None
+
+    def chat(self, message: str, history: list[dict]) -> str:
+        if self._chat_client is None:
+            key = get_api_key()
+            if not key:
+                return "(Chat is unavailable — no API key configured.)"
+            import anthropic
+
+            self._chat_client = anthropic.Anthropic(api_key=key)
+            self._chat_system = build_system(self.db)
+        try:
+            return chat_reply(self._chat_client, self._chat_system, message, history, self.engine)
+        except Exception as e:
+            return f"(Sorry — I hit an error: {e})"
 
     def start_game(self, human_army: Army, llm_army: Army, build_total: int,
                    seed: int, opponent: str = "llm", board: float = 36.0):
@@ -173,6 +191,11 @@ class ExplainReq(BaseModel):
     target_uid: int
     attack_type: str = "close"
     rear: bool = False
+
+
+class ChatReq(BaseModel):
+    message: str
+    history: list[dict] = []
 
 
 # ------------------------------------------------------------------ #
@@ -281,6 +304,11 @@ def new_game_stream(mode: str = "preconstructed", points: int = 200,
     )
 
 
+@app.post("/api/chat")
+def chat(req: ChatReq):
+    return {"reply": SESSION.chat(req.message, req.history)}
+
+
 @app.get("/api/roster")
 def roster():
     """Full drafting roster (all set pieces) for the preconstructed builder."""
@@ -367,6 +395,33 @@ def opponent_turn():
                       for d in decisions],
         "view": game_view(eng),
     }
+
+
+@app.get("/api/opponent_turn_stream")
+def opponent_turn_stream():
+    """SSE: the opponent's turn, one action at a time, with reasoning + the engine
+    events for each (so the client shows its thinking and animates its moves)."""
+    eng = SESSION.require()
+
+    def gen():
+        def sse(o: dict) -> str:
+            return f"data: {json.dumps(o)}\n\n"
+        if eng.state.active_player == SESSION.human_side:
+            yield sse({"type": "error", "message": "it is the human's turn"})
+            return
+        try:
+            for step in SESSION.opponent.stream_turn(eng):
+                yield sse({"type": "action", "summary": step["summary"],
+                           "reasoning": step["reasoning"], "events": step["events"],
+                           "fallback": step["fallback"], "view": game_view(eng)})
+            yield sse({"type": "done", "view": game_view(eng)})
+        except Exception as e:
+            yield sse({"type": "error", "message": str(e), "view": game_view(eng)})
+
+    return StreamingResponse(
+        gen(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # Serve the built client (web/dist) at / when present, so one process serves all.

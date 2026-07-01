@@ -118,7 +118,7 @@ class LLMOpponent:
         }
         return json.dumps(payload, indent=2)
 
-    def _ask(self, engine: Engine, ranked) -> int | None:
+    def _ask(self, engine: Engine, ranked) -> tuple[int | None, str]:
         prompt = self._prompt(engine, ranked)
         try:
             self.calls += 1
@@ -134,51 +134,59 @@ class LLMOpponent:
             )
         except Exception as e:
             self.last_error = f"API error: {e}"
-            return None
+            return None, ""
         text = next((b.text for b in resp.content if getattr(b, "type", "") == "text"), "")
         try:
             data = json.loads(text)
             cid = int(data["choice_id"])
+            rationale = str(data.get("rationale", ""))
         except Exception as e:
             self.last_error = f"parse error: {e} :: {text[:200]}"
-            return None
+            return None, ""
         valid_ids = {cid_ for cid_, _, _ in ranked}
         if cid not in valid_ids:
             self.last_error = f"choice {cid} out of range"
-            return None
-        return cid
+            return None, rationale
+        return cid, rationale
 
     # ------------------------------------------------------------------ #
     def take_turn(self, engine: Engine) -> list[Decision]:
-        decisions: list[Decision] = []
+        return [
+            Decision(s["figure_uid"], s["candidate"], s["score"],
+                     ("[fallback] " if s["fallback"] else "") + s["summary"])
+            for s in self.stream_turn(engine)
+        ]
+
+    def stream_turn(self, engine: Engine):
+        """Yield one dict per action (summary, LLM reasoning, engine events) as it
+        resolves, then end the turn. Falls back to the heuristic per action."""
         while engine.actionable_figures() and not engine.state.ended:
             ranked = self._ranked_candidates(engine)
             if not ranked:
                 break
-            chosen_id = self._ask(engine, ranked) if self.available else None
-            if chosen_id is None:
-                # Repair: fall back to the heuristic's best decision this action.
+            chosen_id, rationale = self._ask(engine, ranked) if self.available else (None, "")
+            fallback = chosen_id is None
+            if fallback:
                 self.fallbacks += 1
                 best = self._fallback.best_decision(engine)
                 if best is None or best.score <= 0.0:
                     break
-                fig, cand, score = best.figure_uid, best.candidate, best.score
-                decision = Decision(fig, cand, score, "[fallback] " + cand.label)
+                fig_uid, cand, score = best.figure_uid, best.candidate, best.score
+                reasoning = rationale or "Falling back to the strongest available move."
             else:
                 _, fig_obj, cand = next(r for r in ranked if r[0] == chosen_id)
-                if cand.kind == "pass":
-                    # LLM chose to rest this figure; apply and continue.
-                    decision = Decision(fig_obj.uid, cand, 0.0, cand.label)
-                else:
-                    decision = Decision(
-                        fig_obj.uid, cand, score_candidate(engine, fig_obj, cand), cand.label
-                    )
-            result = engine.apply(decision.candidate.intent)
+                fig_uid = fig_obj.uid
+                score = 0.0 if cand.kind == "pass" else score_candidate(engine, fig_obj, cand)
+                reasoning = rationale
+            result = engine.apply(cand.intent)
             if not result.ok:
                 self.last_error = f"engine rejected: {result.reason}"
                 self.fallbacks += 1
                 break
-            decisions.append(decision)
+            yield {
+                "figure_uid": fig_uid, "candidate": cand, "score": score,
+                "summary": cand.label, "reasoning": reasoning,
+                "events": result.events, "fallback": fallback,
+            }
         if not engine.state.ended:
             engine.end_turn()
-        return decisions

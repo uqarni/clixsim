@@ -44,21 +44,46 @@ class HeuristicAI:
 
     def take_turn(self, engine: Engine) -> list[Decision]:
         """Play the active player's whole turn, then end it."""
-        decisions: list[Decision] = []
+        return [
+            Decision(s["figure_uid"], s["candidate"], s["score"], s["summary"])
+            for s in self.stream_turn(engine)
+        ]
+
+    def stream_turn(self, engine: Engine):
+        """Yield one dict per action (summary, reasoning, events) as it resolves,
+        then end the turn — the streaming form used by the live opponent view."""
         while engine.actionable_figures() and not engine.state.ended:
             best = self.best_decision(engine)
             if best is None or best.score <= 0.0:
-                break  # only resting / no-value options remain
+                break
             result = engine.apply(best.candidate.intent)
             if not result.ok:
-                # Should not happen (candidates are pre-validated); skip to avoid loop.
-                engine.apply(_pass_of(best.candidate))
-            decisions.append(best)
+                break
+            yield {
+                "figure_uid": best.figure_uid, "candidate": best.candidate, "score": best.score,
+                "summary": best.summary, "reasoning": _heuristic_reason(best.candidate),
+                "events": result.events, "fallback": False,
+            }
             if engine.state.ended:
                 break
         if not engine.state.ended:
             engine.end_turn()
-        return decisions
+
+
+def _heuristic_reason(cand: Candidate) -> str:
+    a = cand.annotation
+    hit = a.get("hit_odds")
+    if cand.kind in ("close", "ranged", "weapon_master", "magic_blast", "flame_lightning",
+                     "shockwave", "close_formation", "ranged_formation"):
+        odds = f" ({round(hit * 100)}% hit)" if isinstance(hit, (int, float)) else ""
+        return f"Best expected damage{odds}."
+    if cand.kind == "heal":
+        return "Patching up a wounded figure."
+    if cand.kind in ("formation_move", "move"):
+        return "Advancing to a stronger position."
+    if cand.kind == "pass":
+        return "Nothing worth pushing for — resting."
+    return "Strongest available option."
 
 
 def _pass_of(cand: Candidate):
