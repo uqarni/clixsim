@@ -450,7 +450,10 @@ def candidates(uid: int):
     f = eng.state.figures.get(uid)
     if f is None:
         raise HTTPException(404, f"no figure {uid}")
-    return [_candidate_view(c) for c in generate_candidates(eng, f)]
+    return {
+        "candidates": [_candidate_view(c) for c in generate_candidates(eng, f)],
+        "hints": eng.figure_action_hints(f),
+    }
 
 
 @app.get("/api/formation_candidates")

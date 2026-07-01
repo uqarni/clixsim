@@ -9,6 +9,7 @@ interface Props {
   view: GameView;
   selectedFig: FigureView | null;
   candidates: Candidate[];
+  hints: string[];
   formations: Candidate[];
   armed: Candidate | null;
   explain: AttackExplain | null;
@@ -119,6 +120,7 @@ export default function ActionPanel({
   view,
   selectedFig,
   candidates,
+  hints,
   formations,
   armed,
   explain,
@@ -284,6 +286,17 @@ export default function ActionPanel({
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {hints.length > 0 && (
+        <div className="action-hints">
+          {hints.map((h, i) => (
+            <div className="action-hint" key={i}>
+              <span className="action-hint-icon">i</span>
+              <span>{h}</span>
+            </div>
+          ))}
         </div>
       )}
 

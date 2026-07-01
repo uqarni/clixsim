@@ -115,6 +115,7 @@ export default function App() {
   const [selectedUid, setSelectedUid] = useState<number | null>(null);
   const [events, setEvents] = useState<GameEvent[]>([]);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
+  const [hints, setHints] = useState<string[]>([]);
   const [formations, setFormations] = useState<Candidate[]>([]);
   const [armed, setArmed] = useState<Candidate | null>(null);
   const [explain, setExplain] = useState<AttackExplain | null>(null);
@@ -202,6 +203,7 @@ export default function App() {
   useEffect(() => {
     if (!view || selectedUid == null) {
       setCandidates([]);
+      setHints([]);
       return;
     }
     const fig = view.figures.find((f) => f.uid === selectedUid);
@@ -209,12 +211,21 @@ export default function App() {
       !!fig && fig.owner === "human" && fig.can_act && view.meta.active_player === "human" && !view.meta.ended;
     if (!canAct) {
       setCandidates([]);
+      setHints([]);
       return;
     }
     let cancelled = false;
     getCandidates(selectedUid)
-      .then((cs) => !cancelled && setCandidates(cs))
-      .catch(() => !cancelled && setCandidates([]));
+      .then((res) => {
+        if (cancelled) return;
+        setCandidates(res.candidates);
+        setHints(res.hints);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setCandidates([]);
+        setHints([]);
+      });
     return () => {
       cancelled = true;
     };
@@ -528,6 +539,7 @@ export default function App() {
               view={view}
               selectedFig={selectedFig}
               candidates={candidates}
+              hints={hints}
               formations={formations}
               armed={armed}
               explain={explain}

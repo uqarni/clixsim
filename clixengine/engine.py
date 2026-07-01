@@ -395,6 +395,106 @@ class Engine:
                 out.append(t)
         return out
 
+    def _same_faction_cluster_size(self, figure: Figure) -> int:
+        """Size of the base-contact-connected group of same-faction friendlies
+        (incl. ``figure``) — used to explain when a pair is short of a formation."""
+        same = {f.uid: f for f in self.state.living(figure.owner)
+                if f.definition.faction == figure.definition.faction}
+        if figure.uid not in same:
+            return 0
+        seen, stack = set(), [figure.uid]
+        while stack:
+            u = stack.pop()
+            if u in seen:
+                continue
+            seen.add(u)
+            fu = same[u]
+            for v, fv in same.items():
+                if v not in seen and in_base_contact(
+                    fu.position, fu.base_radius, fv.position, fv.base_radius
+                ):
+                    stack.append(v)
+        return len(seen)
+
+    def figure_action_hints(self, figure: Figure) -> list[str]:
+        """Human-readable reasons an *expected* action isn't offered, so the UI can
+        explain "why can't I attack/heal/form up here" instead of silently showing
+        nothing. Faithful to the rules — these describe correct restrictions, they
+        do not relax them. Returns at most a few of the most relevant hints."""
+        if figure.owner != self.state.active_player or not figure.is_alive:
+            return []
+        aids = figure.active_ability_ids()
+        hints: list[str] = []
+        is_ranged = figure.range > 0 and ab.can_make_ranged_attack(figure)
+        in_contact = bool(self.state.opposing_contacts(figure))
+        close_ok = {t.uid for t, _ in self.legal_close_targets(figure)}
+        ranged_ok = {t.uid for t in self.legal_ranged_targets(figure)}
+        friends = self.state.friends_of(figure)
+
+        # --- attacks: explain a near-but-unattackable enemy -------------------
+        for e in sorted(self.state.opponents_of(figure),
+                        key=lambda o: distance(figure.position, o.position)):
+            if e.uid in close_ok or e.uid in ranged_ok:
+                continue
+            adjacent = in_base_contact(figure.position, figure.base_radius,
+                                       e.position, e.base_radius)
+            in_arc = in_front_arc(figure.position, figure.facing, e.position,
+                                  figure.arc_half_angle)
+            if adjacent:
+                if not in_arc:
+                    hints.append(f"Can't close-attack {e.short_name}: it's beside/behind "
+                                 f"you — a close attack needs it in your front arc (P4-R27). "
+                                 f"Re-face with a move (uses the action), or spin free if it "
+                                 f"just moved into you.")
+            elif is_ranged and distance(figure.position, e.position) <= figure.range + 1e-9:
+                if in_contact:
+                    hints.append(f"Can't shoot {e.short_name}: you're in base contact, so no "
+                                 f"ranged attack (P4-R23) — close-attack instead or break away.")
+                elif not in_arc:
+                    hints.append(f"Can't shoot {e.short_name}: it's not in your front arc "
+                                 f"(P4-R24). Re-face toward it with a move.")
+                elif any(in_base_contact(e.position, e.base_radius, fr.position, fr.base_radius)
+                         for fr in friends):
+                    hints.append(f"Can't shoot {e.short_name}: it's in base contact with one "
+                                 f"of your own figures (P4-R25) — you'd risk your ally.")
+                else:
+                    clear, reason = self.line_of_fire(figure.uid, e.uid)
+                    if not clear:
+                        hints.append(f"Can't shoot {e.short_name}: {reason} (P4-R24).")
+            if len(hints) >= 3:
+                break
+
+        # --- healing (Healing / Magic Healing) -------------------------------
+        heal_touch = ab.HEALING in aids
+        heal_ranged = ab.MAGIC_HEALING in aids
+        if heal_touch or heal_ranged:
+            for fr in friends:
+                wounded = fr.current_click > fr.definition.starting_click and fr.is_alive
+                if not wounded:
+                    continue
+                near = distance(figure.position, fr.position)
+                if heal_ranged:
+                    if near > figure.range + 1e-9:
+                        continue
+                    if not in_front_arc(figure.position, figure.facing, fr.position,
+                                        figure.arc_half_angle):
+                        hints.append(f"Can't heal {fr.short_name}: your Magic Healing is a "
+                                     f"ranged action — the ally must be in your front arc. "
+                                     f"Re-face toward it.")
+                        break
+                elif heal_touch:
+                    if not in_base_contact(figure.position, figure.base_radius,
+                                           fr.position, fr.base_radius):
+                        hints.append(f"Can't heal {fr.short_name}: Healing needs base contact "
+                                     f"— move adjacent first.")
+                        break
+
+        # --- formation short of the minimum ----------------------------------
+        if not figure.is_demoralized and self._same_faction_cluster_size(figure) == 2:
+            hints.append("Form up: a movement formation needs 3–5 same-faction figures in "
+                         "base contact — you have 2, so bring one more alongside.")
+        return hints[:4]
+
     # ------------------------------------------------------------------ #
     # apply(intent)
     # ------------------------------------------------------------------ #

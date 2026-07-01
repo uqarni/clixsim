@@ -24,7 +24,9 @@ def test_new_game_returns_full_view(client):
 def test_candidate_intent_round_trip(client):
     v = client.get("/api/state").json()
     uid = next(f["uid"] for f in v["figures"] if f["owner"] == "human" and f["can_act"])
-    cands = client.get(f"/api/candidates/{uid}").json()
+    body = client.get(f"/api/candidates/{uid}").json()
+    assert {"candidates", "hints"} <= set(body) and isinstance(body["hints"], list)
+    cands = body["candidates"]
     assert cands and all({"kind", "label", "annotation", "intent"} <= set(c) for c in cands)
     # The intent a candidate carries must apply cleanly when sent straight back.
     res = client.post("/api/intent", json=cands[0]["intent"]).json()

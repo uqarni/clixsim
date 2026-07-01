@@ -206,10 +206,14 @@ export async function newGame(points: number, seed: number): Promise<GameView> {
   });
 }
 
-// GET /api/candidates/{uid}
-export async function getCandidates(uid: number): Promise<Candidate[]> {
-  if (USE_MOCK) return [];
-  return req<Candidate[]>(`/api/candidates/${uid}`);
+// GET /api/candidates/{uid} — legal actions + "why not" hints for the selection.
+export interface CandidatesResult {
+  candidates: Candidate[];
+  hints: string[];
+}
+export async function getCandidates(uid: number): Promise<CandidatesResult> {
+  if (USE_MOCK) return { candidates: [], hints: [] };
+  return req<CandidatesResult>(`/api/candidates/${uid}`);
 }
 
 // GET /api/formation_candidates — turn-level movement/combat formations.
