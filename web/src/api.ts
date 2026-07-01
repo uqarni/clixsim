@@ -305,3 +305,26 @@ export async function opponentTurn(): Promise<OpponentTurnResult> {
   if (USE_MOCK) return { decisions: [], view: clone(MOCK_VIEW) };
   return req<OpponentTurnResult>("/api/opponent_turn", { method: "POST" });
 }
+
+// SSE: the opponent's turn action-by-action.
+export type OpponentStreamEvent =
+  | { type: "action"; summary: string; reasoning: string; fallback: boolean; events: GameEvent[]; view: GameView }
+  | { type: "done"; view: GameView }
+  | { type: "error"; message: string; view?: GameView };
+export function opponentTurnStreamUrl(): string {
+  return "/api/opponent_turn_stream";
+}
+
+// POST /api/chat — talk to the opponent.
+export interface ChatMsg {
+  role: "user" | "assistant";
+  content: string;
+}
+export async function chat(message: string, history: ChatMsg[]): Promise<string> {
+  if (USE_MOCK) return "(mock) Nice move!";
+  const r = await req<{ reply: string }>("/api/chat", {
+    method: "POST",
+    body: JSON.stringify({ message, history }),
+  });
+  return r.reply;
+}

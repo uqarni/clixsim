@@ -500,6 +500,93 @@ button {
   min-height: 60px;
 }
 
+/* opponent panel: forces + live reasoning + chat */
+.opp-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 8px;
+  overflow: hidden;
+}
+.opp-forces {
+  flex: 0 0 auto;
+  max-height: 26%;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.opp-thoughts {
+  flex: 1 1 auto;
+  min-height: 48px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.thought {
+  border-left: 2px solid var(--llm);
+  padding: 2px 0 4px 8px;
+}
+.thought-move {
+  font-size: 12px;
+  font-weight: 500;
+}
+.thought-reason {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 1px;
+}
+.chat {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+}
+.chat-list {
+  max-height: 200px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.chat-msg {
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 5px 8px;
+  border-radius: 8px;
+  max-width: 92%;
+}
+.chat-msg.user {
+  align-self: flex-end;
+  background: var(--human-soft);
+  border: 1px solid var(--border);
+}
+.chat-msg.assistant {
+  align-self: flex-start;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+}
+.chat-typing {
+  opacity: 0.6;
+}
+.chat-input {
+  display: flex;
+  gap: 4px;
+}
+.chat-input input {
+  flex: 1;
+  min-width: 0;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 5px 8px;
+  color: var(--text);
+  font: inherit;
+}
+
 .empty {
   color: var(--text-faint);
   font-size: 11px;

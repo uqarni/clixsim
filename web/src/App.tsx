@@ -6,10 +6,11 @@ import {
   getCandidates,
   getFormationCandidates,
   getState,
-  opponentTurn,
+  opponentTurnStreamUrl,
   toggleAbility,
   validateMove,
   type ApplyResult,
+  type OpponentStreamEvent,
   type AttackExplain,
   type Candidate,
   type FigureView,
@@ -121,7 +122,9 @@ export default function App() {
   const [fx, setFx] = useState<Fx[]>([]);
   const [fxSeq, setFxSeq] = useState(0);
   const [busy, setBusy] = useState(false);
-  const lastOppTurn = useRef(-1); // turn number we've already run the opponent for
+  const [oppThoughts, setOppThoughts] = useState<{ summary: string; reasoning: string; fallback: boolean }[]>([]);
+  const viewRef = useRef<GameView | null>(null);
+  const oppStreamRef = useRef<EventSource | null>(null);
 
   const log = useCallback((items: GameEvent[]) => {
     if (items.length === 0) return;
@@ -146,35 +149,53 @@ export default function App() {
     setPendingMove(null);
   }, [selectedUid]);
 
-  // Auto-run the opponent whenever it's their turn (incl. LLM going first).
-  // Guarded by turn number so it runs exactly once per opponent turn (idempotent
-  // under React StrictMode's dev double-invoke); on any error we resync via state.
   useEffect(() => {
-    if (!view || view.meta.ended || view.meta.active_player === "human") return;
-    if (lastOppTurn.current === view.meta.turn) return;
-    lastOppTurn.current = view.meta.turn;
-    (async () => {
-      setBusy(true);
-      try {
-        const r = await opponentTurn();
-        const lines: GameEvent[] = r.decisions
-          .map((d) => (d && typeof d === "object" && "summary" in d ? String((d as { summary: unknown }).summary) : String(d)))
-          .map((s) => ({ type: "opponent", summary: s }));
-        log(lines.length ? lines : [{ type: "opponent", summary: "Opponent passed." }]);
-        setView(r.view);
-        log([{ type: "turn", summary: r.view.meta.ended ? `Game over — winner: ${r.view.meta.winner ?? "draw"}.` : "Your turn." }]);
-      } catch {
-        // Another call may have already advanced the turn — resync quietly.
-        try {
-          setView(await getState());
-        } catch (e2) {
-          log([{ type: "error", summary: `Opponent turn failed: ${String(e2)}` }]);
+    viewRef.current = view;
+  }, [view]);
+
+  // Stream the opponent's turn action-by-action: log + reason + animate each move.
+  // Called imperatively (not from a view-dependent effect) so the EventSource
+  // survives per-action re-renders and StrictMode's dev double-invoke.
+  const runOpponentStream = useCallback(() => {
+    if (oppStreamRef.current) return; // already streaming this turn
+    setBusy(true);
+    setOppThoughts([]);
+    let prev = viewRef.current; // pre-action view, for anchoring effects
+    const es = new EventSource(opponentTurnStreamUrl());
+    oppStreamRef.current = es;
+    const finish = () => {
+      es.close();
+      oppStreamRef.current = null;
+      setBusy(false);
+    };
+    es.onmessage = (m) => {
+      const e = JSON.parse(m.data) as OpponentStreamEvent;
+      if (e.type === "action") {
+        if (prev) {
+          const eff = deriveFx(e.events, prev);
+          if (eff.length) {
+            setFx(eff);
+            setFxSeq((n) => n + 1);
+          }
         }
-      } finally {
-        setBusy(false);
+        log([{ type: "opponent", summary: (e.fallback ? "[fallback] " : "") + e.summary }]);
+        setOppThoughts((ts) => [...ts, { summary: e.summary, reasoning: e.reasoning, fallback: e.fallback }]);
+        prev = e.view;
+        setView(e.view);
+      } else if (e.type === "done") {
+        setView(e.view);
+        log([{ type: "turn", summary: e.view.meta.ended ? `Game over — winner: ${e.view.meta.winner ?? "draw"}.` : "Your turn." }]);
+        finish();
+      } else if (e.type === "error") {
+        if (e.view) setView(e.view);
+        finish();
       }
-    })();
-  }, [view, log]);
+    };
+    es.onerror = () => {
+      getState().then(setView).catch(() => {});
+      finish();
+    };
+  }, [log]);
 
   // Selected figure's legal candidates.
   useEffect(() => {
@@ -394,14 +415,19 @@ export default function App() {
     setBusy(true);
     try {
       const v = await endTurn();
+      viewRef.current = v;
       setView(v);
       log([{ type: "turn", summary: "Turn ended. Opponent is thinking…" }]);
+      if (v.meta.active_player !== "human" && !v.meta.ended) {
+        runOpponentStream(); // keeps busy true until the opponent finishes
+      } else {
+        setBusy(false);
+      }
     } catch (err) {
       log([{ type: "error", summary: `End turn failed: ${String(err)}` }]);
-    } finally {
       setBusy(false);
     }
-  }, [busy, view, log]);
+  }, [busy, view, log, runOpponentStream]);
 
   // --- new-game flow ---
   const startDraft = useCallback((c: GameConfig) => {
@@ -415,15 +441,21 @@ export default function App() {
   }, []);
 
   const onReady = useCallback((v: GameView) => {
-    lastOppTurn.current = -1;
+    if (oppStreamRef.current) {
+      oppStreamRef.current.close();
+      oppStreamRef.current = null;
+    }
     setSelectedUid(null);
     setArmed(null);
     setMoveGhost(null);
     setPendingMove(null);
+    setOppThoughts([]);
     setEvents([{ type: "info", summary: "Battle begins." }]);
+    viewRef.current = v;
     setView(v);
     setPhase("battle");
-  }, []);
+    if (v.meta.active_player !== "human" && !v.meta.ended) runOpponentStream();
+  }, [runOpponentStream]);
 
   const handleNewGame = useCallback(() => {
     setView(null);
@@ -495,7 +527,7 @@ export default function App() {
             />
           </div>
         </div>
-        <OpponentPanel figures={view.figures} selectedUid={selectedUid} onSelect={setSelectedUid} />
+        <OpponentPanel figures={view.figures} selectedUid={selectedUid} onSelect={setSelectedUid} thoughts={oppThoughts} />
         <LogLedger view={view} events={events} />
       </div>
 
