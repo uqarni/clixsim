@@ -3,10 +3,11 @@ import type { GameView } from "../api";
 interface Props {
   view: GameView;
   onEndTurn: () => void;
+  onNewGame: () => void;
 }
 
 // Top HUD bar: turn, active player, action pips, VP, end-turn.
-export default function TurnHud({ view, onEndTurn }: Props) {
+export default function TurnHud({ view, onEndTurn, onNewGame }: Props) {
   const m = view.meta;
   const spent = Math.max(0, m.actions_per_turn - m.actions_remaining);
 
@@ -56,6 +57,9 @@ export default function TurnHud({ view, onEndTurn }: Props) {
         </div>
       )}
 
+      <button className="btn" onClick={onNewGame} type="button">
+        New game
+      </button>
       <button
         className="btn primary"
         onClick={onEndTurn}

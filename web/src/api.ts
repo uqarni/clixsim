@@ -209,6 +209,37 @@ export async function explainAttack(
   });
 }
 
+// --- new-game construction stream (Server-Sent Events) ---------------------
+export interface ConstructFigure {
+  id: number;
+  name: string;
+  faction: string;
+  points: number;
+  role: string;
+  rank: string;
+  abilities: string[];
+}
+export type ConstructEvent =
+  | { type: "start"; mode: string; budget: number }
+  | { type: "pool"; side: "human" | "llm"; pool: ConstructFigure[] }
+  | { type: "human_army"; army: ConstructFigure[]; points: number }
+  | { type: "llm_start"; available: boolean }
+  | { type: "llm_pick"; figure: ConstructFigure; reasoning: string; used_llm: boolean; remaining: number; army: ConstructFigure[]; points: number }
+  | { type: "llm_stop"; reasoning: string; used_llm: boolean }
+  | { type: "llm_army"; army: ConstructFigure[]; points: number }
+  | { type: "ready"; view: GameView }
+  | { type: "error"; message: string };
+
+export function newGameStreamUrl(
+  mode: "preconstructed" | "sealed",
+  points: number,
+  opponent: "llm" | "heuristic",
+  seed: number,
+): string {
+  const p = new URLSearchParams({ mode, points: String(points), opponent, seed: String(seed) });
+  return `/api/new_game_stream?${p.toString()}`;
+}
+
 // Toggle an optional ability off/on (P4-R34) — routes through /api/intent.
 export async function toggleAbility(
   figureUid: number,

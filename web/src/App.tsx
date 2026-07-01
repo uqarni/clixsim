@@ -5,7 +5,6 @@ import {
   explainAttack,
   getCandidates,
   getFormationCandidates,
-  getState,
   opponentTurn,
   toggleAbility,
   validateMove,
@@ -18,9 +17,11 @@ import {
 } from "./api";
 import ActionPanel from "./components/ActionPanel";
 import BoardCanvas from "./components/BoardCanvas";
+import Construction from "./components/Construction";
 import DialInspector from "./components/DialInspector";
 import ForceRail from "./components/ForceRail";
 import LogLedger from "./components/LogLedger";
+import NewGame, { type GameConfig } from "./components/NewGame";
 import OpponentPanel from "./components/OpponentPanel";
 import TurnHud from "./components/TurnHud";
 
@@ -55,6 +56,9 @@ function intentField(c: Candidate, key: string): number | null {
 }
 
 export default function App() {
+  const [phase, setPhase] = useState<"menu" | "constructing" | "battle">("menu");
+  const [config, setConfig] = useState<GameConfig | null>(null);
+
   const [view, setView] = useState<GameView | null>(null);
   const [selectedUid, setSelectedUid] = useState<number | null>(null);
   const [events, setEvents] = useState<GameEvent[]>([]);
@@ -72,22 +76,6 @@ export default function App() {
     setEvents((prev) => [...prev, ...items].slice(-MAX_LOG));
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    getState()
-      .then((v) => {
-        if (cancelled) return;
-        setView(v);
-        log([{ type: "info", summary: "Game state loaded." }]);
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) log([{ type: "error", summary: `Failed to load state: ${String(err)}` }]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [log]);
-
   const selectedFig = useMemo(
     () => view?.figures.find((f) => f.uid === selectedUid) ?? null,
     [view, selectedUid],
@@ -100,53 +88,13 @@ export default function App() {
       : null;
   const canToggle = !!selectedFig && selectedFig.owner === "human" && isHumanTurn;
 
-  // Reset transient interaction state when the selection changes.
   useEffect(() => {
     setArmed(null);
     setMoveGhost(null);
     setPendingMove(null);
   }, [selectedUid]);
 
-  // Selected figure's legal candidates (when it can act).
-  useEffect(() => {
-    if (!view || selectedUid == null) {
-      setCandidates([]);
-      return;
-    }
-    const fig = view.figures.find((f) => f.uid === selectedUid);
-    const canAct =
-      !!fig && fig.owner === "human" && fig.can_act && view.meta.active_player === "human" && !view.meta.ended;
-    if (!canAct) {
-      setCandidates([]);
-      return;
-    }
-    let cancelled = false;
-    getCandidates(selectedUid)
-      .then((cs) => !cancelled && setCandidates(cs))
-      .catch(() => !cancelled && setCandidates([]));
-    return () => {
-      cancelled = true;
-    };
-  }, [view, selectedUid]);
-
-  // Turn-level formation candidates.
-  useEffect(() => {
-    if (!view || view.meta.active_player !== "human" || view.meta.ended) {
-      setFormations([]);
-      return;
-    }
-    let cancelled = false;
-    getFormationCandidates()
-      .then((cs) => !cancelled && setFormations(cs))
-      .catch(() => !cancelled && setFormations([]));
-    return () => {
-      cancelled = true;
-    };
-  }, [view]);
-
-  // When it's the opponent's turn (including the LLM going first), run it
-  // automatically. Guarded by a ref (not a cleanup flag) so it fires exactly once
-  // per opponent turn and survives React StrictMode's double-invoke in dev.
+  // Auto-run the opponent whenever it's their turn (incl. LLM going first).
   useEffect(() => {
     if (!view || view.meta.ended || view.meta.active_player === "human") return;
     if (oppRunning.current) return;
@@ -170,7 +118,44 @@ export default function App() {
     })();
   }, [view, log]);
 
-  // Fetch the modifier breakdown when an attack is armed.
+  // Selected figure's legal candidates.
+  useEffect(() => {
+    if (!view || selectedUid == null) {
+      setCandidates([]);
+      return;
+    }
+    const fig = view.figures.find((f) => f.uid === selectedUid);
+    const canAct =
+      !!fig && fig.owner === "human" && fig.can_act && view.meta.active_player === "human" && !view.meta.ended;
+    if (!canAct) {
+      setCandidates([]);
+      return;
+    }
+    let cancelled = false;
+    getCandidates(selectedUid)
+      .then((cs) => !cancelled && setCandidates(cs))
+      .catch(() => !cancelled && setCandidates([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [view, selectedUid]);
+
+  // Turn-level formations.
+  useEffect(() => {
+    if (!view || view.meta.active_player !== "human" || view.meta.ended) {
+      setFormations([]);
+      return;
+    }
+    let cancelled = false;
+    getFormationCandidates()
+      .then((cs) => !cancelled && setFormations(cs))
+      .catch(() => !cancelled && setFormations([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [view]);
+
+  // Attack modifier breakdown when an attack is armed.
   useEffect(() => {
     if (!armed || !view) {
       setExplain(null);
@@ -209,8 +194,6 @@ export default function App() {
 
   const handleApply = useCallback(
     (res: ApplyResult) => {
-      // Prefer the granular formatted events; fall back to the summary only when
-      // an OK result produced no events (avoids double-logging each action).
       const out: GameEvent[] = res.events.slice();
       if (res.ok && out.length === 0 && res.summary) out.push({ type: "summary", summary: res.summary });
       if (!res.ok) out.push({ type: "rejected", summary: `Rejected: ${res.reason ?? "illegal"}${res.detail ? ` — ${res.detail}` : ""}` });
@@ -259,7 +242,6 @@ export default function App() {
     [selectedFig, busy, handleApply, log],
   );
 
-  // --- free-placement move (drag to place, aim via handle, confirm) ---
   const nearestEnemy = useCallback(
     (from: [number, number], owner: string): FigureView | null => {
       if (!view) return null;
@@ -312,7 +294,7 @@ export default function App() {
         log([{ type: "rejected", summary: `Too far — beyond ${fig.speed}" speed.` }]);
         return;
       }
-      setPendingMove({ dest, facing: g.facing }); // place; aim via the handle, then confirm
+      setPendingMove({ dest, facing: g.facing });
     },
     [view, activeUid, ghostFor, log],
   );
@@ -346,7 +328,6 @@ export default function App() {
     setSelectedUid(null);
     setBusy(true);
     try {
-      // End the human turn; the opponent effect picks up and plays the LLM turn.
       const v = await endTurn();
       setView(v);
       log([{ type: "turn", summary: "Turn ended. Opponent is thinking…" }]);
@@ -357,21 +338,39 @@ export default function App() {
     }
   }, [busy, view, log]);
 
-  if (!view) {
-    return (
-      <div className="app">
-        <div className="hud">
-          <span className="hud-title">Clix Engine</span>
-          <div className="hud-group">Loading…</div>
-        </div>
-        <div className="zones" />
-      </div>
-    );
-  }
+  // --- new-game flow ---
+  const startConstruction = useCallback((c: GameConfig) => {
+    setConfig(c);
+    setPhase("constructing");
+  }, []);
+
+  const onReady = useCallback((v: GameView) => {
+    oppRunning.current = false;
+    setSelectedUid(null);
+    setArmed(null);
+    setMoveGhost(null);
+    setPendingMove(null);
+    setEvents([{ type: "info", summary: "Battle begins." }]);
+    setView(v);
+    setPhase("battle");
+  }, []);
+
+  const handleNewGame = useCallback(() => {
+    setView(null);
+    setPhase("menu");
+  }, []);
+
+  if (phase === "menu") return <NewGame onStart={startConstruction} />;
+  if (phase === "constructing" && config)
+    return <Construction config={config} onReady={onReady} onCancel={() => setPhase("menu")} />;
+  if (!view) return <NewGame onStart={startConstruction} />;
+
+  const gameOver = view.meta.ended;
+  const outcome = view.meta.winner === "human" ? "Victory" : view.meta.winner === "llm" ? "Defeat" : "Draw";
 
   return (
     <div className="app">
-      <TurnHud view={view} onEndTurn={handleEndTurn} />
+      <TurnHud view={view} onEndTurn={handleEndTurn} onNewGame={handleNewGame} />
       <div className="zones">
         <ForceRail figures={view.figures} selectedUid={selectedUid} onSelect={setSelectedUid} />
         <DialInspector fig={selectedFig} canToggle={canToggle} onToggle={onToggle} />
@@ -417,6 +416,20 @@ export default function App() {
         <OpponentPanel figures={view.figures} selectedUid={selectedUid} onSelect={setSelectedUid} />
         <LogLedger view={view} events={events} />
       </div>
+
+      {gameOver && (
+        <div className="overlay">
+          <div className="overlay-card">
+            <h1 className={`overlay-title ${view.meta.winner ?? "draw"}`}>{outcome}</h1>
+            <p className="menu-sub">
+              Winner: {view.meta.winner ?? "draw"} · VP {view.meta.victory_points.human}–{view.meta.victory_points.llm}
+            </p>
+            <button className="btn primary" onClick={handleNewGame} type="button">
+              New game
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

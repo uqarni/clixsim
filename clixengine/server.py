@@ -213,7 +213,10 @@ def _construct_stream(mode: str, points: int, opponent: str, seed: int):
                    "points": human_army.total_points(db)})
 
         # LLM army — drafted one figure at a time, streamed with reasoning.
+        # "Heuristic (fast)" opponent drafts heuristically too (no LLM latency).
         builder = ArmyBuilder()
+        if opponent == "heuristic":
+            builder.available = False
         yield sse({"type": "llm_start", "available": builder.available})
         llm_ids: list[int] = []
         used_uniques: set[int] = set()
