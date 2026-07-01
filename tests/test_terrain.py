@@ -98,3 +98,40 @@ def test_hindering_halves_speed(db):
     e.state.terrain.append(TerrainPiece(0, "hindering", (Vec(6, 6), Vec(14, 6), Vec(14, 14), Vec(6, 14))))
     assert e.validate_move(0, (10, 10 + sp))["reason"] == "too_far"   # full speed now too far
     assert e.validate_move(0, (10, 10 + half))["ok"] is True          # within halved speed
+
+
+# --- terrain effects on line of fire + combat ------------------------------
+def _shooter(db):
+    return build_engine(db, [
+        ("human", "Utem Crossbowman", (10, 10), math.pi / 2, 0),
+        ("llm", "Werebear", (10, 14), -math.pi / 2, 0),
+    ], active="human")
+
+
+def test_blocking_terrain_blocks_line_of_fire(db):
+    e = _shooter(db)
+    assert e.line_of_fire(0, 1)[0] is True  # clear first
+    e.state.terrain.append(TerrainPiece(0, "blocking", (Vec(8, 11.5), Vec(12, 11.5), Vec(12, 12.5), Vec(8, 12.5))))
+    ok, reason = e.line_of_fire(0, 1)
+    assert not ok and "terrain" in reason
+
+
+def test_hindering_adds_defense_vs_ranged_only(db):
+    e = _shooter(db)
+    assert e.explain_attack(0, 1, "ranged")["defense"]["terrain"] == 0
+    e.state.terrain.append(TerrainPiece(0, "hindering", (Vec(8, 11.5), Vec(12, 11.5), Vec(12, 12.5), Vec(8, 12.5))))
+    assert e.explain_attack(0, 1, "ranged")["defense"]["terrain"] == 1  # +1 hindering
+    # close combat is unaffected by hindering (no elevation here).
+    assert e.terrain_defense_mod(e.state.figure(0), e.state.figure(1), "close") == 0
+
+
+def test_height_advantage_vs_elevated_target(db):
+    e = _shooter(db)
+    base = e.explain_attack(0, 1, "ranged")["defense"]["effective"]
+    # Put the target on an elevated hill (it stands on it, so its own hill won't block).
+    e.state.terrain.append(TerrainPiece(0, "clear", (Vec(8, 12), Vec(12, 12), Vec(12, 16), Vec(8, 16)), elevated=True))
+    x = e.explain_attack(0, 1, "ranged")
+    assert x["defense"]["terrain"] >= 1  # height advantage +1
+    assert x["defense"]["effective"] == base + x["defense"]["terrain"]
+    # height advantage applies to close combat too (target elevated, attacker not).
+    assert e.terrain_defense_mod(e.state.figure(0), e.state.figure(1), "close") == 1

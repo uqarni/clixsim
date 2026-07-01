@@ -105,31 +105,65 @@ class Engine:
         v, t = self.state.figure(viewer_uid), self.state.figure(target_uid)
         return in_front_arc(v.position, v.facing, t.position, v.arc_half_angle)
 
+    def _elev(self, p: Vec) -> int:
+        return terr.elevation_at(self.state.terrain, p) if self.state.terrain else 0
+
+    def _stand_on(self, p: Vec) -> list:
+        return [t for t in self.state.terrain if t.elevated and t.contains(p)]
+
     def line_of_fire(self, attacker_uid: int, target_uid: int) -> tuple[bool, str]:
-        """Straight centre->centre LoF (P4-R24). Returns (clear, reason)."""
+        """Straight centre->centre LoF (P4-R24) incl. terrain/elevation blocking.
+        Returns (clear, reason)."""
         a = self.state.figure(attacker_uid)
         t = self.state.figure(target_uid)
-        # Must pass through the firer's front arc.
         if not in_front_arc(a.position, a.facing, t.position, a.arc_half_angle):
             return False, "target not in firer's front arc"
-        # Length must be within range.
         if distance(a.position, t.position) > a.range + 1e-9:
             return False, "target beyond range"
-        # Blocked if it crosses any base other than firer/target.
+        elev_a, elev_t = self._elev(a.position), self._elev(t.position)
+        # Blocking terrain / elevation blocks the line of fire.
+        if self.state.terrain:
+            blocked, _ = terr.lof_terrain(
+                self.state.terrain, a.position, t.position, elev_a, elev_t,
+                self._stand_on(a.position), self._stand_on(t.position))
+            if blocked:
+                return False, "line of fire blocked by terrain"
+        # Blocked if it crosses an intervening base — but a fully-elevated shot
+        # ignores non-elevated bases (§Elevated Terrain).
+        both_elev = elev_a == 1 and elev_t == 1
         for other in self.state.living():
             if other.uid in (attacker_uid, target_uid):
+                continue
+            if both_elev and self._elev(other.position) == 0:
                 continue
             if segment_circle_intersects(
                 a.position, t.position, other.position, other.base_radius
             ):
                 return False, f"line of fire blocked by {other.short_name}"
-        # May not target an opponent in base contact with a firer-friendly figure.
         for friend in self.state.friends_of(a):
             if in_base_contact(
                 t.position, t.base_radius, friend.position, friend.base_radius
             ):
                 return False, "target is in base contact with a friendly figure"
         return True, "clear"
+
+    def terrain_defense_mod(self, a: Figure, t: Figure, attack_type: str) -> int:
+        """Terrain contribution to the target's defense: +1 for a line of fire
+        crossing hindering (ranged only), +1 height advantage when the attacker is
+        on the ground and the target is elevated (ranged and close)."""
+        if not self.state.terrain:
+            return 0
+        elev_a, elev_t = self._elev(a.position), self._elev(t.position)
+        mod = 0
+        if attack_type == "ranged":
+            _, hindering = terr.lof_terrain(
+                self.state.terrain, a.position, t.position, elev_a, elev_t,
+                self._stand_on(a.position), self._stand_on(t.position))
+            if hindering:
+                mod += 1
+        if elev_t == 1 and elev_a == 0:  # height advantage
+            mod += 1
+        return mod
 
     def hit_odds(
         self,
@@ -141,7 +175,8 @@ class Engine:
         a = self.state.figure(attacker_uid)
         t = self.state.figure(target_uid)
         atk = a.attack + (1 if rear_bonus else 0)
-        return hit_probability(atk, ab.effective_defense(self.state, t, attack_type))
+        tmod = self.terrain_defense_mod(a, t, attack_type)
+        return hit_probability(atk, ab.effective_defense(self.state, t, attack_type, tmod))
 
     def expected_damage(
         self,
@@ -157,7 +192,8 @@ class Engine:
         base_dmg = a.damage if dmg is None else dmg
         if attack_type == "ranged":
             base_dmg += ab.ranged_damage_bonus(self.state, a, t)  # Magic Enhancement +1
-        eff_def = ab.effective_defense(self.state, t, attack_type)
+        eff_def = ab.effective_defense(
+            self.state, t, attack_type, self.terrain_defense_mod(a, t, attack_type))
         # Fold damage-reducing abilities (Toughness, Magic Immunity) into each term:
         # a normal hit delivers ``base_dmg``, a natural 12 delivers ``base_dmg + 1``.
         p_crit = crit_hit_probability()
@@ -315,7 +351,8 @@ class Engine:
             ):
                 best_share = max(best_share, fr.defense)
         defend = max(0, best_share - base_def)
-        eff_def = ab.effective_defense(self.state, t, attack_type)
+        tmod = self.terrain_defense_mod(a, t, attack_type)
+        eff_def = ab.effective_defense(self.state, t, attack_type, tmod)
         base_dmg = a.damage
         enh = ab.ranged_damage_bonus(self.state, a, t) if attack_type == "ranged" else 0
         per_hit = ab.damage_after_defenses(t, base_dmg + enh, attack_type, is_magic=False)
@@ -323,7 +360,7 @@ class Engine:
         return {
             "attack": a.attack + (1 if rear else 0),
             "rear": rear,
-            "defense": {"base": base_def, "battle_armor": ba, "defend": defend, "effective": eff_def},
+            "defense": {"base": base_def, "battle_armor": ba, "defend": defend, "terrain": tmod, "effective": eff_def},
             "damage": {"base": base_dmg, "enhancement": enh, "toughness": toughness, "per_hit": per_hit},
             "hit_odds": round(self.hit_odds(attacker_uid, target_uid, rear, attack_type), 3),
             "expected_clicks": round(
@@ -553,7 +590,7 @@ class Engine:
         d1, d2, total = self.rng.roll_2d6("attack", f"{f.short_name} ranged")
         multi = len(targets) > 1
         for t in targets:
-            eff_def = ab.effective_defense(self.state, t, "ranged")
+            eff_def = ab.effective_defense(self.state, t, "ranged", self.terrain_defense_mod(f, t, "ranged"))
             res = outcome(d1, d2, f.attack, eff_def)
             if res not in ("hit", "crit_hit"):
                 events.append(self.log.emit("ranged_attack", attacker=f.uid, target=t.uid,
@@ -605,7 +642,7 @@ class Engine:
         rear = in_rear_arc(t.position, t.facing, f.position, t.arc_half_angle)
         atk = f.attack + (1 if rear else 0)
         d1, d2, total = self.rng.roll_2d6("attack", f"{f.short_name} close")
-        eff_def = ab.effective_defense(self.state, t, "close")
+        eff_def = ab.effective_defense(self.state, t, "close", self.terrain_defense_mod(f, t, "close"))
         res = outcome(d1, d2, atk, eff_def)
 
         if res in ("hit", "crit_hit"):
@@ -691,7 +728,7 @@ class Engine:
         events: list[dict] = []
         pushing = self._consume_nonpass(f)
         d1, d2, total = self.rng.roll_2d6("attack", f"{f.short_name} Magic Blast")
-        eff_def = ab.effective_defense(self.state, t, "ranged")
+        eff_def = ab.effective_defense(self.state, t, "ranged", self.terrain_defense_mod(f, t, "ranged"))
         res = outcome(d1, d2, f.attack, eff_def)
         if res in ("hit", "crit_hit"):
             roll = self.rng.d6("magic_blast_damage")
@@ -730,7 +767,7 @@ class Engine:
         pushing = self._consume_nonpass(f)
         d1, d2, total = self.rng.roll_2d6("attack", f"{f.short_name} Flame/Lightning")
         for o in affected:
-            eff_def = ab.effective_defense(self.state, o, "ranged")
+            eff_def = ab.effective_defense(self.state, o, "ranged", self.terrain_defense_mod(f, o, "ranged"))
             res = outcome(d1, d2, f.attack, eff_def)
             if res in ("hit", "crit_hit"):
                 raw = 1 + (1 if res == "crit_hit" else 0)
@@ -1101,7 +1138,7 @@ class Engine:
         pushers = self._token_formation(figs)
         atk = primary.attack + 2 * (len(figs) - 1)  # +2 per extra member
         d1, d2, total = self.rng.roll_2d6("attack", "ranged formation")
-        eff_def = ab.effective_defense(self.state, target, "ranged")
+        eff_def = ab.effective_defense(self.state, target, "ranged", self.terrain_defense_mod(primary, target, "ranged"))
         res = outcome(d1, d2, atk, eff_def)
         if res in ("hit", "crit_hit"):
             raw = primary.damage + (1 if res == "crit_hit" else 0)  # no damage bonus
@@ -1151,7 +1188,7 @@ class Engine:
         ) else 0
         atk = primary.attack + (len(figs) - 1) + rear  # +1/extra member, +1 if any rear
         d1, d2, total = self.rng.roll_2d6("attack", "close formation")
-        eff_def = ab.effective_defense(self.state, target, "close")
+        eff_def = ab.effective_defense(self.state, target, "close", self.terrain_defense_mod(primary, target, "close"))
         res = outcome(d1, d2, atk, eff_def)
         if res in ("hit", "crit_hit"):
             raw = primary.damage + (1 if res == "crit_hit" else 0)

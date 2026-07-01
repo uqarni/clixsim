@@ -96,9 +96,10 @@ def can_make_ranged_attack(figure) -> bool:
 
 
 # --- defense ---------------------------------------------------------------
-def effective_defense(state, target, attack_type: str) -> int:
+def effective_defense(state, target, attack_type: str, terrain_mod: int = 0) -> int:
     """Target's defense against an incoming attack, applying Battle Armor (+2 vs
-    ranged) and Defend (may use a base-contact friendly's higher defense value)."""
+    ranged), Defend (may use a base-contact friendly's higher defense value), and a
+    terrain modifier (hindering / height advantage, computed by the engine)."""
     base = target.defense
     ba = attack_type == "ranged" and has(target, BATTLE_ARMOR)
     # Defend: swap in the best friendly provider's printed defense if higher.
@@ -113,7 +114,7 @@ def effective_defense(state, target, attack_type: str) -> int:
     d = max(base, best_share)
     if ba:
         d += 2
-    return d
+    return d + terrain_mod
 
 
 # --- damage ----------------------------------------------------------------
