@@ -13,3 +13,8 @@ venv/
 games/*.jsonl
 !games/.gitkeep
 scratch/
+
+# Web client
+web/node_modules/
+web/dist/
+web/.vite/

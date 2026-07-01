@@ -164,6 +164,40 @@ class Engine:
         crit_dmg = ab.damage_after_defenses(t, base_dmg + 1, attack_type, is_magic=False)
         return p_normal * normal_dmg + p_crit * crit_dmg
 
+    def validate_move(
+        self, figure_uid: int, dest: tuple[float, float], facing: float | None = None,
+        free: bool = False,
+    ) -> dict:
+        """Read-only dry-run for an arbitrary move destination (renderer support).
+
+        Mirrors ``_apply_move``'s legality WITHOUT mutating state or rolling dice,
+        so a client can show live green/red for any dragged endpoint. Returns
+        ``{ok, reason?, detail?, break_away?}``; break_away carries the odds only
+        (the actual roll happens inside apply())."""
+        f = self._precheck(figure_uid, free=free)
+        if isinstance(f, Rejection):
+            return {"ok": False, "reason": f.reason, "detail": f.detail}
+        if free and not ab.has(f, ab.QUICKNESS):
+            return {"ok": False, "reason": "no_quickness",
+                    "detail": f"{f.short_name} lacks Quickness for a free move"}
+        if f.action_tokens >= 2:
+            return {"ok": False, "reason": "pushed_out",
+                    "detail": f"{f.short_name} cannot act a third consecutive turn"}
+        d = Vec(*dest)
+        rej = self._validate_move(f, d)
+        if rej is not None:
+            return {"ok": False, "reason": rej.reason, "detail": rej.detail}
+        # Legal. Report whether the move triggers a break-away roll, and its odds.
+        moving = distance(f.position, d) > 1e-9
+        contacts = self.state.opposing_contacts(f)
+        result: dict = {"ok": True}
+        if moving and contacts:
+            need = ab.break_away_min(f)
+            result["break_away"] = {"needed": True, "odds": round((7 - need) / 6.0, 3)}
+        else:
+            result["break_away"] = {"needed": False, "odds": 1.0}
+        return result
+
     # ------------------------------------------------------------------ #
     # Legal-action generation
     # ------------------------------------------------------------------ #
