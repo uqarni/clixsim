@@ -168,6 +168,14 @@ TERRAIN_LIBRARY: tuple[TerrainTemplate, ...] = (
 _LIBRARY_BY_KEY = {t.key: t for t in TERRAIN_LIBRARY}
 
 
+# Size limits for hand-drawn terrain, in line with the curated shapes (the biggest
+# preset — the plateau — is ~23 in² and ~6.8" across; the low wall is 6" long).
+# Area keeps a piece from swallowing the midfield; extent keeps a legal-area sliver
+# from stretching into a board-spanning wall.
+MAX_POLYGON_AREA = 24.0  # in²
+MIN_POLYGON_AREA = 0.5  # in² — reject invisible slivers
+MAX_POLYGON_EXTENT = 8.0  # longest vertex-to-vertex span, inches
+
 # Terrain TYPES for the draw-your-own-polygon tool: a type key -> the rule flags a
 # hand-drawn piece of that type carries (kind/elevated/water/low_wall) + display.
 POLYGON_TYPES: dict[str, dict] = {

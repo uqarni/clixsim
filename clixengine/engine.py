@@ -24,6 +24,8 @@ from .geometry import (
     in_base_contact,
     in_front_arc,
     in_rear_arc,
+    polygon_area,
+    polygon_extent,
     polygon_is_simple,
     segment_circle_intersects,
 )
@@ -356,6 +358,16 @@ class Engine:
         poly = tuple(Vec(float(x), float(y)) for x, y in polygon)
         if not polygon_is_simple(poly):
             return Rejection("self_intersecting", "the shape crosses itself — draw a simple outline")
+        area = polygon_area(poly)
+        span = polygon_extent(poly)
+        if area > terr.MAX_POLYGON_AREA + 1e-9:
+            return Rejection("too_big", f"that's {area:.0f} in² — terrain pieces max out at "
+                                        f"{terr.MAX_POLYGON_AREA:.0f} in²")
+        if span > terr.MAX_POLYGON_EXTENT + 1e-9:
+            return Rejection("too_big", f"that spans {span:.1f}\" — terrain pieces max out at "
+                                        f"{terr.MAX_POLYGON_EXTENT:.0f}\" across")
+        if area < terr.MIN_POLYGON_AREA:
+            return Rejection("too_small", "that shape is too thin to be a real terrain piece")
         piece = terr.piece_from_polygon(type_key, poly, len(self.state.terrain), owner)
         reason = terr.placement_reason(
             piece.polygon, self.state.terrain, self.state.board.width, self.state.board.height

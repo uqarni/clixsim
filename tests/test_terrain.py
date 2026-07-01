@@ -210,12 +210,13 @@ def test_polygon_is_simple():
 
 def test_place_terrain_polygon(db):
     e = _terrain_engine(db)  # human first, 1 piece each
-    good = [(14, 16), (22, 16), (22, 22), (14, 22)]
+    # 5 x 4.5 = 22.5 in², ~6.7" diagonal — inside the drawn-terrain size caps.
+    good = [(16, 16), (21, 16), (21, 20.5), (16, 20.5)]
     # rejections (none consume budget)
     assert e.place_terrain_polygon("human", "blocking", good[:2]).reason == "bad_polygon"
     assert e.place_terrain_polygon("human", "nope", good).reason == "no_such_terrain"
     assert e.place_terrain_polygon("human", "blocking",
-                                   [(14, 16), (22, 22), (22, 16), (14, 22)]).reason == "self_intersecting"
+                                   [(16, 16), (21, 20.5), (21, 16), (16, 20.5)]).reason == "self_intersecting"
     assert e.place_terrain_polygon("human", "blocking",
                                    [(14, 0.5), (18, 0.5), (16, 2)]).reason == "in_starting_area"
     # success: an elevated hill in midfield

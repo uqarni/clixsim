@@ -14,6 +14,7 @@ import math
 from dataclasses import dataclass, field
 
 from . import abilities as ab
+from . import terrain as terr
 from .engine import Engine
 from .geometry import (
     Vec,
@@ -303,13 +304,16 @@ def _support_candidates(engine, figure, cands, aids):
 
 def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
     move_seen: set[tuple] = set()
+    pieces = engine.state.terrain
+    flies = ab.ignores_figure_bases(figure)
+    # The engine validates against the hindering-halved speed (§Hindering), so
+    # candidates must budget with it too or every proposal comes back "too_far".
+    eff_speed = figure.speed if flies else terr.effective_speed(
+        pieces, figure.speed, figure.position, figure.base_radius)
 
-    def add_move(dest: Vec, facing: float, label: str, extra: dict) -> None:
-        dest = _clamp_to_board(engine, dest, figure.base_radius)
-        key = (round(dest.x, 2), round(dest.y, 2), round(facing, 2))
-        if key in move_seen:
-            return
-        flies = ab.ignores_figure_bases(figure)
+    def _move_illegal(dest: Vec) -> bool:
+        """Mirror of the engine's _validate_move geometry (figure bases + blocking
+        terrain) so we never propose a move the engine would reject."""
         moving = distance(figure.position, dest) > 1e-9
         for other in engine.state.living():
             if other.uid == figure.uid:
@@ -317,9 +321,21 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
             if moving and not flies and segment_circle_intersects(
                 figure.position, dest, other.position, other.base_radius
             ):
-                return
+                return True
             if flies and distance(dest, other.position) < figure.base_radius + other.base_radius - 1e-6:
-                return
+                return True
+        if pieces and not flies:
+            if terr.base_in_blocking(pieces, dest, figure.base_radius):
+                return True
+            if moving and terr.blocking_between(pieces, figure.position, dest, figure.base_radius):
+                return True
+        return False
+
+    def add_move(dest: Vec, facing: float, label: str, extra: dict) -> bool:
+        dest = _clamp_to_board(engine, dest, figure.base_radius)
+        key = (round(dest.x, 2), round(dest.y, 2), round(facing, 2))
+        if key in move_seen or _move_illegal(dest):
+            return False
         move_seen.add(key)
         cands.append(Candidate(
             MoveIntent(figure.uid, (dest.x, dest.y), facing, free=free), "move", label,
@@ -327,23 +343,59 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
              "move_distance": round(distance(figure.position, dest), 2),
              "free": free, **extra},
         ))
+        return True
+
+    def _detour_toward(target) -> Vec | None:
+        """When the straight advance is blocked (usually by terrain), probe rotated
+        bearings — a greedy way around a wall without pathfinding. Prefer a step
+        that closes distance; against a wide wall no single step does, so fall back
+        to the legal sidestep that ends nearest the target (the flanking move that
+        opens a closing step next turn)."""
+        bearing = angle_to(figure.position, target.position)
+        now = distance(figure.position, target.position)
+        best_fallback: Vec | None = None
+        best_d = math.inf
+        for off in (0.45, -0.45, 0.9, -0.9, 1.35, -1.35, 1.75, -1.75):
+            for frac in (1.0, 0.6):
+                step_len = eff_speed * frac
+                if step_len <= 0.2:
+                    continue
+                d = _clamp_to_board(engine, Vec(
+                    figure.position.x + math.cos(bearing + off) * step_len,
+                    figure.position.y + math.sin(bearing + off) * step_len,
+                ), figure.base_radius)
+                if _move_illegal(d):
+                    continue
+                nd = distance(d, target.position)
+                if nd < now - 0.3:
+                    return d  # closes distance — take it immediately
+                # Sideways is fine; walking mostly AWAY from the target is not.
+                if nd < now + step_len * 0.5 and nd < best_d:
+                    best_fallback, best_d = d, nd
+        return best_fallback
 
     enemies_by_dist = sorted(enemies, key=lambda e: distance(figure.position, e.position))
     for target in ([] if demoralized else enemies_by_dist[:3]):
         dvec_len = distance(figure.position, target.position)
         facing = _facing_toward(figure.position, target.position)
         contact = _contact_point(engine, figure, target)
-        if distance(figure.position, contact) <= figure.speed + 1e-9:
-            add_move(contact, facing, f"Advance into contact with {target.short_name}",
-                     {"target": target.uid, "intent_hint": "charge"})
+        if distance(figure.position, contact) <= eff_speed + 1e-9:
+            added = add_move(contact, facing, f"Advance into contact with {target.short_name}",
+                             {"target": target.uid, "intent_hint": "charge"})
         else:
-            step = _point_toward(figure.position, target.position, figure.speed)
-            add_move(step, facing, f"Advance toward {target.short_name}",
-                     {"target": target.uid, "intent_hint": "approach"})
+            step = _point_toward(figure.position, target.position, eff_speed)
+            added = add_move(step, facing, f"Advance toward {target.short_name}",
+                             {"target": target.uid, "intent_hint": "approach"})
+        if not added:
+            det = _detour_toward(target)
+            if det is not None:
+                add_move(det, _facing_toward(det, target.position),
+                         f"Advance toward {target.short_name} (around terrain)",
+                         {"target": target.uid, "intent_hint": "detour"})
         if figure.range > 0 and dvec_len > figure.range:
             stop = _point_toward(figure.position, target.position, dvec_len - figure.range + 0.1)
             stop = _point_toward(figure.position, stop,
-                                 min(figure.speed, distance(figure.position, stop)))
+                                 min(eff_speed, distance(figure.position, stop)))
             add_move(stop, facing, f"Move into range of {target.short_name}",
                      {"target": target.uid, "intent_hint": "range_band"})
 
@@ -351,7 +403,7 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
         nearest = enemies_by_dist[0]
         away = Vec(figure.position.x - (nearest.position.x - figure.position.x),
                    figure.position.y - (nearest.position.y - figure.position.y))
-        add_move(_point_toward(figure.position, away, figure.speed),
+        add_move(_point_toward(figure.position, away, eff_speed),
                  _facing_toward(figure.position, nearest.position),
                  f"Retreat from {nearest.short_name}", {"intent_hint": "retreat"})
         add_move(figure.position, _facing_toward(figure.position, nearest.position),
@@ -372,7 +424,7 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
             reachable = [
                 fr for fr in same
                 if 0 < distance(figure.position, fr.position)
-                - (figure.base_radius + fr.base_radius) <= figure.speed + 1e-9
+                - (figure.base_radius + fr.base_radius) <= eff_speed + 1e-9
             ]
             if reachable:
                 def _clustered(fr):
@@ -431,7 +483,10 @@ def _make_formation_move(engine: Engine, cluster: list[Figure]) -> Candidate | N
     cy = sum(f.position.y for f in cluster) / len(cluster)
     centroid = Vec(cx, cy)
     tgt = min(enemies, key=lambda e: distance(centroid, e.position))
-    speed = min(f.speed for f in cluster)
+    pieces = engine.state.terrain
+    # Slowest member sets the pace (P4-R13), with hindering halving applied.
+    speed = min(terr.effective_speed(pieces, f.speed, f.position, f.base_radius)
+                for f in cluster)
     step = min(speed, max(0.0, distance(centroid, tgt.position) - 3.0))
     if step <= 0.1:
         return None
@@ -448,13 +503,18 @@ def _make_formation_move(engine: Engine, cluster: list[Figure]) -> Candidate | N
         if not board.contains(nd, f.base_radius):
             return None
         # Don't propose a formation move whose members cross / land on a
-        # non-member base (the engine rejects it).
+        # non-member base or blocking terrain (the engine rejects it).
         for other in engine.state.living():
             if other.uid in member_uids:
                 continue
             if segment_circle_intersects(f.position, nd, other.position, other.base_radius):
                 return None
             if distance(nd, other.position) < f.base_radius + other.base_radius - 1e-6:
+                return None
+        if pieces:
+            if terr.base_in_blocking(pieces, nd, f.base_radius):
+                return None
+            if terr.blocking_between(pieces, f.position, nd, f.base_radius):
                 return None
         dests.append((nd.x, nd.y))
         facings.append(_facing_toward(nd, tgt.position))

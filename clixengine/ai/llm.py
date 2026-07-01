@@ -159,16 +159,23 @@ class LLMOpponent:
 
     def stream_turn(self, engine: Engine):
         """Yield one dict per action (summary, LLM reasoning, engine events) as it
-        resolves, then end the turn. Falls back to the heuristic per action."""
+        resolves, then end the turn. Falls back to the heuristic per action, and a
+        candidate the engine rejects is excluded and re-picked (never ends the
+        turn — that reads as the opponent freezing)."""
+        rejected: set[str] = set()
+        retry_heuristic = False  # after a rejection, re-pick without another API call
         while engine.actionable_figures() and not engine.state.ended:
-            ranked = self._ranked_candidates(engine)
+            ranked = [r for r in self._ranked_candidates(engine)
+                      if repr(r[2].intent) not in rejected]
             if not ranked:
                 break
-            chosen_id, rationale = self._ask(engine, ranked) if self.available else (None, "")
+            ask_llm = self.available and not retry_heuristic
+            chosen_id, rationale = self._ask(engine, ranked) if ask_llm else (None, "")
             fallback = chosen_id is None
             if fallback:
-                self.fallbacks += 1
-                best = self._fallback.best_decision(engine)
+                if ask_llm:
+                    self.fallbacks += 1
+                best = self._fallback.best_decision(engine, frozenset(rejected))
                 if best is None or best.score <= 0.0:
                     break
                 fig_uid, cand, score = best.figure_uid, best.candidate, best.score
@@ -182,7 +189,13 @@ class LLMOpponent:
             if not result.ok:
                 self.last_error = f"engine rejected: {result.reason}"
                 self.fallbacks += 1
-                break
+                rejected.add(repr(cand.intent))
+                retry_heuristic = True
+                if len(rejected) >= 12:
+                    break
+                continue
+            rejected.clear()
+            retry_heuristic = False
             yield {
                 "figure_uid": fig_uid, "candidate": cand, "score": score,
                 "summary": cand.label, "reasoning": reasoning,

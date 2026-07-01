@@ -99,6 +99,47 @@ export function polygonSimple(poly: Pt[]): boolean {
   return true;
 }
 
+// Drawn-terrain size caps — mirrors clixengine/terrain.py MAX_POLYGON_* so the
+// drawing UI can show live legality before the server confirms.
+export const MAX_POLYGON_AREA = 24; // in²
+export const MIN_POLYGON_AREA = 0.5; // in²
+export const MAX_POLYGON_EXTENT = 8; // longest vertex-to-vertex span, inches
+
+// Unsigned shoelace area, in square inches.
+export function polygonArea(poly: Pt[]): number {
+  const n = poly.length;
+  if (n < 3) return 0;
+  let s = 0;
+  for (let i = 0; i < n; i++) {
+    const [ax, ay] = poly[i];
+    const [bx, by] = poly[(i + 1) % n];
+    s += ax * by - bx * ay;
+  }
+  return Math.abs(s) / 2;
+}
+
+// Longest vertex-to-vertex span (the shape's "diameter"), in inches.
+export function polygonExtent(poly: Pt[]): number {
+  let best = 0;
+  for (let i = 0; i < poly.length; i++) {
+    for (let j = i + 1; j < poly.length; j++) {
+      best = Math.max(best, Math.hypot(poly[i][0] - poly[j][0], poly[i][1] - poly[j][1]));
+    }
+  }
+  return best;
+}
+
+// Size verdict for a drawn shape, or null if within the caps.
+export function sizeReason(poly: Pt[]): string | null {
+  if (poly.length < 3) return null;
+  const area = polygonArea(poly);
+  const span = polygonExtent(poly);
+  if (area > MAX_POLYGON_AREA) return `too big — ${area.toFixed(0)} in² (max ${MAX_POLYGON_AREA} in²)`;
+  if (span > MAX_POLYGON_EXTENT) return `too long — ${span.toFixed(1)}" across (max ${MAX_POLYGON_EXTENT}")`;
+  if (area < MIN_POLYGON_AREA) return "too thin to be a real terrain piece";
+  return null;
+}
+
 // Why a candidate polygon may NOT be placed, or null if legal. Mirrors the engine
 // (edge margin 1", starting bands 3" deep at both ends, >=2" from other pieces).
 export function placementReason(

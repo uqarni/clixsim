@@ -244,6 +244,28 @@ def swept_base_crosses_polygon(p0: Vec, p1: Vec, r: float, poly: tuple[Vec, ...]
     return any(segment_segment_distance(p0, p1, a, b) <= r + eps for a, b in polygon_edges(poly))
 
 
+def polygon_area(poly: tuple[Vec, ...]) -> float:
+    """Unsigned area of a simple polygon (shoelace), in square inches."""
+    n = len(poly)
+    if n < 3:
+        return 0.0
+    s = 0.0
+    for i in range(n):
+        a, b = poly[i], poly[(i + 1) % n]
+        s += a.x * b.y - b.x * a.y
+    return abs(s) / 2.0
+
+
+def polygon_extent(poly: tuple[Vec, ...]) -> float:
+    """Longest vertex-to-vertex span (the shape's 'diameter'), in inches."""
+    n = len(poly)
+    best = 0.0
+    for i in range(n):
+        for j in range(i + 1, n):
+            best = max(best, distance(poly[i], poly[j]))
+    return best
+
+
 def polygon_is_simple(poly: tuple[Vec, ...]) -> bool:
     """True if the polygon is a simple (non-self-intersecting) ring of >=3 vertices.
     Adjacent edges (sharing a vertex) may touch; any other edge crossing => not simple.

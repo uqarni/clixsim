@@ -1525,3 +1525,11 @@ kbd {
   border-radius: 4px;
   background: var(--panel-2);
 }
+
+.terrain-size {
+  margin-top: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.terrain-size.over {
+  color: var(--bad);
+}

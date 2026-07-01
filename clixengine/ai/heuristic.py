@@ -27,15 +27,21 @@ class Decision:
 class HeuristicAI:
     name = "heuristic"
 
-    def best_decision(self, engine: Engine) -> Decision | None:
+    def best_decision(self, engine: Engine, exclude: frozenset[str] = frozenset()) -> Decision | None:
+        """Global best candidate; ``exclude`` holds intent-reprs the engine already
+        rejected this turn so a retry never re-picks a known-illegal action."""
         best: Decision | None = None
         for fig in engine.actionable_figures():
             for cand in generate_candidates(engine, fig):
+                if exclude and repr(cand.intent) in exclude:
+                    continue
                 s = score_candidate(engine, fig, cand)
                 if best is None or s > best.score:
                     best = Decision(fig.uid, cand, s, cand.label)
         # Turn-level formation candidates (movement / ranged / close).
         for cand in generate_formation_candidates(engine, engine.state.active_player):
+            if exclude and repr(cand.intent) in exclude:
+                continue
             primary = engine.state.figure(cand.annotation["primary"])
             s = score_candidate(engine, primary, cand)
             if best is None or s > best.score:
@@ -52,13 +58,20 @@ class HeuristicAI:
     def stream_turn(self, engine: Engine):
         """Yield one dict per action (summary, reasoning, events) as it resolves,
         then end the turn — the streaming form used by the live opponent view."""
+        rejected: set[str] = set()
         while engine.actionable_figures() and not engine.state.ended:
-            best = self.best_decision(engine)
+            best = self.best_decision(engine, frozenset(rejected))
             if best is None or best.score <= 0.0:
                 break
             result = engine.apply(best.candidate.intent)
             if not result.ok:
-                break
+                # A rejected pick must not end the turn (that reads as the
+                # opponent freezing) — exclude it and choose again, bounded.
+                rejected.add(repr(best.candidate.intent))
+                if len(rejected) >= 12:
+                    break
+                continue
+            rejected.clear()  # board changed; stale rejections no longer apply
             yield {
                 "figure_uid": best.figure_uid, "candidate": best.candidate, "score": best.score,
                 "summary": best.summary, "reasoning": _heuristic_reason(best.candidate),

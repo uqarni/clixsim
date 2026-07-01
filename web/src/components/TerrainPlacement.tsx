@@ -9,7 +9,16 @@ import {
   type TerrainType,
 } from "../api";
 import BoardCanvas, { type DrawGhost } from "./BoardCanvas";
-import { placementReason, polygonSimple, type Pt } from "../terrainGeom";
+import {
+  MAX_POLYGON_AREA,
+  MAX_POLYGON_EXTENT,
+  placementReason,
+  polygonArea,
+  polygonExtent,
+  polygonSimple,
+  sizeReason,
+  type Pt,
+} from "../terrainGeom";
 
 interface Props {
   initialView: GameView;
@@ -53,6 +62,8 @@ export default function TerrainPlacement({ initialView, onDone, onCancel }: Prop
   const reason = useMemo(() => {
     if (poly.length < 3) return "Click at least 3 points on the board to outline a shape.";
     if (!polygonSimple(poly)) return "The outline crosses itself — draw a simple shape.";
+    const size = sizeReason(poly);
+    if (size) return `That shape is ${size}.`;
     return placementReason(poly, view.terrain, boardW, boardH);
   }, [poly, view.terrain, boardW, boardH]);
   const ok = myTurn && reason === null;
@@ -112,8 +123,8 @@ export default function TerrainPlacement({ initialView, onDone, onCancel }: Prop
 
   const finish = useCallback(async () => {
     if (!selected || !myTurn || busy) return;
-    if (poly.length < 3 || !polygonSimple(poly) || placementReason(poly, view.terrain, boardW, boardH) !== null) {
-      setMsg(reason ?? "That shape can't be placed there.");
+    if (reason !== null) {  // covers vertex count, simplicity, size caps, placement
+      setMsg(reason);
       return;
     }
     setBusy(true);
@@ -227,6 +238,12 @@ export default function TerrainPlacement({ initialView, onDone, onCancel }: Prop
               Left-click to drop points ({poly.length} placed); click the first point (or “Place shape”) to finish.
               Right-click undoes the last point. Stay clear of the shaded deploy bands and ≥2″ from other pieces.
             </p>
+            {myTurn && poly.length >= 3 && (
+              <p className={`fig-sub terrain-size${sizeReason(poly) ? " over" : ""}`}>
+                Size: {polygonArea(poly).toFixed(1)} in² of {MAX_POLYGON_AREA} ·{" "}
+                {polygonExtent(poly).toFixed(1)}″ of {MAX_POLYGON_EXTENT}″ across
+              </p>
+            )}
             {msg && <p className="terrain-msg bad">{msg}</p>}
             {myTurn && poly.length > 0 && reason && <p className="terrain-msg warn">{reason}</p>}
           </div>
