@@ -385,6 +385,7 @@ export async function opponentTurn(): Promise<OpponentTurnResult> {
 // SSE: the opponent's turn action-by-action.
 export type OpponentStreamEvent =
   | { type: "action"; summary: string; reasoning: string; fallback: boolean; events: GameEvent[]; view: GameView }
+  | { type: "free_spin"; spinners: number[]; by: number | null; view: GameView }
   | { type: "done"; view: GameView }
   | { type: "error"; message: string; view?: GameView };
 export function opponentTurnStreamUrl(): string {

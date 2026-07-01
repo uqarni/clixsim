@@ -58,6 +58,15 @@ interface Props {
   placingGhost?: PlacingGhost | null;
   onPlacePointer?: (world: [number, number], commit: boolean) => void;
   onPlaceRotate?: (deltaRad: number) => void;
+  // Free spin (P4-R9): a contacted figure being re-faced (drag the handle to aim).
+  spin?: SpinGhost | null;
+  onSpinFace?: (facing: number) => void;
+}
+
+export interface SpinGhost {
+  uid: number;
+  pos: [number, number];
+  facing: number; // radians
 }
 
 interface Transform {
@@ -432,6 +441,8 @@ export default function BoardCanvas({
   placingGhost = null,
   onPlacePointer,
   onPlaceRotate,
+  spin = null,
+  onSpinFace,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const fxCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -619,6 +630,42 @@ export default function BoardCanvas({
       ctx.restore();
     }
 
+    // Free spin: an amber facing handle on the contacted figure being re-faced.
+    if (spin) {
+      const sf0 = live.find((f) => f.uid === spin.uid);
+      const [gx, gy] = worldToScreen(t, spin.pos[0], spin.pos[1]);
+      const r = Math.max(6, (sf0?.base_radius ?? 0.55) * t.scale);
+      const arc = toRad(sf0?.arc_deg ?? 45);
+      const sf = -spin.facing;
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(gx, gy);
+      ctx.arc(gx, gy, r * 2.4, sf - arc, sf + arc, false);
+      ctx.closePath();
+      ctx.fillStyle = "rgba(224,192,74,0.22)";
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(gx, gy, r + 3, 0, Math.PI * 2);
+      ctx.strokeStyle = COLORS.warn;
+      ctx.setLineDash([4, 3]);
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.setLineDash([]);
+      const hr = r * 2.4;
+      const hx = gx + Math.cos(sf) * hr;
+      const hy = gy + Math.sin(sf) * hr;
+      ctx.beginPath();
+      ctx.moveTo(gx, gy);
+      ctx.lineTo(hx, hy);
+      ctx.strokeStyle = COLORS.warn;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(hx, hy, 6, 0, Math.PI * 2);
+      ctx.fillStyle = COLORS.warn;
+      ctx.fill();
+      ctx.restore();
+    }
+
     // Armed-action highlights: red reticle on targets, blue ring on formation members.
     const armedSet = new Set(armedTargets);
     const memberSet = new Set(armedMembers);
@@ -663,7 +710,7 @@ export default function BoardCanvas({
         { ok: placingGhost.ok },
       );
     }
-  }, [view, size, selectedUid, hoverUid, activeUid, armedTargets, armedMembers, moveGhost, pendingMove, placementMode, placingGhost]);
+  }, [view, size, selectedUid, hoverUid, activeUid, armedTargets, armedMembers, moveGhost, pendingMove, placementMode, placingGhost, spin]);
 
   // Combat-effect overlay: an independent rAF that draws fx on a top canvas,
   // reusing the transform the base render computed. Keyed on fxSeq.
@@ -740,16 +787,29 @@ export default function BoardCanvas({
     ];
   }
 
+  // The figure whose facing is currently being edited (a placed move, or a free
+  // spin) with its aim point + a setter — unifies the two draggable-handle flows.
+  function facePoint(): { pos: [number, number]; radius: number; facing: number; set: (f: number) => void } | null {
+    if (pendingMove) {
+      const a = view.figures.find((f) => f.uid === activeUid);
+      if (a) return { pos: pendingMove.dest, radius: a.base_radius, facing: pendingMove.facing, set: onFaceDrag };
+    }
+    if (spin) {
+      const s = view.figures.find((f) => f.uid === spin.uid);
+      return { pos: spin.pos, radius: s?.base_radius ?? 0.55, facing: spin.facing, set: onSpinFace ?? (() => {}) };
+    }
+    return null;
+  }
+
   function nearHandle(clientX: number, clientY: number): boolean {
     const t = transformRef.current;
     const canvas = canvasRef.current;
-    if (!t || !canvas || !pendingMove) return false;
-    const active = view.figures.find((f) => f.uid === activeUid);
-    if (!active) return false;
-    const [gx, gy] = worldToScreen(t, pendingMove.dest[0], pendingMove.dest[1]);
-    const hr = Math.max(6, active.base_radius * t.scale) * 2.4;
-    const hx = gx + Math.cos(-pendingMove.facing) * hr; // matches the drawn handle
-    const hy = gy + Math.sin(-pendingMove.facing) * hr;
+    const fp = facePoint();
+    if (!t || !canvas || !fp) return false;
+    const [gx, gy] = worldToScreen(t, fp.pos[0], fp.pos[1]);
+    const hr = Math.max(6, fp.radius * t.scale) * 2.4;
+    const hx = gx + Math.cos(-fp.facing) * hr; // matches the drawn handle
+    const hy = gy + Math.sin(-fp.facing) * hr;
     const rect = canvas.getBoundingClientRect();
     return Math.hypot(clientX - rect.left - hx, clientY - rect.top - hy) <= 13;
   }
@@ -757,9 +817,10 @@ export default function BoardCanvas({
   function facingFromCursor(clientX: number, clientY: number): number {
     const t = transformRef.current!;
     const canvas = canvasRef.current!;
+    const fp = facePoint()!;
     const rect = canvas.getBoundingClientRect();
     const [wx, wy] = screenToWorld(t, clientX - rect.left, clientY - rect.top);
-    return Math.atan2(wy - pendingMove!.dest[1], wx - pendingMove!.dest[0]);
+    return Math.atan2(wy - fp.pos[1], wx - fp.pos[0]);
   }
 
   function onPointerDown(e: RPE) {
@@ -767,12 +828,12 @@ export default function BoardCanvas({
       if (e.button === 0 && onPlacePointer) onPlacePointer(worldPoint(e.clientX, e.clientY), true);
       return;
     }
-    if (pendingMove) {
+    if (pendingMove || spin) {
       if (nearHandle(e.clientX, e.clientY)) {
         faceRef.current = true;
         (e.target as Element).setPointerCapture?.(e.pointerId);
       }
-      return; // a move is placed — only the facing handle is interactive
+      return; // a facing edit is pending — only the handle is interactive
     }
     const hit = hitTest(e.clientX, e.clientY);
     if (hit != null && hit === activeUid) {
@@ -787,10 +848,10 @@ export default function BoardCanvas({
       return;
     }
     if (faceRef.current) {
-      onFaceDrag(facingFromCursor(e.clientX, e.clientY));
+      facePoint()?.set(facingFromCursor(e.clientX, e.clientY));
       return;
     }
-    if (pendingMove) return;
+    if (pendingMove || spin) return;
     if (dragRef.current) {
       dragRef.current.moved = true;
       onMoveDrag(clampedWorld(e.clientX, e.clientY));
@@ -809,7 +870,7 @@ export default function BoardCanvas({
       faceRef.current = false;
       return;
     }
-    if (pendingMove) return;
+    if (pendingMove || spin) return;
     if (dragRef.current) {
       const moved = dragRef.current.moved;
       dragRef.current = null;

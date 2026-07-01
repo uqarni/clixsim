@@ -18,7 +18,7 @@ import {
   type GameView,
 } from "./api";
 import ActionPanel from "./components/ActionPanel";
-import BoardCanvas, { type Fx } from "./components/BoardCanvas";
+import BoardCanvas, { type Fx, type SpinGhost } from "./components/BoardCanvas";
 import Construction from "./components/Construction";
 import DialInspector from "./components/DialInspector";
 import Draft from "./components/Draft";
@@ -125,6 +125,7 @@ export default function App() {
   const [fxSeq, setFxSeq] = useState(0);
   const [busy, setBusy] = useState(false);
   const [oppThoughts, setOppThoughts] = useState<{ summary: string; reasoning: string; fallback: boolean }[]>([]);
+  const [freeSpin, setFreeSpin] = useState<{ spinners: number[]; idx: number; by: number | null; facing: number } | null>(null);
   const viewRef = useRef<GameView | null>(null);
   const oppStreamRef = useRef<EventSource | null>(null);
 
@@ -161,7 +162,6 @@ export default function App() {
   const runOpponentStream = useCallback(() => {
     if (oppStreamRef.current) return; // already streaming this turn
     setBusy(true);
-    setOppThoughts([]);
     let prev = viewRef.current; // pre-action view, for anchoring effects
     const es = new EventSource(opponentTurnStreamUrl());
     oppStreamRef.current = es;
@@ -184,6 +184,20 @@ export default function App() {
         setOppThoughts((ts) => [...ts, { summary: e.summary, reasoning: e.reasoning, fallback: e.fallback }]);
         prev = e.view;
         setView(e.view);
+      } else if (e.type === "free_spin") {
+        // Opponent moved into your figures — pause and let you re-face for free (P4-R9).
+        setView(e.view);
+        viewRef.current = e.view;
+        finish(); // close this stream; we re-open it to resume once spinning is done
+        const uid = e.spinners[0];
+        const fig = e.view.figures.find((f) => f.uid === uid);
+        const mover = e.by != null ? e.view.figures.find((f) => f.uid === e.by) : null;
+        if (fig) {
+          const facing = mover ? facingToward(fig.pos, mover.pos) : (fig.facing_deg * Math.PI) / 180;
+          setSelectedUid(uid);
+          setFreeSpin({ spinners: e.spinners, idx: 0, by: e.by, facing });
+          log([{ type: "info", summary: "Free spin — an enemy reached your line; re-face for free." }]);
+        }
       } else if (e.type === "done") {
         setView(e.view);
         log([{ type: "turn", summary: e.view.meta.ended ? `Game over — winner: ${e.view.meta.winner ?? "draw"}.` : "Your turn." }]);
@@ -198,6 +212,56 @@ export default function App() {
       finish();
     };
   }, [log]);
+
+  // Free spin (P4-R9): re-face the current contacted figure (or skip), then advance
+  // to the next; when all are done, resume the opponent's paused turn.
+  const spinStep = useCallback(
+    async (apply: boolean) => {
+      if (!freeSpin) return;
+      const uid = freeSpin.spinners[freeSpin.idx];
+      let v = viewRef.current;
+      if (apply) {
+        try {
+          const res = await applyIntent({ kind: "free_spin", figure_uid: uid, facing: freeSpin.facing });
+          if (res.ok) {
+            v = res.view;
+            viewRef.current = res.view;
+            setView(res.view);
+          }
+        } catch (err) {
+          log([{ type: "error", summary: `Spin failed: ${String(err)}` }]);
+        }
+      }
+      const nextIdx = freeSpin.idx + 1;
+      if (v && nextIdx < freeSpin.spinners.length) {
+        const nu = freeSpin.spinners[nextIdx];
+        const fig = v.figures.find((f) => f.uid === nu);
+        const mover = freeSpin.by != null ? v.figures.find((f) => f.uid === freeSpin.by) : null;
+        const facing = fig ? (mover ? facingToward(fig.pos, mover.pos) : (fig.facing_deg * Math.PI) / 180) : 0;
+        setSelectedUid(nu);
+        setFreeSpin({ ...freeSpin, idx: nextIdx, facing });
+      } else {
+        setFreeSpin(null);
+        setSelectedUid(null);
+        runOpponentStream(); // resume the opponent's turn
+      }
+    },
+    [freeSpin, runOpponentStream, log],
+  );
+
+  const onSpinFace = useCallback((facing: number) => setFreeSpin((fs) => (fs ? { ...fs, facing } : fs)), []);
+
+  const spinGhost = useMemo<SpinGhost | null>(() => {
+    if (!freeSpin || !view) return null;
+    const uid = freeSpin.spinners[freeSpin.idx];
+    const fig = view.figures.find((f) => f.uid === uid);
+    return fig ? { uid, pos: fig.pos, facing: freeSpin.facing } : null;
+  }, [freeSpin, view]);
+
+  const spinFig = useMemo(
+    () => (freeSpin && view ? view.figures.find((f) => f.uid === freeSpin.spinners[freeSpin.idx]) ?? null : null),
+    [freeSpin, view],
+  );
 
   // Selected figure's legal candidates.
   useEffect(() => {
@@ -285,7 +349,8 @@ export default function App() {
 
   const handleApply = useCallback(
     (res: ApplyResult) => {
-      const out: GameEvent[] = res.events.slice();
+      // free_spin_offer is an internal signal (the AI auto-re-faces server-side); not user log.
+      const out: GameEvent[] = res.events.filter((e) => e.type !== "free_spin_offer");
       if (res.ok && out.length === 0 && res.summary) out.push({ type: "summary", summary: res.summary });
       if (!res.ok) out.push({ type: "rejected", summary: `Rejected: ${res.reason ?? "illegal"}${res.detail ? ` — ${res.detail}` : ""}` });
       log(out);
@@ -464,6 +529,8 @@ export default function App() {
     setMoveGhost(null);
     setPendingMove(null);
     setSelectedUid(null);
+    setFreeSpin(null);
+    setOppThoughts([]);
     setBusy(true);
     try {
       const v = await endTurn();
@@ -501,6 +568,7 @@ export default function App() {
     setArmed(null);
     setMoveGhost(null);
     setPendingMove(null);
+    setFreeSpin(null);
     setOppThoughts([]);
     setEvents([{ type: "info", summary: "Battle begins." }]);
     viewRef.current = v;
@@ -574,7 +642,29 @@ export default function App() {
               onFaceDrag={(facing) => setPendingMove((pm) => (pm ? { ...pm, facing } : pm))}
               fx={fx}
               fxSeq={fxSeq}
+              spin={spinGhost}
+              onSpinFace={onSpinFace}
             />
+            {freeSpin && spinFig && (
+              <div className="spin-banner">
+                <div className="spin-banner-title">Free spin (P4-R9)</div>
+                <div className="spin-banner-body">
+                  <strong>{spinFig.short_name}</strong> was contacted — drag the amber handle to face the
+                  threat, then confirm. Costs no action.
+                  {freeSpin.spinners.length > 1 && (
+                    <span className="fig-sub"> {freeSpin.idx + 1}/{freeSpin.spinners.length}</span>
+                  )}
+                </div>
+                <div className="spin-banner-btns">
+                  <button className="btn primary" type="button" onClick={() => spinStep(true)}>
+                    Confirm spin
+                  </button>
+                  <button className="btn" type="button" onClick={() => spinStep(false)}>
+                    Skip
+                  </button>
+                </div>
+              </div>
+            )}
             <ActionPanel
               view={view}
               selectedFig={selectedFig}
