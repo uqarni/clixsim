@@ -11,6 +11,7 @@ game session lives in-process (single-player local app).
 from __future__ import annotations
 
 import json
+import threading
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
@@ -79,6 +80,9 @@ class Session:
         self._chat_client = None
         self._chat_system: str | None = None
         self._placer: TerrainPlacer | None = None
+        # Serializes terrain-placement streams so a duplicate/overlapping connection
+        # (e.g. React StrictMode's dev double-mount) can't double-place.
+        self.terrain_lock = threading.Lock()
 
     def placer(self) -> TerrainPlacer:
         if self._placer is None:
@@ -361,11 +365,26 @@ def terrain_candidates(owner: str = "human"):
 def place_terrain(req: PlaceTerrainReq):
     """The human places one terrain piece during the setup phase."""
     eng = SESSION.require()
-    result = eng.place_terrain(SESSION.human_side, req.key, req.center, req.rotation)
+    with SESSION.terrain_lock:  # don't race a concurrent opponent placement stream
+        result = eng.place_terrain(SESSION.human_side, req.key, req.center, req.rotation)
     return {
         "ok": result.ok,
         "reason": getattr(result, "reason", None),
         "detail": getattr(result, "detail", None),
+        "summary": getattr(result, "summary", ""),
+        "view": game_view(eng),
+    }
+
+
+@app.post("/api/skip_terrain")
+def skip_terrain():
+    """The human forfeits their remaining terrain and hands off (Done placing)."""
+    eng = SESSION.require()
+    with SESSION.terrain_lock:
+        result = eng.skip_terrain_placement(SESSION.human_side)
+    return {
+        "ok": result.ok,
+        "reason": getattr(result, "reason", None),
         "summary": getattr(result, "summary", ""),
         "view": game_view(eng),
     }
@@ -384,29 +403,32 @@ def terrain_placement_stream():
             yield sse({"type": "done", "view": game_view(eng)})
             return
         placer = SESSION.placer()
+        allow_llm = not isinstance(SESSION.opponent, HeuristicAI)
         llm_ranged = any(f.is_ranged for f in eng.state.living("llm"))
         step = 0
         try:
-            while eng.state.phase == "terrain" and eng.state.terrain_turn == "llm":
-                cands = eng.terrain_placement_candidates("llm")
-                if not cands:
-                    break
-                context = {
-                    "my_army_has_ranged": llm_ranged,
-                    "pieces_left": eng.state.terrain_budget.get("llm", 0),
-                    "already_placed": [{"type": t.kind, "elevated": t.elevated, "owner": t.owner}
-                                       for t in eng.state.terrain],
-                }
-                seed = 4000 + len(eng.state.terrain) * 7 + step
-                choice, reason, used = placer.pick(cands, context, llm_ranged, seed)
-                step += 1
-                if choice is None:
-                    break
-                r = eng.place_terrain("llm", choice["key"], choice["center"], choice["rotation"])
-                if not r.ok:  # candidates are pre-validated; stop rather than loop
-                    break
-                yield sse({"type": "place", "summary": r.summary, "reasoning": reason,
-                           "used_llm": used, "view": game_view(eng)})
+            with SESSION.terrain_lock:  # one placement stream at a time
+                while eng.state.phase == "terrain" and eng.state.terrain_turn == "llm":
+                    cands = eng.terrain_placement_candidates("llm")
+                    if not cands:  # nowhere legal left: forfeit the rest and hand off
+                        eng.skip_terrain_placement("llm")
+                        break
+                    context = {
+                        "my_army_has_ranged": llm_ranged,
+                        "pieces_left": eng.state.terrain_budget.get("llm", 0),
+                        "already_placed": [{"type": t.kind, "elevated": t.elevated, "owner": t.owner}
+                                           for t in eng.state.terrain],
+                    }
+                    seed = 4000 + len(eng.state.terrain) * 7 + step
+                    choice, reason, used = placer.pick(cands, context, llm_ranged, seed, allow_llm)
+                    step += 1
+                    if choice is None:
+                        break
+                    r = eng.place_terrain("llm", choice["key"], choice["center"], choice["rotation"])
+                    if not r.ok:  # candidates are pre-validated; stop rather than loop
+                        break
+                    yield sse({"type": "place", "summary": r.summary, "reasoning": reason,
+                               "used_llm": used, "view": game_view(eng)})
             yield sse({"type": "done", "view": game_view(eng)})
         except Exception as e:
             yield sse({"type": "error", "message": str(e), "view": game_view(eng)})

@@ -183,16 +183,20 @@ class Engine:
     def terrain_placement_candidates(self, owner: str, max_n: int = 6) -> list[dict]:
         """Propose a spread of LEGAL placements (one per library shape where it
         fits) for an AI placer to choose among — the engine owns geometry, so the
-        placer only ever selects a pre-validated option."""
+        placer only ever selects a pre-validated option. Scans a fine grid so a
+        spot is found whenever one exists (avoids a placer stalling on a full-ish
+        board)."""
         w, h = self.state.board.width, self.state.board.height
-        xs = [w * 0.22, w * 0.5, w * 0.78]
-        ys = [h * 0.42, h * 0.5, h * 0.58]
+        band = 3.0
+        step = 2.0
+        xs = [3.0 + step * i for i in range(int((w - 6.0) / step) + 1)]
+        ys = [band + 1.0 + step * i for i in range(int((h - 2 * band - 2.0) / step) + 1)]
         rots = [0.0, math.pi / 4, math.pi / 2]
         placed = len(self.state.terrain)
         out: list[dict] = []
         for i, tmpl in enumerate(terr.TERRAIN_LIBRARY):
-            combos = [(x, y, r) for x in xs for y in ys for r in rots]
-            off = (i + placed) % len(combos)
+            combos = [(x, y, r) for y in ys for x in xs for r in rots]
+            off = (i * 7 + placed * 13) % len(combos)
             combos = combos[off:] + combos[:off]  # rotate the scan start for variety
             for x, y, r in combos:
                 center = Vec(x, y)
@@ -209,6 +213,19 @@ class Engine:
             if len(out) >= max_n:
                 break
         return out
+
+    def skip_terrain_placement(self, owner: str) -> Result | Rejection:
+        """Forfeit ``owner``'s remaining terrain (they're done, or no legal spot
+        is left) and hand off — starting the battle if both sides are finished."""
+        if self.state.phase != "terrain":
+            return Rejection("not_placing", "terrain is not being placed right now")
+        if owner != self.state.terrain_turn:
+            return Rejection("not_your_turn", f"it is {self.state.terrain_turn}'s turn to place")
+        left = self.state.terrain_budget.get(owner, 0)
+        self.state.terrain_budget[owner] = 0
+        ev = self.log.emit("terrain_forfeit", owner=owner, forfeited=left)
+        self._advance_terrain_turn(owner)
+        return Result("skip_terrain", [ev], f"{owner} is done placing terrain")
 
     def _advance_terrain_turn(self, just_placed: str) -> None:
         """After ``just_placed`` places a piece, hand off (alternate; a player with

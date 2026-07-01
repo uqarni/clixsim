@@ -197,3 +197,13 @@ def test_terrain_placement_candidates_are_legal(db):
         tmpl = template(c["key"])
         piece = instantiate(tmpl, Vec(*c["center"]), c["rotation"], 99, "human")
         assert placement_reason(piece.polygon, e.state.terrain, 36, 36) is None
+
+
+def test_skip_terrain_forfeits_and_hands_off(db):
+    e = _terrain_engine(db)  # human first, both have 1 piece
+    r = e.skip_terrain_placement("human")
+    assert r.ok and e.state.terrain_budget["human"] == 0
+    assert e.state.terrain_turn == "llm" and e.state.phase == "terrain"
+    # llm skipping too ends setup and starts the battle even with 0 pieces placed.
+    r2 = e.skip_terrain_placement("llm")
+    assert r2.ok and e.state.phase == "battle" and len(e.state.terrain) == 0

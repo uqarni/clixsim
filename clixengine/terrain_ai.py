@@ -101,12 +101,14 @@ class TerrainPlacer:
 
     def pick(
         self, candidates: list[dict], context: dict, army_ranged: bool, seed: int,
+        allow_llm: bool = True,
     ) -> tuple[dict | None, str, bool]:
         """Choose the next placement (or None if none offered), a reason, and
-        whether the LLM made the call (False => heuristic)."""
+        whether the LLM made the call (False => heuristic). ``allow_llm`` lets the
+        caller force the heuristic path (e.g. the fast heuristic opponent)."""
         if not candidates:
             return None, "No legal spot left for terrain.", False
-        if self.available:
+        if self.available and allow_llm:
             ans = self._ask(candidates, context)
             if ans is not None:
                 idx, reason = ans
