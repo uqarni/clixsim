@@ -67,6 +67,10 @@ class Engine:
         self._actions_spent: int = 0
         self._bonus_actions: int = 0
         self._command_rolled: bool = False
+        # Figures currently entitled to a free spin (P4-R9): populated when a mover
+        # enters base contact, consumed by the spin, and expired when the mover acts
+        # again or a new turn begins — so a spin can't be redeemed out of context.
+        self._pending_free_spins: set[int] = set()
 
     # ------------------------------------------------------------------ #
     # Ability telemetry (X6)
@@ -484,6 +488,10 @@ class Engine:
         do not relax them. Returns at most a few of the most relevant hints."""
         if figure.owner != self.state.active_player or not figure.is_alive:
             return []
+        # No budget left => generate_candidates offers nothing, so don't advise an
+        # attack/heal/re-face the figure can't actually make this turn.
+        if self._actions_remaining() <= 0:
+            return []
         aids = figure.active_ability_ids()
         hints: list[str] = []
         is_ranged = figure.range > 0 and ab.can_make_ranged_attack(figure)
@@ -491,6 +499,11 @@ class Engine:
         close_ok = {t.uid for t, _ in self.legal_close_targets(figure)}
         ranged_ok = {t.uid for t in self.legal_ranged_targets(figure)}
         friends = self.state.friends_of(figure)
+
+        # A demoralized figure may only move or pass (P4-R36) — attack/heal hints
+        # would steer the player toward actions it fundamentally cannot take.
+        if figure.is_demoralized:
+            return ["Demoralized: this figure may only move or pass this turn (P4-R36)."]
 
         # --- attacks: explain a near-but-unattackable enemy -------------------
         for e in sorted(self.state.opponents_of(figure),
@@ -562,6 +575,11 @@ class Engine:
     def apply(self, intent: Intent) -> Result | Rejection:
         if self.state.ended:
             return Rejection("game_over", "the game has already ended")
+        # A new resolving action expires any un-redeemed free-spin offers (P4-R9 is
+        # a reaction to a *just-made* contact); free-spin and (non-action) ability
+        # toggles don't expire it.
+        if not isinstance(intent, (FreeSpinIntent, ToggleAbilityIntent)):
+            self._pending_free_spins.clear()
         if isinstance(intent, PassIntent):
             return self._apply_pass(intent)
         if isinstance(intent, MoveIntent):
@@ -605,10 +623,16 @@ class Engine:
             return Rejection("not_defender", "only a contacted defender may free-spin")
         if ab.is_mounted(f):
             return Rejection("mounted", "mounted figures do not free-spin")
+        # Must have been just contacted by a mover this action (P4-R9), not merely
+        # standing in a contact that has persisted — otherwise it's an out-of-turn re-face.
+        if intent.figure_uid not in self._pending_free_spins:
+            return Rejection("no_free_spin_offer",
+                             "no opponent just moved into base contact with this figure")
         if not self.state.opposing_contacts(f):
             return Rejection("not_contacted",
                              "free spin is only for a figure in base contact with an opponent")
         f.facing = float(intent.facing)
+        self._pending_free_spins.discard(intent.figure_uid)
         ev = self.log.emit("free_spin", figure=f.uid, facing=f.facing)
         return Result("free_spin", [ev], f"{f.short_name} spins free to face the threat")
 
@@ -809,6 +833,7 @@ class Engine:
         if broke_away and dist > 1e-9 and f.is_alive:
             newly = self._newly_contacted_opponents(f, before_contacts)
             if newly:
+                self._pending_free_spins.update(o.uid for o in newly)
                 events.append(self.log.emit(
                     "free_spin_offer", by=f.uid, spinners=[o.uid for o in newly]))
 
@@ -1420,6 +1445,7 @@ class Engine:
                 if o.uid not in spun and not ab.is_mounted(o):
                     spun.add(o.uid)
         if spun:
+            self._pending_free_spins.update(spun)
             events.append(self.log.emit("free_spin_offer", by=intent.figure_uid,
                                         spinners=sorted(spun)))
         self._apply_pushing_to(pushers, events)
@@ -1540,6 +1566,7 @@ class Engine:
         self._acted_uids.clear()
         self._actions_spent = 0
         self._bonus_actions = 0
+        self._pending_free_spins.clear()  # free-spin offers don't survive a turn boundary
         for f in self.state.figures.values():
             if f.owner == player and f.is_alive:
                 f.begin_owner_turn()

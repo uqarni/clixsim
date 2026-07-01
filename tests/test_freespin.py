@@ -44,13 +44,25 @@ def test_free_spin_rejected_for_active_mover(db):
     assert not r.ok and r.reason == "not_defender"
 
 
-def test_free_spin_rejected_when_not_contacted(db):
+def test_free_spin_rejected_without_a_fresh_offer(db):
+    # A figure not just contacted (here, not contacted at all) has no standing offer.
     e = build_engine(db, [
         ("llm", "Werebear", (10, 10), 0.0, 0),
-        ("human", "Werebear", (30, 30), 0.0, 0),  # far away, not in contact
+        ("human", "Werebear", (30, 30), 0.0, 0),  # far away
     ], active="llm")
     r = e.apply(FreeSpinIntent(1, 1.0))
-    assert not r.ok and r.reason == "not_contacted"
+    assert not r.ok and r.reason == "no_free_spin_offer"
+
+
+def test_free_spin_rejected_on_persistent_contact_no_new_move(db):
+    # Figures already in base contact across the turn boundary: the human may NOT
+    # re-face for free out of turn without an opponent having just moved into it (P4-R9).
+    e = build_engine(db, [
+        ("llm", "Werebear", (10, 10), 0.0, 0),
+        ("human", "Werebear", (11.0, 10), math.pi, 0),  # already touching, nobody moved
+    ], active="llm")
+    r = e.apply(FreeSpinIntent(1, math.pi / 2))
+    assert not r.ok and r.reason == "no_free_spin_offer"
 
 
 def test_move_without_new_contact_offers_nothing(db):

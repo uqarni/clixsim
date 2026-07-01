@@ -55,6 +55,29 @@ def test_hint_magic_healing_rear_arc(db):
     assert any("front arc" in h.lower() and "heal" in h.lower() for h in hints), hints
 
 
+def test_no_hints_when_out_of_actions(db):
+    # With the budget spent, no attack/heal is offered, so don't hint one.
+    e = build_engine(db, [
+        ("human", "Utem Crossbowman", (10, 10), 0.0, 0),
+        ("llm", "Werebear", (14, 10), math.pi, 0),
+        ("human", "Werebear", (14, 11.0), -math.pi / 2, 0),
+    ], active="human")
+    assert _hints(e, 0)  # sanity: there IS a hint with budget
+    e._actions_spent = e.state.actions_per_turn()  # exhaust the budget
+    assert _hints(e, 0) == []
+
+
+def test_demoralized_figure_only_gets_the_demoralized_hint(db):
+    e = build_engine(db, [
+        ("human", "Werebear", (10, 10), 0.0, 0),
+        ("llm", "Werebear", (9.0, 10), 0.0, 0),  # adjacent in the rear arc
+    ], active="human")
+    f = e.state.figure(0)
+    f.demoralized = True
+    hints = _hints(e, 0)
+    assert len(hints) == 1 and "Demoralized" in hints[0]
+
+
 def test_hint_formation_needs_three(db):
     # Two same-faction figures in base contact: short of the 3-figure minimum.
     e = build_engine(db, [
