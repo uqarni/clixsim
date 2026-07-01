@@ -184,6 +184,7 @@ class GameState:
     first_player: str = "human"
     winner: str | None = None
     ended: bool = False
+    terrain: list = field(default_factory=list)  # list[TerrainPiece] (Phase 3)
 
     def actions_per_turn(self) -> int:
         """Actions per turn = build_total / 100, fixed for the game (P1-R2)."""
