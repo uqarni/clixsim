@@ -26,6 +26,7 @@ import ForceRail from "./components/ForceRail";
 import LogLedger from "./components/LogLedger";
 import NewGame, { type GameConfig } from "./components/NewGame";
 import OpponentPanel from "./components/OpponentPanel";
+import TerrainPlacement from "./components/TerrainPlacement";
 import TurnHud from "./components/TurnHud";
 
 interface MoveGhost {
@@ -106,7 +107,7 @@ function deriveFx(events: GameEvent[], view: GameView): Fx[] {
 }
 
 export default function App() {
-  const [phase, setPhase] = useState<"menu" | "drafting" | "constructing" | "battle">("menu");
+  const [phase, setPhase] = useState<"menu" | "drafting" | "constructing" | "placing_terrain" | "battle">("menu");
   const [config, setConfig] = useState<GameConfig | null>(null);
   const [humanIds, setHumanIds] = useState<number[]>([]);
 
@@ -440,7 +441,7 @@ export default function App() {
     setPhase("constructing");
   }, []);
 
-  const onReady = useCallback((v: GameView) => {
+  const enterBattle = useCallback((v: GameView) => {
     if (oppStreamRef.current) {
       oppStreamRef.current.close();
       oppStreamRef.current = null;
@@ -456,6 +457,17 @@ export default function App() {
     setPhase("battle");
     if (v.meta.active_player !== "human" && !v.meta.ended) runOpponentStream();
   }, [runOpponentStream]);
+
+  // A freshly-built game may open in the terrain setup phase before battle.
+  const onReady = useCallback((v: GameView) => {
+    if (v.meta.phase === "terrain") {
+      viewRef.current = v;
+      setView(v);
+      setPhase("placing_terrain");
+      return;
+    }
+    enterBattle(v);
+  }, [enterBattle]);
 
   const handleNewGame = useCallback(() => {
     setView(null);
@@ -475,6 +487,8 @@ export default function App() {
     return <Draft config={config} onConfirm={onDraftConfirm} onCancel={() => setPhase("menu")} />;
   if (phase === "constructing" && config)
     return <Construction config={config} humanIds={humanIds} onReady={onReady} onCancel={() => setPhase("menu")} />;
+  if (phase === "placing_terrain" && view)
+    return <TerrainPlacement initialView={view} onBattle={enterBattle} onCancel={handleNewGame} />;
   if (!view) return <NewGame onStart={startDraft} onResume={onResume} />;
 
   const gameOver = view.meta.ended;

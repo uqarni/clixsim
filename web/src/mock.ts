@@ -89,8 +89,9 @@ function statsAt(dial: DialClick[], click: number) {
   return { speed: row.speed, attack: row.attack, defense: row.defense, damage: row.damage };
 }
 
-function figure(f: Omit<FigureView, "speed" | "attack" | "defense" | "damage" | "num_live_clicks" | "health_fraction" | "active_abilities"> & {
+function figure(f: Omit<FigureView, "speed" | "attack" | "defense" | "damage" | "num_live_clicks" | "health_fraction" | "active_abilities" | "elevation"> & {
   active_abilities?: FigureView["active_abilities"];
+  elevation?: number;
 }): FigureView {
   const numLive = f.dial.length - f.starting_click;
   const remaining = Math.max(0, f.dial.length - f.current_click);
@@ -100,6 +101,7 @@ function figure(f: Omit<FigureView, "speed" | "attack" | "defense" | "damage" | 
   return {
     ...f,
     ...s,
+    elevation: f.elevation ?? 0,
     num_live_clicks: numLive,
     health_fraction: f.eliminated ? 0 : Math.max(0, Math.min(1, remaining / denom)),
     active_abilities:
@@ -113,6 +115,9 @@ export const MOCK_VIEW: GameView = {
     turn: 4,
     active_player: "human",
     first_player: "human",
+    phase: "battle",
+    terrain_turn: "human",
+    terrain_budget: {},
     actions_per_turn: 2,
     actions_remaining: 1,
     ended: false,
@@ -274,4 +279,5 @@ export const MOCK_VIEW: GameView = {
       dial: gruntDial,
     }),
   ],
+  terrain: [],
 };

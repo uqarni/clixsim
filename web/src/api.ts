@@ -44,6 +44,7 @@ export interface FigureView {
   points: number;
 
   pos: [number, number];
+  elevation: number; // 0 ground, 1 on elevated terrain
   facing_deg: number;
 
   base_radius: number;
@@ -91,6 +92,9 @@ export interface GameMeta {
   turn: number;
   active_player: Owner;
   first_player: string;
+  phase: "terrain" | "battle";
+  terrain_turn: Owner;
+  terrain_budget: Partial<Record<Owner, number>>;
   actions_per_turn: number;
   actions_remaining: number;
   ended: boolean;
@@ -100,9 +104,37 @@ export interface GameMeta {
   ability_coverage?: unknown;
 }
 
+// A placed terrain piece: world-space polygon + rule flags (client picks colours).
+export interface TerrainPiece {
+  id: number;
+  kind: "clear" | "hindering" | "blocking";
+  owner: Owner;
+  elevated: boolean;
+  water: "shallow" | "deep" | null;
+  low_wall: boolean;
+  abrupt: boolean;
+  polygon: [number, number][];
+  access_points: [number, number][];
+}
+
+// A library shape for the placement palette (origin-centred polygon).
+export interface TerrainTemplate {
+  key: string;
+  label: string;
+  kind: "clear" | "hindering" | "blocking";
+  elevated: boolean;
+  water: "shallow" | "deep" | null;
+  low_wall: boolean;
+  abrupt: boolean;
+  blurb: string;
+  polygon: [number, number][];
+  access_points: [number, number][];
+}
+
 export interface GameView {
   meta: GameMeta;
   figures: FigureView[]; // ALL figures, including eliminated
+  terrain: TerrainPiece[];
 }
 
 export interface Candidate {
@@ -252,6 +284,46 @@ export async function getRoster(): Promise<ConstructFigure[]> {
 export async function getSealedPacks(seed: number): Promise<ConstructFigure[][]> {
   if (USE_MOCK) return [];
   return (await req<{ packs: ConstructFigure[][] }>(`/api/sealed_packs?seed=${seed}`)).packs;
+}
+
+// --- terrain placement (setup phase) ---------------------------------------
+export async function getTerrainLibrary(): Promise<TerrainTemplate[]> {
+  if (USE_MOCK) return [];
+  return (await req<{ pieces: TerrainTemplate[] }>("/api/terrain_library")).pieces;
+}
+
+export interface PlaceTerrainResult {
+  ok: boolean;
+  reason?: string;
+  detail?: string;
+  summary: string;
+  view: GameView;
+}
+
+// POST /api/place_terrain — the human places one piece during setup.
+export async function placeTerrain(
+  key: string,
+  center: [number, number],
+  rotation: number,
+): Promise<PlaceTerrainResult> {
+  return req<PlaceTerrainResult>("/api/place_terrain", {
+    method: "POST",
+    body: JSON.stringify({ key, center, rotation }),
+  });
+}
+
+// POST /api/skip_terrain — the human is done placing (forfeit the rest).
+export async function skipTerrain(): Promise<PlaceTerrainResult> {
+  return req<PlaceTerrainResult>("/api/skip_terrain", { method: "POST" });
+}
+
+// SSE: the opponent placing its terrain, one piece at a time.
+export type TerrainStreamEvent =
+  | { type: "place"; summary: string; reasoning: string; used_llm: boolean; view: GameView }
+  | { type: "done"; view: GameView }
+  | { type: "error"; message: string; view?: GameView };
+export function terrainPlacementStreamUrl(): string {
+  return "/api/terrain_placement_stream";
 }
 
 // Toggle an optional ability off/on (P4-R34) — routes through /api/intent.

@@ -1,5 +1,17 @@
-import { useEffect, useRef, useState, type PointerEvent as RPE } from "react";
+import { useEffect, useRef, useState, type PointerEvent as RPE, type WheelEvent as RWE } from "react";
 import type { FigureView, GameView } from "../api";
+
+// A terrain shape being dragged during the placement phase (world coords).
+export interface PlacingGhost {
+  polygon: [number, number][];
+  accessPoints: [number, number][];
+  kind: string;
+  elevated: boolean;
+  water: string | null;
+  lowWall: boolean;
+  abrupt: boolean;
+  ok: boolean;
+}
 
 interface MoveGhost {
   dest: [number, number];
@@ -40,6 +52,12 @@ interface Props {
   // Combat effects to play; fxSeq bumps to trigger a new batch.
   fx: Fx[];
   fxSeq: number;
+  // Terrain placement (setup phase). When placementMode is on, pointer events
+  // aim/commit the ghost instead of selecting/moving figures.
+  placementMode?: boolean;
+  placingGhost?: PlacingGhost | null;
+  onPlacePointer?: (world: [number, number], commit: boolean) => void;
+  onPlaceRotate?: (deltaRad: number) => void;
 }
 
 interface Transform {
@@ -132,6 +150,24 @@ function drawFigure(
   ctx.strokeStyle = "rgba(255,255,255,0.85)";
   ctx.lineWidth = 1.5;
   ctx.stroke();
+
+  // Elevation badge: a small chevron marking a figure on high ground.
+  if (f.elevation === 1) {
+    ctx.save();
+    ctx.fillStyle = "#e7d9a0";
+    ctx.strokeStyle = "rgba(0,0,0,0.5)";
+    ctx.lineWidth = 1;
+    const bx = cx + r * 0.9;
+    const by = cy - r * 0.9;
+    ctx.beginPath();
+    ctx.moveTo(bx, by - 4);
+    ctx.lineTo(bx + 4, by + 3);
+    ctx.lineTo(bx - 4, by + 3);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
 
   // Health ring.
   const ringR = r + 3;
@@ -273,6 +309,110 @@ function dashedRing(ctx: CanvasRenderingContext2D, cx: number, cy: number, rr: n
   ctx.restore();
 }
 
+interface TerrainLike {
+  polygon: [number, number][];
+  accessPoints?: [number, number][];
+  access_points?: [number, number][];
+  kind: string;
+  elevated: boolean;
+  water: string | null;
+  lowWall?: boolean;
+  low_wall?: boolean;
+  abrupt: boolean;
+}
+
+function terrainStyle(t: TerrainLike): { fill: string; stroke: string; contour?: string } {
+  const lowWall = t.lowWall ?? t.low_wall ?? false;
+  if (t.water === "deep") return { fill: "rgba(46,86,150,0.72)", stroke: "#2b5590" };
+  if (t.water === "shallow") return { fill: "rgba(92,156,214,0.55)", stroke: "#3f7fb0" };
+  if (t.kind === "blocking") return { fill: "#41464e", stroke: "#20232a" };
+  if (t.elevated)
+    return { fill: "rgba(156,140,92,0.55)", stroke: "#8a7a45", contour: "rgba(214,200,150,0.75)" };
+  if (lowWall) return { fill: "#6d7178", stroke: "#3a3d44" };
+  if (t.kind === "hindering") return { fill: "rgba(58,120,72,0.55)", stroke: "#2f6b3f" };
+  return { fill: "rgba(150,150,160,0.35)", stroke: "#5a5f68" };
+}
+
+function polyPath(ctx: CanvasRenderingContext2D, pts: [number, number][]) {
+  ctx.beginPath();
+  pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+  ctx.closePath();
+}
+
+function drawTerrainPiece(
+  ctx: CanvasRenderingContext2D,
+  t: Transform,
+  piece: TerrainLike,
+  ghost?: { ok: boolean },
+) {
+  const pts = piece.polygon.map(([x, y]) => worldToScreen(t, x, y));
+  if (pts.length < 3) return;
+  const style = terrainStyle(piece);
+  ctx.save();
+  polyPath(ctx, pts);
+  if (ghost) {
+    ctx.globalAlpha = 0.55;
+    ctx.fillStyle = ghost.ok ? "rgba(91,214,138,0.4)" : "rgba(224,90,90,0.4)";
+    ctx.fill();
+    ctx.setLineDash([6, 4]);
+    ctx.strokeStyle = ghost.ok ? COLORS.good : COLORS.bad;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  } else {
+    ctx.fillStyle = style.fill;
+    ctx.fill();
+    ctx.strokeStyle = style.stroke;
+    ctx.lineWidth = piece.abrupt ? 3 : 1.5;
+    ctx.stroke();
+  }
+
+  // Elevation: an inset contour line to read as raised ground.
+  if (piece.elevated && (style.contour || ghost)) {
+    const cx = pts.reduce((s, p) => s + p[0], 0) / pts.length;
+    const cy = pts.reduce((s, p) => s + p[1], 0) / pts.length;
+    const inset = pts.map(([x, y]) => [cx + (x - cx) * 0.6, cy + (y - cy) * 0.6] as [number, number]);
+    ctx.setLineDash([]);
+    ctx.globalAlpha = ghost ? 0.5 : 1;
+    polyPath(ctx, inset);
+    ctx.strokeStyle = ghost ? (ghost.ok ? COLORS.good : COLORS.bad) : style.contour!;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  // Forest: a few darker canopy dabs so woods read as woods.
+  if (piece.kind === "hindering" && !(piece.lowWall ?? piece.low_wall) && piece.water === null) {
+    const cx = pts.reduce((s, p) => s + p[0], 0) / pts.length;
+    const cy = pts.reduce((s, p) => s + p[1], 0) / pts.length;
+    ctx.setLineDash([]);
+    ctx.fillStyle = ghost ? "rgba(47,107,63,0.4)" : "rgba(30,74,44,0.65)";
+    for (let i = 0; i < pts.length; i++) {
+      const [x, y] = pts[i];
+      const dx = cx + (x - cx) * 0.5;
+      const dy = cy + (y - cy) * 0.5;
+      ctx.beginPath();
+      ctx.arc(dx, dy, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Abrupt-elevated access points: light notches where a figure may climb on/off.
+  const aps = piece.accessPoints ?? piece.access_points ?? [];
+  if (aps.length) {
+    ctx.setLineDash([]);
+    for (const [ax, ay] of aps) {
+      const [sx, sy] = worldToScreen(t, ax, ay);
+      ctx.beginPath();
+      ctx.arc(sx, sy, 4, 0, Math.PI * 2);
+      ctx.fillStyle = ghost ? "rgba(255,255,255,0.6)" : "#e7d9a0";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(0,0,0,0.5)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
 export default function BoardCanvas({
   view,
   selectedUid,
@@ -288,6 +428,10 @@ export default function BoardCanvas({
   onFaceDrag,
   fx,
   fxSeq,
+  placementMode = false,
+  placingGhost = null,
+  onPlacePointer,
+  onPlaceRotate,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const fxCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -357,6 +501,20 @@ export default function BoardCanvas({
     ctx.strokeStyle = "rgba(0,0,0,0.5)";
     ctx.lineWidth = 2;
     ctx.strokeRect(px0, py0, pw, ph);
+
+    // Terrain sits on the felt, beneath the figures.
+    for (const piece of view.terrain) drawTerrainPiece(ctx, t, piece);
+
+    // Placement phase: the 3"-deep starting bands are off-limits — shade them.
+    if (placementMode) {
+      ctx.save();
+      ctx.fillStyle = "rgba(224,90,90,0.10)";
+      const [, byTop] = worldToScreen(t, 0, bh - 3);
+      const [, byBot] = worldToScreen(t, 0, 3);
+      ctx.fillRect(px0, py0, pw, byTop - py0); // enemy band (top)
+      ctx.fillRect(px0, byBot, pw, py0 + ph - byBot); // your band (bottom)
+      ctx.restore();
+    }
 
     const live = view.figures.filter((f) => !f.eliminated);
     const selected = live.find((f) => f.uid === selectedUid) ?? null;
@@ -488,7 +646,24 @@ export default function BoardCanvas({
         ctx.restore();
       }
     }
-  }, [view, size, selectedUid, hoverUid, activeUid, armedTargets, armedMembers, moveGhost, pendingMove]);
+
+    // Terrain placement ghost, drawn last so it sits above everything.
+    if (placingGhost) {
+      drawTerrainPiece(
+        ctx, t,
+        {
+          polygon: placingGhost.polygon,
+          access_points: placingGhost.accessPoints,
+          kind: placingGhost.kind,
+          elevated: placingGhost.elevated,
+          water: placingGhost.water,
+          low_wall: placingGhost.lowWall,
+          abrupt: placingGhost.abrupt,
+        },
+        { ok: placingGhost.ok },
+      );
+    }
+  }, [view, size, selectedUid, hoverUid, activeUid, armedTargets, armedMembers, moveGhost, pendingMove, placementMode, placingGhost]);
 
   // Combat-effect overlay: an independent rAF that draws fx on a top canvas,
   // reusing the transform the base render computed. Keyed on fxSeq.
@@ -543,6 +718,15 @@ export default function BoardCanvas({
     return best?.uid ?? null;
   }
 
+  function worldPoint(clientX: number, clientY: number): [number, number] {
+    const canvas = canvasRef.current!;
+    const t = transformRef.current!;
+    const rect = canvas.getBoundingClientRect();
+    const [wx, wy] = screenToWorld(t, clientX - rect.left, clientY - rect.top);
+    const { width, height } = view.meta.board;
+    return [Math.max(0, Math.min(width, wx)), Math.max(0, Math.min(height, wy))];
+  }
+
   function clampedWorld(clientX: number, clientY: number): [number, number] {
     const canvas = canvasRef.current!;
     const t = transformRef.current!;
@@ -579,6 +763,10 @@ export default function BoardCanvas({
   }
 
   function onPointerDown(e: RPE) {
+    if (placementMode) {
+      if (e.button === 0 && onPlacePointer) onPlacePointer(worldPoint(e.clientX, e.clientY), true);
+      return;
+    }
     if (pendingMove) {
       if (nearHandle(e.clientX, e.clientY)) {
         faceRef.current = true;
@@ -594,6 +782,10 @@ export default function BoardCanvas({
   }
 
   function onPointerMove(e: RPE) {
+    if (placementMode) {
+      if (onPlacePointer) onPlacePointer(worldPoint(e.clientX, e.clientY), false);
+      return;
+    }
     if (faceRef.current) {
       onFaceDrag(facingFromCursor(e.clientX, e.clientY));
       return;
@@ -607,7 +799,12 @@ export default function BoardCanvas({
     }
   }
 
+  function onWheel(e: RWE) {
+    if (placementMode && onPlaceRotate) onPlaceRotate(e.deltaY > 0 ? Math.PI / 12 : -Math.PI / 12);
+  }
+
   function onPointerUp(e: RPE) {
+    if (placementMode) return;
     if (faceRef.current) {
       faceRef.current = false;
       return;
@@ -630,7 +827,10 @@ export default function BoardCanvas({
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
+        onWheel={onWheel}
+        onContextMenu={(e) => placementMode && e.preventDefault()}
         onPointerLeave={() => {
+          if (placementMode) return;
           if (faceRef.current) {
             faceRef.current = false;
           } else if (dragRef.current) {
