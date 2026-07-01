@@ -10,21 +10,33 @@ game session lives in-process (single-player local app).
 
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .ai.heuristic import HeuristicAI
 from .ai.llm import LLMOpponent
+from .army import Army
+from .build import (
+    ArmyBuilder,
+    _affordable,
+    _fig_brief,
+    _role,
+    heuristic_army,
+    sample_sealed_pool,
+)
 from .candidates import generate_candidates, generate_formation_candidates
 from .data import load_db
 from .demo import demo_armies
 from .engine import Engine
+from .setup import build_game
 from .intents import (
     CloseIntent,
     LevitateIntent,
@@ -35,7 +47,6 @@ from .intents import (
     RegenerateIntent,
     ToggleAbilityIntent,
 )
-from .setup import build_game
 from .view import game_view
 
 @asynccontextmanager
@@ -62,17 +73,22 @@ class Session:
         self.opponent = None  # controller for the "llm" side
         self.human_side = "human"
 
-    def new_game(self, points: int, seed: int, board: float = 36.0, opponent: str = "llm",
-                 single_faction: bool = False):
-        human_army, llm_army = demo_armies(points, seed=seed, single_faction=single_faction)
-        self.engine = build_game(human_army, llm_army, build_total=points, seed=seed,
-                                 board_size=board)
+    def start_game(self, human_army: Army, llm_army: Army, build_total: int,
+                   seed: int, opponent: str = "llm", board: float = 36.0):
+        """Finalize a game from two prebuilt armies + wire the opponent controller."""
+        self.engine = build_game(human_army, llm_army, build_total=build_total, seed=seed,
+                                 board_size=board, db=self.db)
         if opponent == "heuristic":
             self.opponent = HeuristicAI()
         else:
             llm = LLMOpponent()
             self.opponent = llm if llm.available else HeuristicAI()
         return self.engine
+
+    def new_game(self, points: int, seed: int, board: float = 36.0, opponent: str = "llm",
+                 single_faction: bool = False):
+        human_army, llm_army = demo_armies(points, seed=seed, single_faction=single_faction)
+        return self.start_game(human_army, llm_army, points, seed, opponent, board)
 
     def require(self) -> Engine:
         if self.engine is None:
@@ -166,6 +182,86 @@ class ExplainReq(BaseModel):
 def new_game(req: NewGameReq):
     eng = SESSION.new_game(req.points, req.seed, req.board, req.opponent, req.single_faction)
     return game_view(eng)
+
+
+def _brief(fid: int) -> dict:
+    return _fig_brief(SESSION.db, SESSION.db.get(fid))
+
+
+def _construct_stream(mode: str, points: int, opponent: str, seed: int):
+    """Server-sent events: build the human army, stream the LLM drafting its army
+    pick-by-pick with reasoning, then finalize the game."""
+    db = SESSION.db
+    budget = 200 if mode == "sealed" else max(100, points)
+
+    def sse(obj: dict) -> str:
+        return f"data: {json.dumps(obj)}\n\n"
+
+    try:
+        yield sse({"type": "start", "mode": mode, "budget": budget})
+
+        human_pool = llm_pool = None
+        if mode == "sealed":
+            human_pool = sample_sealed_pool(db, seed * 7 + 1)
+            llm_pool = sample_sealed_pool(db, seed * 7 + 2)
+            yield sse({"type": "pool", "side": "human", "pool": [_brief(i) for i in human_pool]})
+            yield sse({"type": "pool", "side": "llm", "pool": [_brief(i) for i in llm_pool]})
+
+        # Human army — auto-built (from the sealed pool when sealed).
+        human_army = heuristic_army(db, "human", budget, seed * 3 + 1, candidate_ids=human_pool)
+        yield sse({"type": "human_army", "army": [_brief(i) for i in human_army.figure_ids],
+                   "points": human_army.total_points(db)})
+
+        # LLM army — drafted one figure at a time, streamed with reasoning.
+        builder = ArmyBuilder()
+        yield sse({"type": "llm_start", "available": builder.available})
+        llm_ids: list[int] = []
+        used_uniques: set[int] = set()
+        remaining = budget
+        pool_counts = None
+        if llm_pool is not None:
+            pool_counts = {}
+            for fid in llm_pool:
+                pool_counts[fid] = pool_counts.get(fid, 0) + 1
+        for step in range(12):
+            cands = _affordable(db, llm_pool, remaining, used_uniques, pool_counts)
+            if not cands:
+                break
+            army_brief = [{"name": db.get(i).short_name, "points": db.get(i).points,
+                           "role": _role(db.get(i))} for i in llm_ids]
+            pick, reason, used_llm = builder.pick(db, cands, army_brief, remaining, budget, seed * 100 + step)
+            if pick is None:
+                yield sse({"type": "llm_stop", "reasoning": reason, "used_llm": used_llm})
+                break
+            llm_ids.append(pick.id)
+            remaining -= pick.points
+            if pick.is_unique:
+                used_uniques.add(pick.id)
+            if pool_counts is not None:
+                pool_counts[pick.id] -= 1
+            yield sse({"type": "llm_pick", "figure": _brief(pick.id), "reasoning": reason,
+                       "used_llm": used_llm, "remaining": remaining,
+                       "army": [_brief(i) for i in llm_ids], "points": budget - remaining})
+        if not llm_ids:  # safety net
+            llm_ids = heuristic_army(db, "llm", budget, seed * 3 + 2, candidate_ids=llm_pool).figure_ids
+        llm_army = Army(name="llm-army", owner="llm", figure_ids=llm_ids)
+        yield sse({"type": "llm_army", "army": [_brief(i) for i in llm_ids],
+                   "points": llm_army.total_points(db)})
+
+        SESSION.start_game(human_army, llm_army, budget, seed, opponent)
+        yield sse({"type": "ready", "view": game_view(SESSION.engine)})
+    except Exception as e:  # never leave the client hanging
+        yield sse({"type": "error", "message": str(e)})
+
+
+@app.get("/api/new_game_stream")
+def new_game_stream(mode: str = "preconstructed", points: int = 200,
+                    opponent: str = "llm", seed: int = 1):
+    return StreamingResponse(
+        _construct_stream(mode, points, opponent, seed),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/state")
