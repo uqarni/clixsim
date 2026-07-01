@@ -71,6 +71,17 @@ class LevitateIntent:
 
 
 @dataclass(frozen=True)
+class FreeSpinIntent:
+    """Free spin (P4-R9): a figure an opponent just moved into base contact with
+    may re-face to bring its front arc to bear — free, no action, no token, no
+    pushing. Legal only for the non-active player's contacted, non-mounted figure."""
+
+    figure_uid: int
+    facing: float  # radians
+    kind: str = "free_spin"
+
+
+@dataclass(frozen=True)
 class ToggleAbilityIntent:
     """Turn an optional ability off (or back on) until end of turn (P4-R34).
 
@@ -90,6 +101,7 @@ Intent = (
     | RegenerateIntent
     | NecromancyIntent
     | LevitateIntent
+    | FreeSpinIntent
     | ToggleAbilityIntent
 )
 

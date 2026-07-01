@@ -72,6 +72,14 @@ def has(figure, ability_id: int) -> bool:
     return ability_id in figure.active_ability_ids()
 
 
+def is_mounted(figure) -> bool:
+    """Mounted (cavalry) figures use a peanut base and do not grant a free spin
+    when they move into contact (§Free Spin / §Breaking Away). The Rebellion seed
+    roster has no mounted figures (D5(d)/OQ-6), so this is False today — kept as a
+    guard so the rule stays encoded if a mounted figure is ever added."""
+    return bool(getattr(figure.definition, "mounted", False))
+
+
 def _magic_immune(figure) -> bool:
     return MAGIC_IMMUNITY in figure.active_ability_ids()
 

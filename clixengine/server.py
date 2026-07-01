@@ -42,8 +42,10 @@ from .engine import Engine
 from .setup import build_game
 from .terrain import TERRAIN_LIBRARY
 from .terrain_ai import TerrainPlacer
+from .geometry import angle_to
 from .intents import (
     CloseIntent,
+    FreeSpinIntent,
     LevitateIntent,
     MoveIntent,
     NecromancyIntent,
@@ -170,11 +172,31 @@ def intent_from_dict(d: dict):
             figure_uid=d["figure_uid"], target_uid=d["target_uid"],
             dest=_tup(d["dest"]), facing=float(d["facing"]),
         )
+    if kind == "free_spin":
+        return FreeSpinIntent(figure_uid=d["figure_uid"], facing=float(d["facing"]))
     if kind == "toggle_ability":
         return ToggleAbilityIntent(
             figure_uid=d["figure_uid"], ability_id=int(d["ability_id"]), off=bool(d["off"]),
         )
     raise HTTPException(400, f"unknown intent kind: {kind!r}")
+
+
+def _auto_free_spin_opponents(eng: Engine, result) -> None:
+    """When the human moves into base contact with the AI's figures, the AI takes
+    its free spin (P4-R9): each contacted opponent re-faces toward the mover. Keeps
+    the rule symmetric without asking the AI to reason about facing."""
+    if not getattr(result, "ok", False):
+        return
+    for e in getattr(result, "events", []):
+        if e.get("type") != "free_spin_offer":
+            continue
+        mover = eng.state.figures.get(e.get("by"))
+        if mover is None:
+            continue
+        for u in e.get("spinners", []):
+            fig = eng.state.figures.get(u)
+            if fig and fig.is_alive and fig.owner != eng.state.active_player:
+                eng.apply(FreeSpinIntent(u, angle_to(fig.position, mover.position)))
 
 
 def _candidate_view(c) -> dict:
@@ -481,6 +503,7 @@ def explain(req: ExplainReq):
 def apply_intent(intent: dict):
     eng = SESSION.require()
     result = eng.apply(intent_from_dict(intent))
+    _auto_free_spin_opponents(eng, result)  # AI defenders re-face when the human contacts them
     return {
         "ok": result.ok,
         "reason": getattr(result, "reason", None),
@@ -529,6 +552,23 @@ def opponent_turn_stream():
                 yield sse({"type": "action", "summary": step["summary"],
                            "reasoning": step["reasoning"], "events": step["events"],
                            "fallback": step["fallback"], "view": game_view(eng)})
+                # Free spin (P4-R9): if that move contacted the human's figures, PAUSE
+                # the opponent's turn so the human can re-face before it acts again.
+                # Abandoning this generator suspends stream_turn WITHOUT ending the
+                # turn; the client re-opens the stream to resume after spinning.
+                offer = next((e for e in step["events"]
+                              if e.get("type") == "free_spin_offer"), None)
+                if offer:
+                    spinners = [
+                        u for u in offer.get("spinners", [])
+                        if (g := eng.state.figures.get(u)) is not None
+                        and g.owner == SESSION.human_side and g.is_alive
+                        and eng.state.opposing_contacts(g)
+                    ]
+                    if spinners:
+                        yield sse({"type": "free_spin", "spinners": spinners,
+                                   "by": offer.get("by"), "view": game_view(eng)})
+                        return
             yield sse({"type": "done", "view": game_view(eng)})
         except Exception as e:
             yield sse({"type": "error", "message": str(e), "view": game_view(eng)})

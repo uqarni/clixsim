@@ -28,6 +28,7 @@ from .geometry import (
 )
 from .intents import (
     CloseIntent,
+    FreeSpinIntent,
     Intent,
     LevitateIntent,
     MoveIntent,
@@ -515,9 +516,41 @@ class Engine:
             return self._apply_necromancy(intent)
         if isinstance(intent, LevitateIntent):
             return self._apply_levitate(intent)
+        if isinstance(intent, FreeSpinIntent):
+            return self._apply_free_spin(intent)
         if isinstance(intent, ToggleAbilityIntent):
             return self._apply_toggle_ability(intent)
         return Rejection("unknown_intent", type(intent).__name__)
+
+    def _newly_contacted_opponents(self, mover: Figure, before_uids: set[int]) -> list[Figure]:
+        """Opposing figures the ``mover`` has just entered base contact with (were
+        not in contact before the move). These defenders are entitled to a free
+        spin (P4-R9) — unless the mover is mounted, which grants none."""
+        if ab.is_mounted(mover):
+            return []
+        out = []
+        for o in self.state.opposing_contacts(mover):
+            if o.uid not in before_uids and not ab.is_mounted(o):
+                out.append(o)
+        return out
+
+    def _apply_free_spin(self, intent: FreeSpinIntent) -> Result | Rejection:
+        """Free spin (P4-R9): re-face a contacted defender at no cost. Never spends
+        an action, places a token, marks the figure acted, or triggers pushing —
+        and only the NON-active player's figure (the one just contacted) may do it."""
+        f = self.state.figures.get(intent.figure_uid)
+        if f is None or not f.is_alive:
+            return Rejection("no_such_figure", str(intent.figure_uid))
+        if f.owner == self.state.active_player:
+            return Rejection("not_defender", "only a contacted defender may free-spin")
+        if ab.is_mounted(f):
+            return Rejection("mounted", "mounted figures do not free-spin")
+        if not self.state.opposing_contacts(f):
+            return Rejection("not_contacted",
+                             "free spin is only for a figure in base contact with an opponent")
+        f.facing = float(intent.facing)
+        ev = self.log.emit("free_spin", figure=f.uid, facing=f.facing)
+        return Result("free_spin", [ev], f"{f.short_name} spins free to face the threat")
 
     def _apply_toggle_ability(self, intent: ToggleAbilityIntent) -> Result | Rejection:
         """Cancel/restore an optional ability shown on the figure's current click
@@ -689,6 +722,7 @@ class Engine:
         # Aquatic only fail on a natural 1 (§Flight / §Aquatic).
         dist = distance(f.position, dest)
         contacts = self.state.opposing_contacts(f)
+        before_contacts = {c.uid for c in contacts}
         broke_away = True
         if contacts and dist > 1e-9:
             d1 = self.rng.d6("break_away", f"{f.short_name} breaking away")
@@ -710,6 +744,13 @@ class Engine:
         # Pole Arm: an enemy whose front arc the mover now sits in deals 1 click.
         if broke_away and dist > 1e-9:
             self._apply_pole_arm(f, events)
+
+        # Free spin (P4-R9): opposing figures the mover just contacted may re-face.
+        if broke_away and dist > 1e-9 and f.is_alive:
+            newly = self._newly_contacted_opponents(f, before_contacts)
+            if newly:
+                events.append(self.log.emit(
+                    "free_spin_offer", by=f.uid, spinners=[o.uid for o in newly]))
 
         if pushing and f.is_alive:
             self._apply_pushing_damage(f, events)
@@ -1309,6 +1350,18 @@ class Engine:
         for g in figs:
             if g.is_alive:
                 self._apply_pole_arm(g, events)
+        # Free spin (P4-R9): members can't start in enemy contact (rejected above),
+        # so every opponent now touching a member was just contacted.
+        spun: set[int] = set()
+        for g in figs:
+            if not g.is_alive or ab.is_mounted(g):
+                continue
+            for o in self.state.opposing_contacts(g):
+                if o.uid not in spun and not ab.is_mounted(o):
+                    spun.add(o.uid)
+        if spun:
+            events.append(self.log.emit("free_spin_offer", by=intent.figure_uid,
+                                        spinners=sorted(spun)))
         self._apply_pushing_to(pushers, events)
         self._check_victory(events)
         return Result("formation_move", events, f"formation of {len(figs)} advances")
