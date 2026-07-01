@@ -328,7 +328,11 @@ export default function BoardCanvas({
 
     ctx.fillStyle = COLORS.feltEdge;
     ctx.fillRect(0, 0, size.w, size.h);
-    const [px0, py0] = worldToScreen(t, 0, 0);
+    // Play-area top-left in screen space is (offX, offY) regardless of the Y-flip;
+    // worldToScreen(0,0) is the BOTTOM-left after the flip, which drew the felt
+    // downward off-canvas.
+    const px0 = t.offX;
+    const py0 = t.offY;
     const pw = bw * t.scale;
     const ph = bh * t.scale;
     ctx.fillStyle = COLORS.felt;
