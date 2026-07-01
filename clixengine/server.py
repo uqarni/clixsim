@@ -23,7 +23,7 @@ from pydantic import BaseModel
 
 from .ai.heuristic import HeuristicAI
 from .ai.llm import LLMOpponent
-from .army import Army
+from .army import Army, validate_army
 from .build import (
     ArmyBuilder,
     _affordable,
@@ -188,9 +188,10 @@ def _brief(fid: int) -> dict:
     return _fig_brief(SESSION.db, SESSION.db.get(fid))
 
 
-def _construct_stream(mode: str, points: int, opponent: str, seed: int):
-    """Server-sent events: build the human army, stream the LLM drafting its army
-    pick-by-pick with reasoning, then finalize the game."""
+def _construct_stream(mode: str, points: int, opponent: str, seed: int,
+                      human_ids: list[int] | None = None):
+    """Server-sent events: settle the human army (drafted by the client, or auto-
+    built), stream the LLM drafting its own army with reasoning, then finalize."""
     db = SESSION.db
     budget = 200 if mode == "sealed" else max(100, points)
 
@@ -204,11 +205,23 @@ def _construct_stream(mode: str, points: int, opponent: str, seed: int):
         if mode == "sealed":
             human_pool = sample_sealed_pool(db, seed * 7 + 1)
             llm_pool = sample_sealed_pool(db, seed * 7 + 2)
-            yield sse({"type": "pool", "side": "human", "pool": [_brief(i) for i in human_pool]})
             yield sse({"type": "pool", "side": "llm", "pool": [_brief(i) for i in llm_pool]})
 
-        # Human army — auto-built (from the sealed pool when sealed).
-        human_army = heuristic_army(db, "human", budget, seed * 3 + 1, candidate_ids=human_pool)
+        # Human army: use the client's drafted list (validated) or auto-build it.
+        if human_ids:
+            human_army = Army(name="human-army", owner="human", figure_ids=list(human_ids))
+            if mode == "sealed" and human_pool is not None:
+                from collections import Counter
+                need, have = Counter(human_ids), Counter(human_pool)
+                if any(need[k] > have.get(k, 0) for k in need):
+                    yield sse({"type": "error", "message": "army uses figures not in your pool"})
+                    return
+            v = validate_army(human_army, db, budget)
+            if not v.ok:
+                yield sse({"type": "error", "message": "; ".join(v.errors)})
+                return
+        else:
+            human_army = heuristic_army(db, "human", budget, seed * 3 + 1, candidate_ids=human_pool)
         yield sse({"type": "human_army", "army": [_brief(i) for i in human_army.figure_ids],
                    "points": human_army.total_points(db)})
 
@@ -259,12 +272,31 @@ def _construct_stream(mode: str, points: int, opponent: str, seed: int):
 
 @app.get("/api/new_game_stream")
 def new_game_stream(mode: str = "preconstructed", points: int = 200,
-                    opponent: str = "llm", seed: int = 1):
+                    opponent: str = "llm", seed: int = 1, human_ids: str = ""):
+    ids = [int(x) for x in human_ids.split(",") if x.strip()] or None
     return StreamingResponse(
-        _construct_stream(mode, points, opponent, seed),
+        _construct_stream(mode, points, opponent, seed, ids),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.get("/api/roster")
+def roster():
+    """Full drafting roster (all set pieces) for the preconstructed builder."""
+    db = SESSION.db
+    figs = sorted(db.all_figures(), key=lambda f: (f.faction, -f.points, f.short_name))
+    return {"figures": [_fig_brief(db, f) for f in figs]}
+
+
+@app.get("/api/sealed_packs")
+def sealed_packs(seed: int = 1):
+    """The human's 4 booster packs (5 figures each) to open one at a time. Uses
+    the same seed derivation the construction endpoint validates the draft against."""
+    db = SESSION.db
+    pool = sample_sealed_pool(db, seed * 7 + 1)
+    packs = [[_brief(i) for i in pool[k * 5:(k + 1) * 5]] for k in range(4)]
+    return {"packs": packs}
 
 
 @app.get("/api/state")
