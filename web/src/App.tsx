@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   applyIntent,
   endTurn,
@@ -65,6 +65,7 @@ export default function App() {
   const [moveGhost, setMoveGhost] = useState<MoveGhost | null>(null);
   const [pendingMove, setPendingMove] = useState<PendingMove | null>(null);
   const [busy, setBusy] = useState(false);
+  const oppRunning = useRef(false);
 
   const log = useCallback((items: GameEvent[]) => {
     if (items.length === 0) return;
@@ -142,6 +143,32 @@ export default function App() {
       cancelled = true;
     };
   }, [view]);
+
+  // When it's the opponent's turn (including the LLM going first), run it
+  // automatically. Guarded by a ref (not a cleanup flag) so it fires exactly once
+  // per opponent turn and survives React StrictMode's double-invoke in dev.
+  useEffect(() => {
+    if (!view || view.meta.ended || view.meta.active_player === "human") return;
+    if (oppRunning.current) return;
+    oppRunning.current = true;
+    (async () => {
+      setBusy(true);
+      try {
+        const r = await opponentTurn();
+        const lines: GameEvent[] = r.decisions
+          .map((d) => (d && typeof d === "object" && "summary" in d ? String((d as { summary: unknown }).summary) : String(d)))
+          .map((s) => ({ type: "opponent", summary: s }));
+        log(lines.length ? lines : [{ type: "opponent", summary: "Opponent passed." }]);
+        setView(r.view);
+        log([{ type: "turn", summary: r.view.meta.ended ? `Game over — winner: ${r.view.meta.winner ?? "draw"}.` : "Your turn." }]);
+      } catch (err) {
+        log([{ type: "error", summary: `Opponent turn failed: ${String(err)}` }]);
+      } finally {
+        oppRunning.current = false;
+        setBusy(false);
+      }
+    })();
+  }, [view, log]);
 
   // Fetch the modifier breakdown when an attack is armed.
   useEffect(() => {
@@ -312,27 +339,17 @@ export default function App() {
   }, [view, activeUid, pendingMove, busy, handleApply, log]);
 
   const handleEndTurn = useCallback(async () => {
-    if (busy || !view || view.meta.ended) return;
-    setBusy(true);
+    if (busy || !view || view.meta.ended || view.meta.active_player !== "human") return;
     setArmed(null);
     setMoveGhost(null);
     setPendingMove(null);
     setSelectedUid(null);
+    setBusy(true);
     try {
-      let v = await endTurn();
+      // End the human turn; the opponent effect picks up and plays the LLM turn.
+      const v = await endTurn();
       setView(v);
       log([{ type: "turn", summary: "Turn ended. Opponent is thinking…" }]);
-      let guard = 0;
-      while (v.meta.active_player !== "human" && !v.meta.ended && guard++ < 8) {
-        const r = await opponentTurn();
-        v = r.view;
-        setView(v);
-        const lines: GameEvent[] = r.decisions
-          .map((d) => (d && typeof d === "object" && "summary" in d ? String((d as { summary: unknown }).summary) : String(d)))
-          .map((s) => ({ type: "opponent", summary: s }));
-        log(lines.length ? lines : [{ type: "opponent", summary: "Opponent passed." }]);
-      }
-      log([{ type: "turn", summary: v.meta.ended ? `Game over — winner: ${v.meta.winner ?? "draw"}.` : "Your turn." }]);
     } catch (err) {
       log([{ type: "error", summary: `End turn failed: ${String(err)}` }]);
     } finally {
