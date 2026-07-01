@@ -105,6 +105,36 @@ _(none)_
 - **Live Sonnet 5** formed up a 5-figure army and advanced it as a formation before
   engaging (0 fallbacks).
 
+### Sweep 4 — per-ability code+AI audit (37-agent workflow, adversarially verified)
+
+Every ability + formation audited at BOTH the engine (code) and heuristic-AI (scoring)
+level, each finding independently re-verified. Engine **rules** came back faithful (14
+clean; code verdicts almost all CORRECT). The verified defects clustered on one root
+cause — the AI's EV *estimators* bypassed the ability-aware helpers — plus two real
+engine rule bugs. All fixed (+9 regression tests, `tests/test_ai_scoring.py` + 2 in
+`tests/test_abilities.py`):
+
+- **Toughness (worst, ≤16× over-valuation):** `Engine.expected_damage` now folds
+  `damage_after_defenses` into the normal- and crit-hit terms, so damage reduction is in
+  every value the AI (and candidate cache) consumes.
+- **Magic Enhancement:** `expected_damage` (ranged) now adds `ranged_damage_bonus`.
+- **Magic Immunity (engine rule bug):** a Magic-Immune *attacker* no longer inflicts the
+  Magic Enhancement +1 (`ranged_damage_bonus` guards attacker as well as target).
+- **Magic Levitation (engine rule bug):** the target must not have already acted this
+  turn — `_apply_levitate` rejects `already_acted`; the AI candidate generator skips
+  already-acted friends.
+- **Defend / combat formations:** formation hit-odds/expected-clicks now score against
+  `effective_defense` + `damage_after_defenses`, not raw stats.
+- **Healing:** the 1d6 alternative is now implemented (`CloseIntent.heal_d6`) and offered
+  as a second candidate for low-damage healers; heal candidate hit-odds use RAW defense
+  (the engine ignores modifiers when healing), fixing both Healing and Magic Healing
+  (which also gained the missing `hit_odds` annotation).
+- **Pole Arm:** charging into an enemy Pole Arm's front-arc contact is now deterred in
+  `_move_value` (capped so a lone Pole Arm defender is still engaged, not passed on).
+- **Regeneration:** offered to a demoralized figure (it's a move-class action the engine
+  permits while demoralized).
+- **Vampirism:** flagged then **REFUTED** on verification — no change.
+
 ---
 
 ## Todo

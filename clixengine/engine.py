@@ -37,7 +37,7 @@ from .intents import (
     Rejection,
     Result,
 )
-from .probability import expected_clicks, hit_probability, outcome
+from .probability import crit_hit_probability, hit_probability, outcome
 from .rng import DiceRoller
 from .state import Board, Figure, GameState
 
@@ -153,8 +153,16 @@ class Engine:
         t = self.state.figure(target_uid)
         atk = a.attack + (1 if rear_bonus else 0)
         base_dmg = a.damage if dmg is None else dmg
+        if attack_type == "ranged":
+            base_dmg += ab.ranged_damage_bonus(self.state, a, t)  # Magic Enhancement +1
         eff_def = ab.effective_defense(self.state, t, attack_type)
-        return expected_clicks(atk, eff_def, base_dmg)
+        # Fold damage-reducing abilities (Toughness, Magic Immunity) into each term:
+        # a normal hit delivers ``base_dmg``, a natural 12 delivers ``base_dmg + 1``.
+        p_crit = crit_hit_probability()
+        p_normal = hit_probability(atk, eff_def) - p_crit
+        normal_dmg = ab.damage_after_defenses(t, base_dmg, attack_type, is_magic=False)
+        crit_dmg = ab.damage_after_defenses(t, base_dmg + 1, attack_type, is_magic=False)
+        return p_normal * normal_dmg + p_crit * crit_dmg
 
     # ------------------------------------------------------------------ #
     # Legal-action generation
@@ -718,7 +726,10 @@ class Engine:
         pushing = self._consume_nonpass(f)
         d1, d2, total = self.rng.roll_2d6("attack", f"{f.short_name} Healing")
         res = outcome(d1, d2, f.attack, t.defense)  # ignore modifiers
-        healed = t.heal_clicks(f.damage + (1 if res == "crit_hit" else 0)) if res in ("hit", "crit_hit") else 0
+        # The healer may heal by its damage value OR, alternatively, by a 1d6 roll
+        # (§Healing). The client picks the method via intent.heal_d6.
+        base_heal = self.rng.d6("heal_amount") if getattr(intent, "heal_d6", False) else f.damage
+        healed = t.heal_clicks(base_heal + (1 if res == "crit_hit" else 0)) if res in ("hit", "crit_hit") else 0
         if res == "crit_miss":
             self._crit_miss_self(f, events)  # roll of "2": weapon backfire on the healer (rulebook §Rolling 2 and 12)
         events.append(self.log.emit("healing", healer=f.uid, target=t.uid,
@@ -791,6 +802,8 @@ class Engine:
         t = self.state.figures.get(intent.target_uid)
         if t is None or not t.is_alive or t.owner != f.owner:
             return Rejection("bad_target", "levitation target must be a friendly figure")
+        if t.uid in self._acted_uids:
+            return Rejection("already_acted", "levitation target has already acted this turn")
         if ab.has(t, ab.MAGIC_IMMUNITY):
             return Rejection("magic_immune", "target is immune to Magic effects")
         if not in_base_contact(f.position, f.base_radius, t.position, t.base_radius):

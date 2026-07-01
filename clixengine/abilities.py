@@ -133,8 +133,9 @@ def damage_after_defenses(target, raw: int, source_type: str, is_magic: bool) ->
 
 def ranged_damage_bonus(state, attacker, target) -> int:
     """Magic Enhancement: +1 damage to figures hit by a ranged attack from a
-    figure in base contact with the enhancer (unless the target is Magic Immune)."""
-    if _magic_immune(target):
+    figure in base contact with the enhancer. A Magic Immune figure neither
+    *receives* nor *inflicts* the extra click (ability 108)."""
+    if _magic_immune(target) or _magic_immune(attacker):
         return 0
     from .geometry import in_base_contact
 

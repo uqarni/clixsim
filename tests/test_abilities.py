@@ -9,6 +9,7 @@ from clixengine.geometry import angle_to
 from clixengine.geometry import Vec
 from clixengine.intents import (
     CloseIntent,
+    LevitateIntent,
     MoveIntent,
     NecromancyIntent,
     RangedIntent,
@@ -421,6 +422,46 @@ def test_magic_healing_crit_miss_backfires_on_healer(db):
     assert any(x["type"] == "crit_miss_self" and x["figure"] == 0 for x in r.events)
     assert healer.current_click == h0 + 1
     assert target.current_click == t0
+
+
+def test_healing_d6_alternative(db, monkeypatch):
+    # §Healing: the healer MAY heal by 1d6 instead of its damage value — matters
+    # for a low-damage healer (Leech Medic damage 1). intent.heal_d6 selects it.
+    e = build_engine(
+        db,
+        [
+            ("human", "Leech Medic", (18, 18), 0.0, 0),
+            ("human", "Werebear", (19.1, 18), 0.0, 6),  # deeply wounded (headroom >= 5)
+            ("llm", "Werebear", (30, 30), 0.0, 0),
+        ],
+    )
+    assert e.state.figure(0).damage == 1  # damage-value method would heal only 1
+    monkeypatch.setattr("clixengine.engine.outcome", lambda *a, **k: "hit")
+    e.rng.d6 = lambda kind="", note="": 5   # force the d6 roll
+    target = e.state.figure(1)
+    before = target.current_click
+    r = e.apply(CloseIntent(0, 1, variant="healing", heal_d6=True))
+    ev = next(x for x in r.events if x["type"] == "healing")
+    assert ev["healed"] == 5                 # healed by the 1d6 roll, not the damage value
+    assert target.current_click == before - 5
+
+
+def test_levitation_rejects_already_acted_target(db):
+    # §Magic Levitation targets a figure that has not yet acted; levitating an
+    # already-acted figure would grant it a second action (an illegal chain).
+    e = build_engine(
+        db,
+        [
+            ("human", "Magus", (10, 10), 0.0, 0),
+            ("human", "Werewolf", (11.0, 10), 0.0, 0),  # in base contact
+            ("llm", "Werebear", (20, 10), math.pi, 0),
+        ],
+        active="human",
+    )
+    assert ab.MAGIC_LEVITATION in e.state.figure(0).active_ability_ids()
+    e._acted_uids.add(1)  # the Werewolf already took an action this turn
+    r = e.apply(LevitateIntent(0, 1, (12, 12), 0.0))
+    assert not r.ok and r.reason == "already_acted"
 
 
 # --- regression: input validation & rules fidelity (audit/fuzz sweep) --------

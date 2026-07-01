@@ -10,9 +10,10 @@ push-cost when the figure is already fatigued.
 
 from __future__ import annotations
 
+from .. import abilities as ab
 from ..candidates import Candidate
 from ..engine import Engine
-from ..geometry import Vec, distance
+from ..geometry import Vec, distance, in_base_contact, in_front_arc
 from ..state import Figure, GameState
 
 
@@ -139,6 +140,7 @@ def _move_value(engine: Engine, figure: Figure, cand: Candidate) -> float:
     cur = min(distance(figure.position, e.position) for e in enemies)
     new = min(distance(dpt, e.position) for e in enemies)
     progress = cur - new
+    pole_pen = 0.0
     if figure.is_ranged:
         contact = figure.base_radius + 0.55
         in_band_after = contact < new <= figure.range
@@ -152,8 +154,27 @@ def _move_value(engine: Engine, figure: Figure, cand: Candidate) -> float:
         else:
             val = 0.4 + 0.1 * max(0.0, progress)
     else:
-        val = 2.0 if ann.get("intent_hint") == "charge" else 0.5 + 0.15 * max(0.0, progress)
-    return max(0.03, val) * 0.5
+        if ann.get("intent_hint") == "charge":
+            val = 2.0
+            pole_pen = _charge_pole_arm_penalty(engine, figure, dpt)  # self-click on arrival
+        else:
+            val = 0.5 + 0.15 * max(0.0, progress)
+    return max(0.03, val) * 0.5 - pole_pen
+
+
+def _charge_pole_arm_penalty(engine: Engine, figure: Figure, dest: Vec) -> float:
+    """Deterrent for charging into an enemy Pole Arm's front-arc contact (mirrors
+    engine._apply_pole_arm; Toughness-adjusted -> 0 if the mover would take 0 clicks).
+    Capped below the charge's base value so it only breaks ties toward a safe target:
+    a full material penalty would wrongly make the AI pass on a lone Pole Arm defender
+    (one-ply scoring can't yet see the follow-up attack payoff — see FUT-AI lookahead)."""
+    for p in engine.state.opponents_of(figure):
+        if ab.has(p, ab.POLE_ARM) and in_base_contact(
+            dest, figure.base_radius, p.position, p.base_radius
+        ) and in_front_arc(p.position, p.facing, dest, p.arc_half_angle):
+            clicks = ab.damage_after_defenses(figure, 1, "ability", False)
+            return min(clicks * _vpc(figure), 0.5)
+    return 0.0
 
 
 def _formation_push_cost(engine: Engine, cand: Candidate) -> float:

@@ -91,6 +91,14 @@ def generate_candidates(engine: Engine, figure: Figure) -> list[Candidate]:
         _ranged_candidates(engine, figure, enemies, cands, aids)
         _support_candidates(engine, figure, cands, aids)
 
+    # ---- Regeneration: a move-class self-heal the engine permits even while
+    #      demoralized (unlike attacks/support), so it lives outside that gate. --
+    if has_budget and figure.action_tokens < 2 and ab.REGENERATION in aids and _wounded(figure):
+        cands.append(Candidate(
+            RegenerateIntent(figure.uid), "regenerate", f"Regenerate {figure.short_name}",
+            {"expected_heal": 1.0},
+        ))
+
     # ---- movement (free for Quickness) ----------------------------------
     if (has_budget or quick) and figure.speed > 0 and figure.action_tokens < 2:
         _move_candidates(engine, figure, enemies, cands, demoralized, free=quick)
@@ -219,13 +227,23 @@ def _support_candidates(engine, figure, cands, aids):
             if _wounded(fr) and not state.opposing_contacts(fr) and distance(
                 figure.position, fr.position
             ) <= figure.base_radius + fr.base_radius + 1e-6:
+                # Healing ignores all modifiers, so the hit chance is raw attack
+                # vs raw defense (NOT effective_defense — the engine ignores Defend
+                # / Battle Armor here, engine.py _resolve_healing).
+                base = {"target": fr.uid, "target_name": fr.short_name,
+                        "hit_odds": round(hit_probability(figure.attack, fr.defense), 3)}
                 cands.append(Candidate(
                     CloseIntent(figure.uid, fr.uid, variant="healing"), "heal",
                     f"Heal {fr.short_name}",
-                    {"target": fr.uid, "target_name": fr.short_name,
-                     "hit_odds": round(engine.hit_odds(figure.uid, fr.uid, attack_type="close"), 3),
-                     "heal_amount": figure.damage},
+                    {**base, "heal_amount": figure.damage},
                 ))
+                # The 1d6 alternative can heal more than a low damage value.
+                if figure.damage < D6_AVG:
+                    cands.append(Candidate(
+                        CloseIntent(figure.uid, fr.uid, variant="healing", heal_d6=True), "heal",
+                        f"Heal {fr.short_name} (roll d6)",
+                        {**base, "heal_amount": "1d6"},
+                    ))
     # Magic Healing (ranged): heal a wounded friendly within range/arc.
     if ab.MAGIC_HEALING in aids and not state.opposing_contacts(figure):
         for fr in state.friends_of(figure):
@@ -240,14 +258,10 @@ def _support_candidates(engine, figure, cands, aids):
             cands.append(Candidate(
                 RangedIntent(figure.uid, (fr.uid,), variant="magic_healing"), "heal",
                 f"Magic-Heal {fr.short_name}",
-                {"target": fr.uid, "target_name": fr.short_name, "heal_amount": D6_AVG},
+                # Magic Healing also ignores modifiers -> raw attack vs raw defense.
+                {"target": fr.uid, "target_name": fr.short_name, "heal_amount": D6_AVG,
+                 "hit_odds": round(hit_probability(figure.attack, fr.defense), 3)},
             ))
-    # Regeneration: heal 0-4 (avg 1) clicks on self.
-    if ab.REGENERATION in aids and _wounded(figure):
-        cands.append(Candidate(
-            RegenerateIntent(figure.uid), "regenerate", f"Regenerate {figure.short_name}",
-            {"expected_heal": 1.0},
-        ))
     # Necromancy: bring back your most valuable eliminated figure.
     if ab.NECROMANCY in aids and not state.opposing_contacts(figure):
         dead = [d for d in state.figures.values() if d.owner == figure.owner and d.eliminated]
@@ -262,6 +276,8 @@ def _support_candidates(engine, figure, cands, aids):
     if ab.MAGIC_LEVITATION in aids:
         enemies = state.opponents_of(figure)
         for fr in state.friends_of(figure):
+            if fr.uid in engine._acted_uids:  # a figure that already acted can't be levitated
+                continue
             if ab.MAGIC_IMMUNITY in fr.active_ability_ids():
                 continue
             if distance(figure.position, fr.position) > figure.base_radius + fr.base_radius + 1e-6:
@@ -462,13 +478,17 @@ def _make_ranged_formation(engine: Engine, cluster: list[Figure]) -> Candidate |
     primary = max(cluster, key=lambda f: (f.damage, f.attack))
     n = len(cluster)
     atk = primary.attack + 2 * (n - 1)
-    hit = hit_probability(atk, target.defense)
+    # Score against the defense the engine actually resolves against (Battle Armor /
+    # Defend via effective_defense; Toughness via damage_after_defenses).
+    eff_def = ab.effective_defense(engine.state, target, "ranged")
+    hit = hit_probability(atk, eff_def)
+    per_hit = ab.damage_after_defenses(target, primary.damage, "ranged", False)
     uids = tuple(f.uid for f in cluster)
     return Candidate(
         RangedIntent(primary.uid, (target.uid,), formation_uids=uids), "ranged_formation",
         f"Ranged formation ({n}) fires at {target.short_name}",
         {"primary": primary.uid, "members": list(uids), "target": target.uid,
-         "hit_odds": round(hit, 3), "expected_clicks": round(hit * primary.damage, 2),
+         "hit_odds": round(hit, 3), "expected_clicks": round(hit * per_hit, 2),
          "attack": atk},
     )
 
@@ -491,13 +511,15 @@ def _make_close_formations(engine: Engine, members: list[Figure], cands: list[Ca
             in_rear_arc(t.position, t.facing, f.position, t.arc_half_angle) for f in chosen
         ) else 0
         atk = primary.attack + (n - 1) + rear
-        hit = hit_probability(atk, t.defense)
+        eff_def = ab.effective_defense(engine.state, t, "close")
+        hit = hit_probability(atk, eff_def)
+        per_hit = ab.damage_after_defenses(t, primary.damage, "close", False)
         uids = tuple(f.uid for f in chosen)
         cands.append(Candidate(
             CloseIntent(primary.uid, t.uid, formation_uids=uids), "close_formation",
             f"Close formation ({n}) attacks {t.short_name}",
             {"primary": primary.uid, "members": list(uids), "target": t.uid,
-             "hit_odds": round(hit, 3), "expected_clicks": round(hit * primary.damage, 2),
+             "hit_odds": round(hit, 3), "expected_clicks": round(hit * per_hit, 2),
              "attack": atk, "rear": bool(rear)},
         ))
 

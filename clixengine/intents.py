@@ -38,6 +38,7 @@ class CloseIntent:
     target_uid: int
     variant: str = "normal"  # normal | weapon_master | healing
     formation_uids: tuple[int, ...] = ()  # close formation members
+    heal_d6: bool = False  # Healing: use the 1d6 alternative instead of the damage value
     kind: str = "close"
 
 
