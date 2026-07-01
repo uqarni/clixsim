@@ -55,6 +55,38 @@ def _optional_abilities(f: Figure) -> list[dict]:
     return out
 
 
+def _terrain_view(t) -> dict:
+    """A placed terrain piece as world-space polygon + rule flags (the client
+    picks colours/patterns from kind/elevated/water/low_wall)."""
+    return {
+        "id": t.id,
+        "kind": t.kind,  # "clear" | "hindering" | "blocking"
+        "owner": t.owner,
+        "elevated": t.elevated,
+        "water": t.water,  # "shallow" | "deep" | None
+        "low_wall": t.low_wall,
+        "abrupt": t.abrupt,
+        "polygon": [[round(v.x, 3), round(v.y, 3)] for v in t.polygon],
+        "access_points": [[round(v.x, 3), round(v.y, 3)] for v in t.access_points],
+    }
+
+
+def terrain_template_view(tmpl) -> dict:
+    """A library shape for the placement palette (origin-centred polygon)."""
+    return {
+        "key": tmpl.key,
+        "label": tmpl.label,
+        "kind": tmpl.kind,
+        "elevated": tmpl.elevated,
+        "water": tmpl.water,
+        "low_wall": tmpl.low_wall,
+        "abrupt": tmpl.abrupt,
+        "blurb": tmpl.blurb,
+        "polygon": [[round(v.x, 3), round(v.y, 3)] for v in tmpl.polygon],
+        "access_points": [[round(v.x, 3), round(v.y, 3)] for v in tmpl.access_points],
+    }
+
+
 def figure_view(engine: Engine, f: Figure) -> dict:
     contacts = [c.uid for c in engine.state.in_base_contact_with(f, engine.state.living())]
     return {
@@ -65,6 +97,7 @@ def figure_view(engine: Engine, f: Figure) -> dict:
         "faction": f.definition.faction,
         "points": f.points,
         "pos": [round(f.position.x, 3), round(f.position.y, 3)],
+        "elevation": engine._elev(f.position) if f.is_alive else 0,
         "facing_deg": round(math.degrees(f.facing) % 360, 1),
         "base_radius": f.base_radius,
         "arc_deg": round(math.degrees(f.arc_half_angle), 1),  # front-arc HALF-angle
@@ -103,6 +136,9 @@ def game_view(engine: Engine) -> dict:
             "turn": state.turn_number,
             "active_player": state.active_player,
             "first_player": state.first_player,
+            "phase": state.phase,  # "terrain" (setup placement) | "battle"
+            "terrain_turn": state.terrain_turn,
+            "terrain_budget": dict(state.terrain_budget),
             "actions_per_turn": state.actions_per_turn(),
             "actions_spent": spent,
             "actions_remaining": remaining,
@@ -114,4 +150,5 @@ def game_view(engine: Engine) -> dict:
         },
         # sorted by uid for stable client diffing; includes eliminated figures
         "figures": [figure_view(engine, f) for f in sorted(state.figures.values(), key=lambda x: x.uid)],
+        "terrain": [_terrain_view(t) for t in state.terrain],
     }

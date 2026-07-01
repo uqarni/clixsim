@@ -39,6 +39,8 @@ from .data import load_db
 from .demo import demo_armies
 from .engine import Engine
 from .setup import build_game
+from .terrain import TERRAIN_LIBRARY
+from .terrain_ai import TerrainPlacer
 from .intents import (
     CloseIntent,
     LevitateIntent,
@@ -49,7 +51,7 @@ from .intents import (
     RegenerateIntent,
     ToggleAbilityIntent,
 )
-from .view import game_view
+from .view import game_view, terrain_template_view
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
@@ -76,6 +78,12 @@ class Session:
         self.human_side = "human"
         self._chat_client = None
         self._chat_system: str | None = None
+        self._placer: TerrainPlacer | None = None
+
+    def placer(self) -> TerrainPlacer:
+        if self._placer is None:
+            self._placer = TerrainPlacer()
+        return self._placer
 
     def chat(self, message: str, history: list[dict]) -> str:
         if self._chat_client is None:
@@ -92,10 +100,12 @@ class Session:
             return f"(Sorry — I hit an error: {e})"
 
     def start_game(self, human_army: Army, llm_army: Army, build_total: int,
-                   seed: int, opponent: str = "llm", board: float = 36.0):
+                   seed: int, opponent: str = "llm", board: float = 36.0,
+                   with_terrain: bool = False, terrain_per_player: int = 3):
         """Finalize a game from two prebuilt armies + wire the opponent controller."""
         self.engine = build_game(human_army, llm_army, build_total=build_total, seed=seed,
-                                 board_size=board, db=self.db)
+                                 board_size=board, db=self.db, with_terrain=with_terrain,
+                                 terrain_per_player=terrain_per_player)
         if opponent == "heuristic":
             self.opponent = HeuristicAI()
         else:
@@ -212,7 +222,7 @@ def _brief(fid: int) -> dict:
 
 
 def _construct_stream(mode: str, points: int, opponent: str, seed: int,
-                      human_ids: list[int] | None = None):
+                      human_ids: list[int] | None = None, terrain: bool = True):
     """Server-sent events: settle the human army (drafted by the client, or auto-
     built), stream the LLM drafting its own army with reasoning, then finalize."""
     db = SESSION.db
@@ -287,7 +297,7 @@ def _construct_stream(mode: str, points: int, opponent: str, seed: int,
         yield sse({"type": "llm_army", "army": [_brief(i) for i in llm_ids],
                    "points": llm_army.total_points(db)})
 
-        SESSION.start_game(human_army, llm_army, budget, seed, opponent)
+        SESSION.start_game(human_army, llm_army, budget, seed, opponent, with_terrain=terrain)
         yield sse({"type": "ready", "view": game_view(SESSION.engine)})
     except Exception as e:  # never leave the client hanging
         yield sse({"type": "error", "message": str(e)})
@@ -295,10 +305,11 @@ def _construct_stream(mode: str, points: int, opponent: str, seed: int,
 
 @app.get("/api/new_game_stream")
 def new_game_stream(mode: str = "preconstructed", points: int = 200,
-                    opponent: str = "llm", seed: int = 1, human_ids: str = ""):
+                    opponent: str = "llm", seed: int = 1, human_ids: str = "",
+                    terrain: bool = True):
     ids = [int(x) for x in human_ids.split(",") if x.strip()] or None
     return StreamingResponse(
-        _construct_stream(mode, points, opponent, seed, ids),
+        _construct_stream(mode, points, opponent, seed, ids, terrain),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -325,6 +336,85 @@ def sealed_packs(seed: int = 1):
     pool = sample_sealed_pool(db, seed * 7 + 1)
     packs = [[_brief(i) for i in pool[k * 5:(k + 1) * 5]] for k in range(4)]
     return {"packs": packs}
+
+
+class PlaceTerrainReq(BaseModel):
+    key: str
+    center: tuple[float, float]
+    rotation: float = 0.0
+
+
+@app.get("/api/terrain_library")
+def terrain_library():
+    """The curated placement palette (origin-centred shapes + rule flags)."""
+    return {"pieces": [terrain_template_view(t) for t in TERRAIN_LIBRARY]}
+
+
+@app.get("/api/terrain_candidates")
+def terrain_candidates(owner: str = "human"):
+    """Legal example placements for ``owner`` (renderer hint / AI options)."""
+    eng = SESSION.require()
+    return {"candidates": eng.terrain_placement_candidates(owner)}
+
+
+@app.post("/api/place_terrain")
+def place_terrain(req: PlaceTerrainReq):
+    """The human places one terrain piece during the setup phase."""
+    eng = SESSION.require()
+    result = eng.place_terrain(SESSION.human_side, req.key, req.center, req.rotation)
+    return {
+        "ok": result.ok,
+        "reason": getattr(result, "reason", None),
+        "detail": getattr(result, "detail", None),
+        "summary": getattr(result, "summary", ""),
+        "view": game_view(eng),
+    }
+
+
+@app.get("/api/terrain_placement_stream")
+def terrain_placement_stream():
+    """SSE: the opponent places its terrain (its run of the alternation), one piece
+    at a time with reasoning; ends when it's the human's turn or setup completes."""
+    eng = SESSION.require()
+
+    def gen():
+        def sse(o: dict) -> str:
+            return f"data: {json.dumps(o)}\n\n"
+        if eng.state.phase != "terrain":
+            yield sse({"type": "done", "view": game_view(eng)})
+            return
+        placer = SESSION.placer()
+        llm_ranged = any(f.is_ranged for f in eng.state.living("llm"))
+        step = 0
+        try:
+            while eng.state.phase == "terrain" and eng.state.terrain_turn == "llm":
+                cands = eng.terrain_placement_candidates("llm")
+                if not cands:
+                    break
+                context = {
+                    "my_army_has_ranged": llm_ranged,
+                    "pieces_left": eng.state.terrain_budget.get("llm", 0),
+                    "already_placed": [{"type": t.kind, "elevated": t.elevated, "owner": t.owner}
+                                       for t in eng.state.terrain],
+                }
+                seed = 4000 + len(eng.state.terrain) * 7 + step
+                choice, reason, used = placer.pick(cands, context, llm_ranged, seed)
+                step += 1
+                if choice is None:
+                    break
+                r = eng.place_terrain("llm", choice["key"], choice["center"], choice["rotation"])
+                if not r.ok:  # candidates are pre-validated; stop rather than loop
+                    break
+                yield sse({"type": "place", "summary": r.summary, "reasoning": reason,
+                           "used_llm": used, "view": game_view(eng)})
+            yield sse({"type": "done", "view": game_view(eng)})
+        except Exception as e:
+            yield sse({"type": "error", "message": str(e), "view": game_view(eng)})
+
+    return StreamingResponse(
+        gen(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/state")
