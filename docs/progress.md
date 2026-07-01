@@ -60,9 +60,10 @@ _(none)_
 - **AI-3** — **Push-cost term**: every non-pass action pays the self-damage cost when
   the acting figure is already fatigued, and is essentially forbidden if it would push
   the figure to death — pushing is now a deliberate decision, not an accident.
-- **TEST-1** — Unit suite (`tests/`, **111 tests**): geometry, probability, dial, data,
+- **TEST-1** — Unit suite (`tests/`, **117 tests**): geometry, probability, dial, data,
   movement, combat, turns/pushing, army validation, deterministic self-play, all 22
-  abilities, all 3 formation types, and sweep regressions.
+  abilities, both formation **types** (movement + combat, the latter in its ranged and
+  close modes), and sweep regressions.
 
 ---
 
@@ -84,11 +85,18 @@ _(none)_
 
 ### Sweep 2 — formations & abilities
 
-- **Rules audit** (all 22 abilities + 3 formations verified vs canonical text): **2
+- **Rules audit** (all 22 abilities + both formation types verified vs canonical text): **2
   formation-move validation bugs** (per-member path base-crossing + destination overlap
   not checked) and rules-fidelity gaps fixed — Shockwave now respects LoF blocking,
   Magic Blast honours the P4-R25 targeting rule, Healing/Magic Healing apply the +1
   crit-heal, Battle Fury moved to `capture_pending` coverage.
+- **Sweep 3 — authoritative-source pass** (vs the official Jan-2002 Rulebook + Special
+  Abilities Card PDFs): diffed all 22 implemented abilities against the card — **all match**
+  (Necromancy's Zombie/Skeleton auto-return, Command's d6-for-6, Battle Armor +2-vs-ranged,
+  Magic Levitation, etc. all confirmed verbatim). Healing & Necromancy re-verified per the
+  user's request. One gap found + fixed: a critical miss (roll of "2") on a Healing / Magic
+  Healing action now backfires on the healer (1 self-click), per the rulebook's "Rolling 2
+  and 12" rule which governs all close/ranged actions. (+2 regression tests.)
 - **Gameplay fuzz** (1,080 heuristic games, both faction modes; ~invariant/determinism
   checks): AI never proposed an illegal action; deterministic; state invariants held.
   Direct-intent fuzz found **duplicate formation members** and **ungated ability
@@ -130,6 +138,14 @@ _Future milestones (post-v1), roughly in PRD milestone order._
   paths around obstacles are a UX concern deferred with the renderer (P4-R10).
 - **Free-spin** (P4-R9) is not modelled, so a moved figure does not grant defenders a
   free re-facing before Pole Arm / close-combat arc is judged.
+- **Movement formation + enemy contact** (P4-R12): a movement formation containing a
+  member already in base contact with an opponent is *rejected* rather than resolved
+  with a per-member break-away roll (rulebook: a contacted member rolls to break away,
+  stays put on a fail but may rotate, others still move and must end cohesive). This is
+  a **conservative, safe** deviation — it never yields a wrong result, only forbids a
+  niche legal grouping; the player simply moves those figures individually (always
+  legal), and the heuristic AI only ever forms movement formations from clusters that
+  are not yet in contact, so it never hits this path. Deferred with free-spin/capture.
 - AI is **one-ply greedy**, not expectiminimax (see FUT-AI). Movement/ranged formations
   are used mainly by single-faction armies that start clustered (touching deployment);
   reliably assembling formations from a scattered mixed-faction start is a tuning item.

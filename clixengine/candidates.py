@@ -513,7 +513,9 @@ def generate_formation_candidates(engine: Engine, player: str) -> list[Candidate
         by_faction.setdefault(f.definition.faction, []).append(f)
 
     cands: list[Candidate] = []
-    for members in by_faction.values():
+    for fac, members in by_faction.items():
+        if fac == "Mage Spawn":
+            continue  # Mage Spawn cannot form formations (no Shyft in the roster)
         # Movement formation: cohesive clusters of 3-5, free of enemy contact.
         move_elig = [
             f for f in members

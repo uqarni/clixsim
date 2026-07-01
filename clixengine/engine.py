@@ -44,6 +44,11 @@ from .state import Board, Figure, GameState
 # Ability effect coverage lives in clixengine.abilities (X6 telemetry).
 IMPLEMENTED_ABILITY_IDS = ab.IMPLEMENTED_ABILITY_IDS
 
+# Mage Spawn are faction-less monsters: they may not be part of any formation
+# except with a Shyft figure (§Restrictions / P4-R16). No Shyft exists in the
+# Rebellion roster, so in v1 Mage Spawn simply cannot form formations.
+MAGE_SPAWN_FACTION = "Mage Spawn"
+
 
 class Engine:
     def __init__(self, state: GameState, db: FigureDB | None = None, seed: int = 0):
@@ -694,6 +699,8 @@ class Engine:
         healed = 0
         if res in ("hit", "crit_hit"):
             healed = t.heal_clicks(self.rng.d6("magic_heal_amount") + (1 if res == "crit_hit" else 0))
+        elif res == "crit_miss":
+            self._crit_miss_self(f, events)  # roll of "2": weapon backfire on the healer (rulebook §Rolling 2 and 12)
         events.append(self.log.emit("magic_healing", healer=f.uid, target=t.uid,
                       dice=[d1, d2], result=res, healed=healed))
         return self._finish_action(f, events, pushing, "ranged",
@@ -712,6 +719,8 @@ class Engine:
         d1, d2, total = self.rng.roll_2d6("attack", f"{f.short_name} Healing")
         res = outcome(d1, d2, f.attack, t.defense)  # ignore modifiers
         healed = t.heal_clicks(f.damage + (1 if res == "crit_hit" else 0)) if res in ("hit", "crit_hit") else 0
+        if res == "crit_miss":
+            self._crit_miss_self(f, events)  # roll of "2": weapon backfire on the healer (rulebook §Rolling 2 and 12)
         events.append(self.log.emit("healing", healer=f.uid, target=t.uid,
                       dice=[d1, d2], result=res, healed=healed))
         return self._finish_action(f, events, pushing, "close",
@@ -764,7 +773,8 @@ class Engine:
             dead.position = self._free_contact_position(f, dead.base_radius)
             dead.facing = f.facing
             dead.action_tokens = 0
-            self._acted_uids.add(dead.uid)  # just returned; may not be given an action
+            dead.begin_owner_turn()  # fresh turn state; §Necromancy places no bar on the
+            # returned figure being given an action later this turn.
             events.append(self.log.emit("necromancy", necromancer=f.uid, target=dead.uid,
                           clicks=clicks, pos=[dead.position.x, dead.position.y]))
         return self._finish_action(f, events, pushing, "necromancy",
@@ -858,6 +868,9 @@ class Engine:
             return Rejection("pushed_out", "a member cannot act a third consecutive turn")
         if len({g.definition.faction for g in figs}) != 1:
             return Rejection("bad_formation", "formation members must share a faction")
+        if figs[0].definition.faction == MAGE_SPAWN_FACTION:
+            return Rejection("bad_formation",
+                             "Mage Spawn cannot form formations (no Shyft present)")
         return tuple(figs)
 
     def _token_formation(self, figs) -> list:
@@ -889,7 +902,11 @@ class Engine:
             return Rejection("bad_formation", "Flight/Aquatic/Quickness may not join a movement formation")
         if any(g.is_demoralized for g in figs):
             return Rejection("bad_formation", "a demoralized figure may not join a formation")
-        # v1 simplification: members must be free of enemy contact (no break-away).
+        # Deliberate, conservative deviation (P4-R12): the rulebook lets a contacted
+        # member join and roll to break away (stay put on a fail, may still rotate). We
+        # instead reject — the player then moves those figures individually (always
+        # legal) and the AI only ever forms movement formations before contact, so this
+        # path is never taken. Documented in docs/progress.md → Known limitations.
         if any(self.state.opposing_contacts(g) for g in figs):
             return Rejection("bad_formation", "members in base contact with enemies must move individually")
         if not self._positions_cohesive([g.position for g in figs], [g.base_radius for g in figs]):

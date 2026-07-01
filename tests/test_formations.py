@@ -104,8 +104,8 @@ def test_ranged_formation_boosts_attack_and_resolves(db):
 def test_close_formation_generated_and_resolves(db):
     e = build_engine(db, [
         ("llm", "Werebear", (18, 18), 0.0, 0),                       # target, facing +x
-        ("human", "Werebear", (16.9, 18), 0.0, 0),                   # touching, faces +x (target)
-        ("human", "Werebear", (18, 16.9), math.pi / 2, 0),           # touching, faces +y (target)
+        ("human", "Order Of Vladd", (16.9, 18), 0.0, 0),             # touching, faces +x (target)
+        ("human", "Order Of Vladd", (18, 16.9), math.pi / 2, 0),     # touching, faces +y (target)
     ], active="human")
     cand = _find(generate_formation_candidates(e, "human"), "close_formation")
     assert cand is not None
@@ -123,11 +123,29 @@ def test_close_formation_generated_and_resolves(db):
 def test_close_formation_rejects_member_out_of_contact(db):
     e = build_engine(db, [
         ("llm", "Werebear", (18, 18), 0.0, 0),
-        ("human", "Werebear", (16.9, 18), 0.0, 0),   # in contact
-        ("human", "Werebear", (10, 18), 0.0, 0),     # NOT in contact
+        ("human", "Order Of Vladd", (16.9, 18), 0.0, 0),   # in contact
+        ("human", "Order Of Vladd", (10, 18), 0.0, 0),     # NOT in contact
     ], active="human")
     r = e.apply(CloseIntent(1, 0, formation_uids=(1, 2)))
     assert not r.ok and r.reason == "not_adjacent"
+
+
+def test_mage_spawn_cannot_form_formations(db):
+    # Mage Spawn are faction-less monsters — no formations (no Shyft in the roster).
+    e = build_engine(db, [
+        ("human", "Werebear", (10, 10), math.pi / 2, 0),
+        ("human", "Werebear", (11.1, 10), math.pi / 2, 0),
+        ("human", "Werebear", (12.2, 10), math.pi / 2, 0),
+        ("llm", "Chaos Mage", (11, 30), -math.pi / 2, 0),
+    ], active="human")
+    assert all(e.state.figure(u).definition.faction == "Mage Spawn" for u in (0, 1, 2))
+    # The AI offers no formation for a Mage Spawn cluster...
+    assert generate_formation_candidates(e, "human") == []
+    # ...and a hand-crafted Mage Spawn formation is rejected by the engine.
+    r = e.apply(MoveIntent(0, (10, 12), math.pi / 2, formation_uids=(0, 1, 2),
+                           member_dests=((10, 12), (11.1, 12), (12.2, 12)),
+                           member_facings=(math.pi / 2,) * 3))
+    assert not r.ok and r.reason == "bad_formation"
 
 
 # --- regression: formation-move validation (found in the audit/fuzz sweep) ----
@@ -163,3 +181,45 @@ def test_formation_move_rejects_dest_overlapping_enemy(db):
                            member_dests=((10, 14), (11.1, 14), (12.2, 14)),
                            member_facings=(math.pi / 2,) * 3))
     assert not r.ok and r.reason == "end_on_base"
+
+
+# --- combat-formation assist bonuses (the "units assist each other" mechanic) --
+def test_ranged_formation_assist_scales_by_two_per_member(db):
+    # Each extra member adds +2 to the shared attack roll (P4-R29).
+    def formation_attack(n):
+        specs = [("human", "Chaos Mage", (10 + 1.1 * i, 5), math.pi / 2, 0) for i in range(n)]
+        specs.append(("llm", "Storm Golem", (10 + 1.1 * (n - 1) / 2, 13), -math.pi / 2, 0))
+        e = build_engine(db, specs)
+        c = _find(generate_formation_candidates(e, "human"), "ranged_formation")
+        return c.annotation["attack"], e.state.figure(c.annotation["primary"]).attack
+    a3, base = formation_attack(3)
+    a4, _ = formation_attack(4)
+    assert a3 == base + 2 * 2   # 3 figures => +4
+    assert a4 == base + 2 * 3   # 4 figures => +6
+
+
+def test_close_formation_rear_bonus(db):
+    # +1 per extra member, plus +1 because one attacker sits in the target's rear.
+    e = build_engine(db, [
+        ("llm", "Werebear", (18, 18), 0.0, 0),                 # 90-arc target, faces +x
+        ("human", "Order Of Vladd", (16.9, 18), 0.0, 0),       # behind => rear arc
+        ("human", "Order Of Vladd", (18, 16.9), math.pi / 2, 0),  # side => front arc
+    ], active="human")
+    c = _find(generate_formation_candidates(e, "human"), "close_formation")
+    primary = e.state.figure(c.annotation["primary"])
+    assert c.annotation["rear"] is True
+    assert c.annotation["attack"] == primary.attack + 1 + 1  # +1 extra member, +1 rear
+
+
+def test_no_rear_bonus_against_all_around_arc(db):
+    # A 180-arc figure (Storm Golem) has no rear, so the rear bonus never applies.
+    assert db.find("Storm Golem")[0].arc_deg == 180.0
+    e = build_engine(db, [
+        ("llm", "Storm Golem", (18, 18), 0.0, 0),
+        ("human", "Order Of Vladd", (16.9, 18), 0.0, 0),       # "behind" — but no rear exists
+        ("human", "Order Of Vladd", (18, 16.9), math.pi / 2, 0),
+    ], active="human")
+    c = _find(generate_formation_candidates(e, "human"), "close_formation")
+    primary = e.state.figure(c.annotation["primary"])
+    assert c.annotation["rear"] is False
+    assert c.annotation["attack"] == primary.attack + 1  # +1 extra member only

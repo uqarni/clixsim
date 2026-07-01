@@ -262,6 +262,9 @@ def test_necromancy_revives_eliminated_friendly(db):
             from clixengine.geometry import in_base_contact
             nm = e.state.figure(0)
             assert in_base_contact(nm.position, nm.base_radius, dead.position, dead.base_radius)
+            # the returned figure is a normal figure — not barred from acting (§Necromancy)
+            assert dead.uid not in e._acted_uids
+            assert dead.action_tokens == 0
             return
     pytest.skip("necromancy failed every seed")
 
@@ -377,6 +380,47 @@ def test_healing_close_action_heals_friendly(db):
             assert e.state.figure(1).current_click == before - ev["healed"]
             return
     pytest.skip("no successful heal across seeds")
+
+
+def test_healing_crit_miss_backfires_on_healer(db):
+    # A roll of "2" on a Healing action is a critical miss: the healer turns his
+    # dial 1 click (rulebook §Rolling 2 and 12 covers all close/ranged actions).
+    e = build_engine(
+        db,
+        [
+            ("human", "Leech Medic", (18, 18), 0.0, 0),
+            ("human", "Werebear", (19.1, 18), 0.0, 4),
+            ("llm", "Werebear", (30, 30), 0.0, 0),
+        ],
+    )
+    healer, target = e.state.figure(0), e.state.figure(1)
+    h0, t0 = healer.current_click, target.current_click
+    e.rng.roll_2d6 = lambda kind="", note="": (1, 1, 2)  # force critical miss
+    r = e.apply(CloseIntent(0, 1, variant="healing"))
+    ev = next(x for x in r.events if x["type"] == "healing")
+    assert ev["result"] == "crit_miss" and ev["healed"] == 0
+    assert any(x["type"] == "crit_miss_self" and x["figure"] == 0 for x in r.events)
+    assert healer.current_click == h0 + 1     # healer took a click
+    assert target.current_click == t0         # target unchanged
+
+
+def test_magic_healing_crit_miss_backfires_on_healer(db):
+    e = build_engine(
+        db,
+        [
+            ("human", "Elemental Priest", (18, 6), math.pi / 2, 0),
+            ("human", "Werebear", (18, 12), -math.pi / 2, 3),
+        ],
+    )
+    healer, target = e.state.figure(0), e.state.figure(1)
+    h0, t0 = healer.current_click, target.current_click
+    e.rng.roll_2d6 = lambda kind="", note="": (1, 1, 2)  # force critical miss
+    r = e.apply(RangedIntent(0, (1,), variant="magic_healing"))
+    ev = next(x for x in r.events if x["type"] == "magic_healing")
+    assert ev["result"] == "crit_miss" and ev["healed"] == 0
+    assert any(x["type"] == "crit_miss_self" and x["figure"] == 0 for x in r.events)
+    assert healer.current_click == h0 + 1
+    assert target.current_click == t0
 
 
 # --- regression: input validation & rules fidelity (audit/fuzz sweep) --------
