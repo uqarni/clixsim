@@ -71,6 +71,14 @@ class Session:
 SESSION = Session()
 
 
+@app.on_event("startup")
+def _bootstrap() -> None:
+    # Start with a default game so the client's initial GET /api/state works
+    # without an explicit new-game round-trip (single-player local app).
+    if SESSION.engine is None:
+        SESSION.new_game(points=200, seed=1)
+
+
 # ------------------------------------------------------------------ #
 # Intent (de)serialization — the client round-trips the intent dict
 # ------------------------------------------------------------------ #
