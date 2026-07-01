@@ -241,11 +241,71 @@ class Engine:
             self._begin_battle_after_terrain()
 
     def _begin_battle_after_terrain(self) -> None:
-        """Placement complete: leave setup and start the first battle turn."""
-        self.state.phase = "battle"
+        """Terrain placement complete: enter figure deployment if requested, else
+        start the first battle turn."""
         self.log.emit("terrain_done", pieces=len(self.state.terrain))
+        if getattr(self.state, "pending_deploy", False):
+            self._begin_deploy()
+            return
+        self._begin_first_turn()
+
+    def _begin_deploy(self) -> None:
+        """Setup: let the human arrange their figures within the starting area (P3-R5)
+        before the battle begins."""
+        self.state.phase = "deploy"
+        self.state.pending_deploy = False
+        self.log.emit("deploy_setup", first=self.state.first_player)
+
+    def _begin_first_turn(self) -> None:
+        self.state.phase = "battle"
         self._begin_player_turn(self.state.first_player)
         self.log.emit("begin_turn", player=self.state.first_player, turn=self.state.turn_number)
+
+    # ------------------------------------------------------------------ #
+    # Figure deployment (setup phase) — arrange your army in your starting area
+    # ------------------------------------------------------------------ #
+    def _deploy_band(self, owner: str) -> tuple[float, float]:
+        """The owner's 3"-deep starting band (low_y, high_y) — P3-R5."""
+        h = self.state.board.height
+        return (0.0, 3.0) if owner == "human" else (h - 3.0, h)
+
+    def deploy_figure(
+        self, owner: str, uid: int, pos: tuple[float, float], facing: float,
+    ) -> Result | Rejection:
+        """Reposition one of ``owner``'s figures anywhere within its starting area
+        during setup — free, any number of times (P3-R5)."""
+        if self.state.phase != "deploy":
+            return Rejection("not_deploying", "deployment is not open right now")
+        f = self.state.figures.get(uid)
+        if f is None or not f.is_alive or f.owner != owner:
+            return Rejection("bad_figure", "not your figure")
+        p = Vec(*pos)
+        r = f.base_radius
+        b = self.state.board
+        lo, hi = self._deploy_band(owner)
+        if not (r <= p.x <= b.width - r):
+            return Rejection("off_board", "figure would leave the board")
+        if not (lo + r <= p.y <= hi - r):
+            return Rejection("out_of_area", 'figures deploy within your 3" starting area')
+        for o in self.state.living():
+            if o.uid == uid:
+                continue
+            if distance(p, o.position) < r + o.base_radius - 1e-6:
+                return Rejection("overlap", f"would overlap {o.short_name}")
+        if self.state.terrain and terr.base_in_blocking(self.state.terrain, p, r):
+            return Rejection("in_blocking", "cannot deploy in blocking terrain")
+        f.position = p
+        f.facing = float(facing)
+        ev = self.log.emit("deploy", figure=uid, to=[round(p.x, 2), round(p.y, 2)], facing=f.facing)
+        return Result("deploy", [ev], f"{f.short_name} deploys")
+
+    def finish_deploy(self, owner: str) -> Result | Rejection:
+        """The human is done arranging — start the first battle turn."""
+        if self.state.phase != "deploy":
+            return Rejection("not_deploying", "deployment is not open right now")
+        self.log.emit("deploy_done", by=owner)
+        self._begin_first_turn()
+        return Result("finish_deploy", [], "battle begins")
 
     def place_terrain(
         self, owner: str, key: str, center: tuple[float, float], rotation: float = 0.0,

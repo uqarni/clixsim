@@ -48,6 +48,7 @@ def build_game(
     db: FigureDB | None = None,
     with_terrain: bool = False,
     terrain_per_player: int = 3,
+    with_deploy: bool = False,
 ) -> Engine:
     db = db or load_db()
     board = Board(board_size, board_size)
@@ -86,11 +87,16 @@ def build_game(
                     board=[board.width, board.height])
     if with_terrain and terrain_per_player > 0:
         # Setup phase: the initiative winner places terrain first, then players
-        # alternate. The first battle turn begins only once placement completes.
+        # alternate. Figure deployment (if requested) follows; the first battle turn
+        # begins only once all setup completes.
         state.phase = "terrain"
         state.terrain_budget = {"human": terrain_per_player, "llm": terrain_per_player}
         state.terrain_turn = first
+        state.pending_deploy = with_deploy
         engine.log.emit("terrain_setup", first_placer=first, per_player=terrain_per_player)
+    elif with_deploy:
+        state.phase = "deploy"
+        engine.log.emit("deploy_setup", first=first)
     else:
         engine._begin_player_turn(first)
         engine.log.emit("begin_turn", player=first, turn=1)

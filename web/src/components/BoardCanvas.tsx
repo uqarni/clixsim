@@ -61,6 +61,8 @@ interface Props {
   // Free spin (P4-R9): a contacted figure being re-faced (drag the handle to aim).
   spin?: SpinGhost | null;
   onSpinFace?: (facing: number) => void;
+  // Deploy setup: shade the human's 3" starting band as the legal deploy zone.
+  deployBand?: boolean;
 }
 
 export interface SpinGhost {
@@ -443,6 +445,7 @@ export default function BoardCanvas({
   onPlaceRotate,
   spin = null,
   onSpinFace,
+  deployBand = false,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const fxCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -524,6 +527,15 @@ export default function BoardCanvas({
       const [, byBot] = worldToScreen(t, 0, 3);
       ctx.fillRect(px0, py0, pw, byTop - py0); // enemy band (top)
       ctx.fillRect(px0, byBot, pw, py0 + ph - byBot); // your band (bottom)
+      ctx.restore();
+    }
+
+    // Deploy: shade the human's 3" band as the legal placement zone.
+    if (deployBand) {
+      ctx.save();
+      ctx.fillStyle = "rgba(91,214,138,0.10)";
+      const [, byBot] = worldToScreen(t, 0, 3);
+      ctx.fillRect(px0, byBot, pw, py0 + ph - byBot);
       ctx.restore();
     }
 
@@ -710,7 +722,7 @@ export default function BoardCanvas({
         { ok: placingGhost.ok },
       );
     }
-  }, [view, size, selectedUid, hoverUid, activeUid, armedTargets, armedMembers, moveGhost, pendingMove, placementMode, placingGhost, spin]);
+  }, [view, size, selectedUid, hoverUid, activeUid, armedTargets, armedMembers, moveGhost, pendingMove, placementMode, placingGhost, spin, deployBand]);
 
   // Combat-effect overlay: an independent rAF that draws fx on a top canvas,
   // reusing the transform the base render computed. Keyed on fxSeq.

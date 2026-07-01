@@ -92,7 +92,7 @@ export interface GameMeta {
   turn: number;
   active_player: Owner;
   first_player: string;
-  phase: "terrain" | "battle";
+  phase: "terrain" | "deploy" | "battle";
   terrain_turn: Owner;
   terrain_budget: Partial<Record<Owner, number>>;
   actions_per_turn: number;
@@ -319,6 +319,24 @@ export async function placeTerrain(
 // POST /api/skip_terrain — the human is done placing (forfeit the rest).
 export async function skipTerrain(): Promise<PlaceTerrainResult> {
   return req<PlaceTerrainResult>("/api/skip_terrain", { method: "POST" });
+}
+
+// --- figure deployment (setup phase) ---------------------------------------
+// POST /api/deploy_figure — reposition one of your figures in your starting area.
+export async function deployFigure(
+  uid: number,
+  pos: [number, number],
+  facing: number,
+): Promise<PlaceTerrainResult> {
+  return req<PlaceTerrainResult>("/api/deploy_figure", {
+    method: "POST",
+    body: JSON.stringify({ uid, pos, facing }),
+  });
+}
+
+// POST /api/finish_deploy — done arranging; begin the battle.
+export async function finishDeploy(): Promise<PlaceTerrainResult> {
+  return req<PlaceTerrainResult>("/api/finish_deploy", { method: "POST" });
 }
 
 // SSE: the opponent placing its terrain, one piece at a time.

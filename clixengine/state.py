@@ -187,9 +187,10 @@ class GameState:
     terrain: list = field(default_factory=list)  # list[TerrainPiece] (Phase 3)
     # Setup: "terrain" while players alternate placing terrain, then "battle".
     # Defaults to "battle" so games/tests without a placement step are unchanged.
-    phase: str = "battle"
+    phase: str = "battle"  # "terrain" | "deploy" (setup), then "battle"
     terrain_budget: dict = field(default_factory=dict)  # pieces left to place per owner
     terrain_turn: str = "human"  # whose turn it is to place a piece
+    pending_deploy: bool = False  # run a figure-deployment phase after terrain
 
     def actions_per_turn(self) -> int:
         """Actions per turn = build_total / 100, fixed for the game (P1-R2)."""

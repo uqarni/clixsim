@@ -20,6 +20,7 @@ import {
 import ActionPanel from "./components/ActionPanel";
 import BoardCanvas, { type Fx, type SpinGhost } from "./components/BoardCanvas";
 import Construction from "./components/Construction";
+import Deploy from "./components/Deploy";
 import DialInspector from "./components/DialInspector";
 import Draft from "./components/Draft";
 import ForceRail from "./components/ForceRail";
@@ -107,7 +108,9 @@ function deriveFx(events: GameEvent[], view: GameView): Fx[] {
 }
 
 export default function App() {
-  const [phase, setPhase] = useState<"menu" | "drafting" | "constructing" | "placing_terrain" | "battle">("menu");
+  const [phase, setPhase] = useState<
+    "menu" | "drafting" | "constructing" | "placing_terrain" | "deploying" | "battle"
+  >("menu");
   const [config, setConfig] = useState<GameConfig | null>(null);
   const [humanIds, setHumanIds] = useState<number[]>([]);
 
@@ -577,12 +580,18 @@ export default function App() {
     if (v.meta.active_player !== "human" && !v.meta.ended) runOpponentStream();
   }, [runOpponentStream]);
 
-  // A freshly-built game may open in the terrain setup phase before battle.
+  // A freshly-built game may open in a setup phase (terrain, then deploy) before battle.
   const onReady = useCallback((v: GameView) => {
     if (v.meta.phase === "terrain") {
       viewRef.current = v;
       setView(v);
       setPhase("placing_terrain");
+      return;
+    }
+    if (v.meta.phase === "deploy") {
+      viewRef.current = v;
+      setView(v);
+      setPhase("deploying");
       return;
     }
     enterBattle(v);
@@ -607,7 +616,9 @@ export default function App() {
   if (phase === "constructing" && config)
     return <Construction config={config} humanIds={humanIds} onReady={onReady} onCancel={() => setPhase("menu")} />;
   if (phase === "placing_terrain" && view)
-    return <TerrainPlacement initialView={view} onBattle={enterBattle} onCancel={handleNewGame} />;
+    return <TerrainPlacement initialView={view} onDone={onReady} onCancel={handleNewGame} />;
+  if (phase === "deploying" && view)
+    return <Deploy initialView={view} onDone={onReady} onCancel={handleNewGame} />;
   if (!view) return <NewGame onStart={startDraft} onResume={onResume} />;
 
   const gameOver = view.meta.ended;

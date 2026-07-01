@@ -13,7 +13,7 @@ import { placedAccessPoints, placedPolygon, placementReason, type Pt } from "../
 
 interface Props {
   initialView: GameView;
-  onBattle: (v: GameView) => void;
+  onDone: (v: GameView) => void; // hand off once terrain setup ends (to deploy or battle)
   onCancel: () => void;
 }
 
@@ -23,7 +23,7 @@ const KIND_TAG: Record<string, string> = {
   clear: "Passable",
 };
 
-export default function TerrainPlacement({ initialView, onBattle, onCancel }: Props) {
+export default function TerrainPlacement({ initialView, onDone, onCancel }: Props) {
   const [view, setView] = useState<GameView>(initialView);
   const [library, setLibrary] = useState<TerrainTemplate[]>([]);
   const [selKey, setSelKey] = useState<string | null>(null);
@@ -91,14 +91,14 @@ export default function TerrainPlacement({ initialView, onBattle, onCancel }: Pr
       } else if (e.type === "done") {
         setView(e.view);
         finish();
-        if (e.view.meta.phase === "battle") onBattle(e.view);
+        if (e.view.meta.phase !== "terrain") onDone(e.view);
       } else if (e.type === "error") {
         if (e.view) setView(e.view);
         finish();
       }
     };
     es.onerror = () => finish();
-  }, [onBattle]);
+  }, [onDone]);
 
   // If the opponent places first (won initiative), kick the stream once on mount.
   // runLLM guards against a double-open; the cleanup nulls streamRef so React's
@@ -134,8 +134,8 @@ export default function TerrainPlacement({ initialView, onBattle, onCancel }: Pr
         setMsg("");
         setView(res.view);
         setBusy(false);
-        if (res.view.meta.phase === "battle") {
-          onBattle(res.view);
+        if (res.view.meta.phase !== "terrain") {
+          onDone(res.view);
         } else if (res.view.meta.terrain_turn === "llm") {
           runLLM();
         }
@@ -144,7 +144,7 @@ export default function TerrainPlacement({ initialView, onBattle, onCancel }: Pr
         setBusy(false);
       }
     },
-    [selected, myTurn, busy, rotation, view.terrain, boardW, boardH, onBattle, runLLM],
+    [selected, myTurn, busy, rotation, view.terrain, boardW, boardH, onDone, runLLM],
   );
 
   const onPlacePointer = useCallback(
@@ -164,13 +164,13 @@ export default function TerrainPlacement({ initialView, onBattle, onCancel }: Pr
       const res = await skipTerrain();
       setView(res.view);
       setBusy(false);
-      if (res.view.meta.phase === "battle") onBattle(res.view);
+      if (res.view.meta.phase !== "terrain") onDone(res.view);
       else if (res.view.meta.terrain_turn === "llm") runLLM();
     } catch (err) {
       setMsg(String(err));
       setBusy(false);
     }
-  }, [myTurn, busy, onBattle, runLLM]);
+  }, [myTurn, busy, onDone, runLLM]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

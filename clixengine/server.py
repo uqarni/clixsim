@@ -107,11 +107,12 @@ class Session:
 
     def start_game(self, human_army: Army, llm_army: Army, build_total: int,
                    seed: int, opponent: str = "llm", board: float = 36.0,
-                   with_terrain: bool = False, terrain_per_player: int = 3):
+                   with_terrain: bool = False, terrain_per_player: int = 3,
+                   with_deploy: bool = False):
         """Finalize a game from two prebuilt armies + wire the opponent controller."""
         self.engine = build_game(human_army, llm_army, build_total=build_total, seed=seed,
                                  board_size=board, db=self.db, with_terrain=with_terrain,
-                                 terrain_per_player=terrain_per_player)
+                                 terrain_per_player=terrain_per_player, with_deploy=with_deploy)
         if opponent == "heuristic":
             self.opponent = HeuristicAI()
         else:
@@ -248,7 +249,8 @@ def _brief(fid: int) -> dict:
 
 
 def _construct_stream(mode: str, points: int, opponent: str, seed: int,
-                      human_ids: list[int] | None = None, terrain: bool = True):
+                      human_ids: list[int] | None = None, terrain: bool = True,
+                      deploy: bool = True):
     """Server-sent events: settle the human army (drafted by the client, or auto-
     built), stream the LLM drafting its own army with reasoning, then finalize."""
     db = SESSION.db
@@ -323,7 +325,8 @@ def _construct_stream(mode: str, points: int, opponent: str, seed: int,
         yield sse({"type": "llm_army", "army": [_brief(i) for i in llm_ids],
                    "points": llm_army.total_points(db)})
 
-        SESSION.start_game(human_army, llm_army, budget, seed, opponent, with_terrain=terrain)
+        SESSION.start_game(human_army, llm_army, budget, seed, opponent,
+                           with_terrain=terrain, with_deploy=deploy)
         yield sse({"type": "ready", "view": game_view(SESSION.engine)})
     except Exception as e:  # never leave the client hanging
         yield sse({"type": "error", "message": str(e)})
@@ -332,10 +335,10 @@ def _construct_stream(mode: str, points: int, opponent: str, seed: int,
 @app.get("/api/new_game_stream")
 def new_game_stream(mode: str = "preconstructed", points: int = 200,
                     opponent: str = "llm", seed: int = 1, human_ids: str = "",
-                    terrain: bool = True):
+                    terrain: bool = True, deploy: bool = True):
     ids = [int(x) for x in human_ids.split(",") if x.strip()] or None
     return StreamingResponse(
-        _construct_stream(mode, points, opponent, seed, ids, terrain),
+        _construct_stream(mode, points, opponent, seed, ids, terrain, deploy),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -459,6 +462,38 @@ def terrain_placement_stream():
         gen(), media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+class DeployFigureReq(BaseModel):
+    uid: int
+    pos: tuple[float, float]
+    facing: float = 0.0
+
+
+@app.post("/api/deploy_figure")
+def deploy_figure(req: DeployFigureReq):
+    """Reposition one of the human's figures within its starting area during setup."""
+    eng = SESSION.require()
+    result = eng.deploy_figure(SESSION.human_side, req.uid, req.pos, req.facing)
+    return {
+        "ok": result.ok,
+        "reason": getattr(result, "reason", None),
+        "detail": getattr(result, "detail", None),
+        "summary": getattr(result, "summary", ""),
+        "view": game_view(eng),
+    }
+
+
+@app.post("/api/finish_deploy")
+def finish_deploy():
+    """The human is done arranging — begin the first battle turn."""
+    eng = SESSION.require()
+    result = eng.finish_deploy(SESSION.human_side)
+    return {
+        "ok": result.ok,
+        "reason": getattr(result, "reason", None),
+        "view": game_view(eng),
+    }
 
 
 @app.get("/api/state")
