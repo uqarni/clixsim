@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Secrets — never commit
+.env
+
+# Game artifacts
+games/*.jsonl
+!games/.gitkeep
+scratch/
