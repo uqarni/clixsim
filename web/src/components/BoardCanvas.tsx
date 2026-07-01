@@ -36,6 +36,7 @@ interface Transform {
   scale: number; // css px per inch
   offX: number;
   offY: number;
+  h: number; // board height (inches) — used to flip Y so +y renders upward
 }
 
 const FELT_MARGIN = 24;
@@ -61,14 +62,17 @@ function computeTransform(cssW: number, cssH: number, boardW: number, boardH: nu
   const scale = Math.max(1, Math.min(availW / boardW, availH / boardH));
   const drawnW = boardW * scale;
   const drawnH = boardH * scale;
-  return { scale, offX: (cssW - drawnW) / 2, offY: (cssH - drawnH) / 2 };
+  return { scale, offX: (cssW - drawnW) / 2, offY: (cssH - drawnH) / 2, h: boardH };
 }
 
+// The engine's convention is +y = up (the human deploys at low y, faces +y toward
+// the centre). Canvas y grows downward, so flip: world +y renders toward the top,
+// putting the human at the BOTTOM of the screen (matches the CLI renderer).
 function worldToScreen(t: Transform, x: number, y: number): [number, number] {
-  return [t.offX + x * t.scale, t.offY + y * t.scale];
+  return [t.offX + x * t.scale, t.offY + (t.h - y) * t.scale];
 }
 function screenToWorld(t: Transform, sx: number, sy: number): [number, number] {
-  return [(sx - t.offX) / t.scale, (sy - t.offY) / t.scale];
+  return [(sx - t.offX) / t.scale, t.h - (sy - t.offY) / t.scale];
 }
 function toRad(deg: number): number {
   return (deg * Math.PI) / 180;
@@ -90,11 +94,14 @@ function drawFigure(
   ctx.save();
   if (dimmed) ctx.globalAlpha = 0.5;
 
-  // Front-arc wedge.
+  // Front-arc wedge. facing_deg is a world angle (+y up); negate for the flipped
+  // canvas so the wedge points the right way on screen.
   const wedgeR = r * 2.4;
+  const sf = toRad(-f.facing_deg);
+  const ha = toRad(f.arc_deg);
   ctx.beginPath();
   ctx.moveTo(cx, cy);
-  ctx.arc(cx, cy, wedgeR, toRad(f.facing_deg - f.arc_deg), toRad(f.facing_deg + f.arc_deg), false);
+  ctx.arc(cx, cy, wedgeR, sf - ha, sf + ha, false);
   ctx.closePath();
   ctx.fillStyle = soft;
   ctx.fill();
@@ -111,7 +118,7 @@ function drawFigure(
   // Facing tick.
   ctx.beginPath();
   ctx.moveTo(cx, cy);
-  ctx.lineTo(cx + Math.cos(toRad(f.facing_deg)) * r, cy + Math.sin(toRad(f.facing_deg)) * r);
+  ctx.lineTo(cx + Math.cos(sf) * r, cy + Math.sin(sf) * r);
   ctx.strokeStyle = "rgba(255,255,255,0.85)";
   ctx.lineWidth = 1.5;
   ctx.stroke();
@@ -314,7 +321,7 @@ export default function BoardCanvas({
       ctx.stroke();
       ctx.beginPath();
       ctx.moveTo(gx, gy);
-      ctx.lineTo(gx + Math.cos(moveGhost.facing) * gr, gy + Math.sin(moveGhost.facing) * gr);
+      ctx.lineTo(gx + Math.cos(-moveGhost.facing) * gr, gy + Math.sin(-moveGhost.facing) * gr);
       ctx.stroke();
       if (moveGhost.breakAway) {
         ctx.fillStyle = COLORS.warn;
@@ -331,10 +338,11 @@ export default function BoardCanvas({
       const [gx, gy] = worldToScreen(t, pendingMove.dest[0], pendingMove.dest[1]);
       const r = Math.max(6, active.base_radius * t.scale);
       const arc = toRad(active.arc_deg);
+      const sf = -pendingMove.facing; // world +y-up angle -> flipped screen angle
       ctx.save();
       ctx.beginPath();
       ctx.moveTo(gx, gy);
-      ctx.arc(gx, gy, r * 2.4, pendingMove.facing - arc, pendingMove.facing + arc, false);
+      ctx.arc(gx, gy, r * 2.4, sf - arc, sf + arc, false);
       ctx.closePath();
       ctx.fillStyle = "rgba(124,156,255,0.18)";
       ctx.fill();
@@ -346,8 +354,8 @@ export default function BoardCanvas({
       ctx.lineWidth = 2;
       ctx.stroke();
       const hr = r * 2.4;
-      const hx = gx + Math.cos(pendingMove.facing) * hr;
-      const hy = gy + Math.sin(pendingMove.facing) * hr;
+      const hx = gx + Math.cos(sf) * hr;
+      const hy = gy + Math.sin(sf) * hr;
       ctx.beginPath();
       ctx.moveTo(gx, gy);
       ctx.lineTo(hx, hy);
@@ -424,8 +432,8 @@ export default function BoardCanvas({
     if (!active) return false;
     const [gx, gy] = worldToScreen(t, pendingMove.dest[0], pendingMove.dest[1]);
     const hr = Math.max(6, active.base_radius * t.scale) * 2.4;
-    const hx = gx + Math.cos(pendingMove.facing) * hr;
-    const hy = gy + Math.sin(pendingMove.facing) * hr;
+    const hx = gx + Math.cos(-pendingMove.facing) * hr; // matches the drawn handle
+    const hy = gy + Math.sin(-pendingMove.facing) * hr;
     const rect = canvas.getBoundingClientRect();
     return Math.hypot(clientX - rect.left - hx, clientY - rect.top - hy) <= 13;
   }
