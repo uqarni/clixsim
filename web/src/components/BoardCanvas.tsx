@@ -1,20 +1,34 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type PointerEvent as RPE } from "react";
 import type { FigureView, GameView } from "../api";
+
+interface MoveGhost {
+  dest: [number, number];
+  facing: number; // radians
+  ok: boolean;
+  breakAway: boolean;
+}
 
 interface Props {
   view: GameView;
   selectedUid: number | null;
   onSelect: (uid: number | null) => void;
+  // The selected friendly figure that may be dragged to move (null if none).
+  activeUid: number | null;
+  // Figures currently targeted by an armed action — highlighted as reticles.
+  armedTargets: number[];
+  moveGhost: MoveGhost | null;
+  onMoveDrag: (dest: [number, number]) => void;
+  onMoveDrop: (dest: [number, number]) => void;
+  onMoveCancel: () => void;
 }
 
-// World (inches) -> screen (css px) transform, letterboxed to preserve aspect.
 interface Transform {
   scale: number; // css px per inch
   offX: number;
   offY: number;
 }
 
-const FELT_MARGIN = 24; // css px of felt border around the play area
+const FELT_MARGIN = 24;
 
 const COLORS = {
   human: "#4a9de0",
@@ -26,36 +40,26 @@ const COLORS = {
   feltLine: "rgba(120, 180, 150, 0.10)",
   select: "#7c9cff",
   text: "#e7ebf2",
-  textDim: "#c3ccd8",
   good: "#5bd68a",
   bad: "#e05a5a",
   warn: "#e0c04a",
 };
 
-function computeTransform(
-  cssW: number,
-  cssH: number,
-  boardW: number,
-  boardH: number,
-): Transform {
+function computeTransform(cssW: number, cssH: number, boardW: number, boardH: number): Transform {
   const availW = cssW - FELT_MARGIN * 2;
   const availH = cssH - FELT_MARGIN * 2;
   const scale = Math.max(1, Math.min(availW / boardW, availH / boardH));
   const drawnW = boardW * scale;
   const drawnH = boardH * scale;
-  const offX = (cssW - drawnW) / 2;
-  const offY = (cssH - drawnH) / 2;
-  return { scale, offX, offY };
+  return { scale, offX: (cssW - drawnW) / 2, offY: (cssH - drawnH) / 2 };
 }
 
 function worldToScreen(t: Transform, x: number, y: number): [number, number] {
   return [t.offX + x * t.scale, t.offY + y * t.scale];
 }
-
 function screenToWorld(t: Transform, sx: number, sy: number): [number, number] {
   return [(sx - t.offX) / t.scale, (sy - t.offY) / t.scale];
 }
-
 function toRad(deg: number): number {
   return (deg * Math.PI) / 180;
 }
@@ -66,24 +70,26 @@ function drawFigure(
   f: FigureView,
   selected: boolean,
   hovered: boolean,
+  dimmed: boolean,
 ) {
   const [cx, cy] = worldToScreen(t, f.pos[0], f.pos[1]);
   const r = Math.max(6, f.base_radius * t.scale);
   const hue = f.owner === "human" ? COLORS.human : COLORS.llm;
   const soft = f.owner === "human" ? COLORS.humanSoft : COLORS.llmSoft;
 
-  // Front-arc wedge (facing +/- arc_deg), radius a bit beyond the base.
+  ctx.save();
+  if (dimmed) ctx.globalAlpha = 0.5;
+
+  // Front-arc wedge.
   const wedgeR = r * 2.4;
-  const start = toRad(f.facing_deg - f.arc_deg);
-  const end = toRad(f.facing_deg + f.arc_deg);
   ctx.beginPath();
   ctx.moveTo(cx, cy);
-  ctx.arc(cx, cy, wedgeR, start, end, false);
+  ctx.arc(cx, cy, wedgeR, toRad(f.facing_deg - f.arc_deg), toRad(f.facing_deg + f.arc_deg), false);
   ctx.closePath();
   ctx.fillStyle = soft;
   ctx.fill();
 
-  // Base circle.
+  // Base.
   ctx.beginPath();
   ctx.arc(cx, cy, r, 0, Math.PI * 2);
   ctx.fillStyle = hue;
@@ -92,48 +98,41 @@ function drawFigure(
   ctx.strokeStyle = "rgba(0,0,0,0.4)";
   ctx.stroke();
 
-  // Facing tick (a short line from center toward facing).
-  const fx = cx + Math.cos(toRad(f.facing_deg)) * r;
-  const fy = cy + Math.sin(toRad(f.facing_deg)) * r;
+  // Facing tick.
   ctx.beginPath();
   ctx.moveTo(cx, cy);
-  ctx.lineTo(fx, fy);
+  ctx.lineTo(cx + Math.cos(toRad(f.facing_deg)) * r, cy + Math.sin(toRad(f.facing_deg)) * r);
   ctx.strokeStyle = "rgba(255,255,255,0.85)";
   ctx.lineWidth = 1.5;
   ctx.stroke();
 
-  // Health ring around the base.
+  // Health ring.
   const ringR = r + 3;
   ctx.beginPath();
   ctx.arc(cx, cy, ringR, 0, Math.PI * 2);
   ctx.strokeStyle = "rgba(0,0,0,0.35)";
   ctx.lineWidth = 3;
   ctx.stroke();
-
   const frac = Math.max(0, Math.min(1, f.health_fraction));
-  const healthColor = frac > 0.5 ? COLORS.good : frac > 0.25 ? COLORS.warn : COLORS.bad;
   ctx.beginPath();
   ctx.arc(cx, cy, ringR, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * frac);
-  ctx.strokeStyle = healthColor;
+  ctx.strokeStyle = frac > 0.5 ? COLORS.good : frac > 0.25 ? COLORS.warn : COLORS.bad;
   ctx.lineWidth = 3;
   ctx.stroke();
 
-  // Push-token pips (small dots along the top edge of the base).
+  // Push-token pips.
   if (f.action_tokens > 0) {
     const n = f.action_tokens;
     const spread = Math.min(0.9, 0.28 * n);
     for (let i = 0; i < n; i++) {
       const a = -Math.PI / 2 + (i - (n - 1) / 2) * spread;
-      const px = cx + Math.cos(a) * (r + 8);
-      const py = cy + Math.sin(a) * (r + 8);
       ctx.beginPath();
-      ctx.arc(px, py, 2.5, 0, Math.PI * 2);
+      ctx.arc(cx + Math.cos(a) * (r + 8), cy + Math.sin(a) * (r + 8), 2.5, 0, Math.PI * 2);
       ctx.fillStyle = COLORS.warn;
       ctx.fill();
     }
   }
 
-  // Selection / hover highlight ring.
   if (selected || hovered) {
     ctx.beginPath();
     ctx.arc(cx, cy, ringR + 4, 0, Math.PI * 2);
@@ -142,8 +141,6 @@ function drawFigure(
     ctx.stroke();
   }
 
-  // Label under the base — only for the selected/hovered figure, so touching
-  // deployment clusters don't stack unreadable names (the rails list them all).
   if (selected || hovered) {
     const label = f.short_name;
     ctx.font = "500 12px system-ui, sans-serif";
@@ -156,37 +153,40 @@ function drawFigure(
     ctx.fillStyle = COLORS.text;
     ctx.fillText(label, cx, ly);
   }
+
+  ctx.restore();
 }
 
-function drawSelectionRings(
-  ctx: CanvasRenderingContext2D,
-  t: Transform,
-  f: FigureView,
-) {
-  const [cx, cy] = worldToScreen(t, f.pos[0], f.pos[1]);
-  // Dashed range ring if range > 0, else a reach ring at speed.
-  const useRange = f.range > 0;
-  const radiusIn = useRange ? f.range : f.speed;
-  if (radiusIn <= 0) return;
-  const rr = radiusIn * t.scale;
+function dashedRing(ctx: CanvasRenderingContext2D, cx: number, cy: number, rr: number, color: string) {
+  if (rr <= 0) return;
   ctx.save();
   ctx.setLineDash([6, 5]);
   ctx.beginPath();
   ctx.arc(cx, cy, rr, 0, Math.PI * 2);
-  ctx.strokeStyle = useRange ? "rgba(124,156,255,0.65)" : "rgba(91,214,138,0.55)";
+  ctx.strokeStyle = color;
   ctx.lineWidth = 1.5;
   ctx.stroke();
   ctx.restore();
 }
 
-export default function BoardCanvas({ view, selectedUid, onSelect }: Props) {
+export default function BoardCanvas({
+  view,
+  selectedUid,
+  onSelect,
+  activeUid,
+  armedTargets,
+  moveGhost,
+  onMoveDrag,
+  onMoveDrop,
+  onMoveCancel,
+}: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
   const [hoverUid, setHoverUid] = useState<number | null>(null);
   const transformRef = useRef<Transform | null>(null);
+  const dragRef = useRef<{ moved: boolean } | null>(null);
 
-  // Observe container size for responsive, aspect-preserving fit.
   useEffect(() => {
     const wrap = wrapRef.current;
     if (!wrap) return;
@@ -198,7 +198,6 @@ export default function BoardCanvas({ view, selectedUid, onSelect }: Props) {
     return () => ro.disconnect();
   }, []);
 
-  // Draw.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || size.w === 0 || size.h === 0) return;
@@ -216,18 +215,14 @@ export default function BoardCanvas({ view, selectedUid, onSelect }: Props) {
     const t = computeTransform(size.w, size.h, bw, bh);
     transformRef.current = t;
 
-    // Background.
     ctx.fillStyle = COLORS.feltEdge;
     ctx.fillRect(0, 0, size.w, size.h);
-
-    // Felt play area.
     const [px0, py0] = worldToScreen(t, 0, 0);
     const pw = bw * t.scale;
     const ph = bh * t.scale;
     ctx.fillStyle = COLORS.felt;
     ctx.fillRect(px0, py0, pw, ph);
 
-    // Subtle felt guide lines every 6 inches.
     ctx.strokeStyle = COLORS.feltLine;
     ctx.lineWidth = 1;
     for (let gx = 6; gx < bw; gx += 6) {
@@ -244,24 +239,31 @@ export default function BoardCanvas({ view, selectedUid, onSelect }: Props) {
       ctx.lineTo(px0 + pw, sy);
       ctx.stroke();
     }
-
-    // Play-area border.
     ctx.strokeStyle = "rgba(0,0,0,0.5)";
     ctx.lineWidth = 2;
     ctx.strokeRect(px0, py0, pw, ph);
 
     const live = view.figures.filter((f) => !f.eliminated);
     const selected = live.find((f) => f.uid === selectedUid) ?? null;
+    const active = live.find((f) => f.uid === activeUid) ?? null;
 
-    // Selection rings (drawn beneath figures).
-    if (selected) drawSelectionRings(ctx, t, selected);
+    // Rings beneath figures: range ring for a ranged selection; speed reach ring
+    // for the active (draggable) figure so you can see how far it may move.
+    if (selected && selected.range > 0) {
+      const [cx, cy] = worldToScreen(t, selected.pos[0], selected.pos[1]);
+      dashedRing(ctx, cx, cy, selected.range * t.scale, "rgba(124,156,255,0.6)");
+    }
+    if (active && active.speed > 0) {
+      const [cx, cy] = worldToScreen(t, active.pos[0], active.pos[1]);
+      dashedRing(ctx, cx, cy, active.speed * t.scale, "rgba(91,214,138,0.5)");
+    }
 
-    // Line of fire: friendly selected + hovering an enemy.
+    // Line of fire on hover (friendly selected -> hovered enemy).
     if (selected && hoverUid != null && hoverUid !== selected.uid) {
-      const hovered = live.find((f) => f.uid === hoverUid);
-      if (hovered && hovered.owner !== selected.owner) {
+      const hv = live.find((f) => f.uid === hoverUid);
+      if (hv && hv.owner !== selected.owner) {
         const [ax, ay] = worldToScreen(t, selected.pos[0], selected.pos[1]);
-        const [bx, by] = worldToScreen(t, hovered.pos[0], hovered.pos[1]);
+        const [bx, by] = worldToScreen(t, hv.pos[0], hv.pos[1]);
         ctx.save();
         ctx.setLineDash([2, 4]);
         ctx.beginPath();
@@ -274,40 +276,131 @@ export default function BoardCanvas({ view, selectedUid, onSelect }: Props) {
       }
     }
 
-    for (const f of live) {
-      drawFigure(ctx, t, f, f.uid === selectedUid, f.uid === hoverUid);
+    // Move ghost (drag preview).
+    if (moveGhost && active) {
+      const [ox, oy] = worldToScreen(t, active.pos[0], active.pos[1]);
+      const [gx, gy] = worldToScreen(t, moveGhost.dest[0], moveGhost.dest[1]);
+      const col = moveGhost.ok ? COLORS.good : COLORS.bad;
+      ctx.save();
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(ox, oy);
+      ctx.lineTo(gx, gy);
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.setLineDash([]);
+      const gr = Math.max(6, active.base_radius * t.scale);
+      ctx.beginPath();
+      ctx.arc(gx, gy, gr, 0, Math.PI * 2);
+      ctx.fillStyle = moveGhost.ok ? "rgba(91,214,138,0.28)" : "rgba(224,90,90,0.28)";
+      ctx.fill();
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(gx, gy);
+      ctx.lineTo(gx + Math.cos(moveGhost.facing) * gr, gy + Math.sin(moveGhost.facing) * gr);
+      ctx.stroke();
+      if (moveGhost.breakAway) {
+        ctx.fillStyle = COLORS.warn;
+        ctx.font = "500 11px system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "bottom";
+        ctx.fillText("break-away", gx, gy - gr - 3);
+      }
+      ctx.restore();
     }
-  }, [view, size, selectedUid, hoverUid]);
+
+    // Armed-action target reticles.
+    const armedSet = new Set(armedTargets);
+    for (const f of live) {
+      drawFigure(ctx, t, f, f.uid === selectedUid, f.uid === hoverUid, false);
+      if (armedSet.has(f.uid)) {
+        const [cx, cy] = worldToScreen(t, f.pos[0], f.pos[1]);
+        const rr = Math.max(6, f.base_radius * t.scale) + 7;
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(cx, cy, rr, 0, Math.PI * 2);
+        ctx.strokeStyle = COLORS.bad;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+  }, [view, size, selectedUid, hoverUid, activeUid, armedTargets, moveGhost]);
 
   function hitTest(clientX: number, clientY: number): number | null {
     const canvas = canvasRef.current;
     const t = transformRef.current;
     if (!canvas || !t) return null;
     const rect = canvas.getBoundingClientRect();
-    const sx = clientX - rect.left;
-    const sy = clientY - rect.top;
-    const [wx, wy] = screenToWorld(t, sx, sy);
-    // Closest figure whose base contains the point.
+    const [wx, wy] = screenToWorld(t, clientX - rect.left, clientY - rect.top);
     let best: { uid: number; d: number } | null = null;
     for (const f of view.figures) {
       if (f.eliminated) continue;
-      const dx = wx - f.pos[0];
-      const dy = wy - f.pos[1];
-      const d = Math.hypot(dx, dy);
-      if (d <= f.base_radius && (best === null || d < best.d)) {
-        best = { uid: f.uid, d };
-      }
+      const d = Math.hypot(wx - f.pos[0], wy - f.pos[1]);
+      if (d <= f.base_radius && (best === null || d < best.d)) best = { uid: f.uid, d };
     }
     return best?.uid ?? null;
+  }
+
+  function clampedWorld(clientX: number, clientY: number): [number, number] {
+    const canvas = canvasRef.current!;
+    const t = transformRef.current!;
+    const rect = canvas.getBoundingClientRect();
+    const [wx, wy] = screenToWorld(t, clientX - rect.left, clientY - rect.top);
+    const r = view.figures.find((f) => f.uid === activeUid)?.base_radius ?? 0.55;
+    const { width, height } = view.meta.board;
+    return [
+      Math.max(r, Math.min(width - r, wx)),
+      Math.max(r, Math.min(height - r, wy)),
+    ];
+  }
+
+  function onPointerDown(e: RPE) {
+    const hit = hitTest(e.clientX, e.clientY);
+    if (hit != null && hit === activeUid) {
+      dragRef.current = { moved: false };
+      (e.target as Element).setPointerCapture?.(e.pointerId);
+    }
+  }
+
+  function onPointerMove(e: RPE) {
+    if (dragRef.current) {
+      dragRef.current.moved = true;
+      onMoveDrag(clampedWorld(e.clientX, e.clientY));
+    } else {
+      setHoverUid(hitTest(e.clientX, e.clientY));
+    }
+  }
+
+  function onPointerUp(e: RPE) {
+    if (dragRef.current) {
+      const moved = dragRef.current.moved;
+      dragRef.current = null;
+      if (moved) onMoveDrop(clampedWorld(e.clientX, e.clientY));
+      else onMoveCancel();
+      return;
+    }
+    onSelect(hitTest(e.clientX, e.clientY));
   }
 
   return (
     <div className="board-wrap" ref={wrapRef}>
       <canvas
         ref={canvasRef}
-        onClick={(e) => onSelect(hitTest(e.clientX, e.clientY))}
-        onMouseMove={(e) => setHoverUid(hitTest(e.clientX, e.clientY))}
-        onMouseLeave={() => setHoverUid(null)}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerLeave={() => {
+          if (dragRef.current) {
+            dragRef.current = null;
+            onMoveCancel();
+          } else {
+            setHoverUid(null);
+          }
+        }}
       />
     </div>
   );

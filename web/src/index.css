@@ -519,3 +519,122 @@ button {
   overflow: auto;
   padding-top: 6px;
 }
+
+/* --------------------------------------------------------- action loop */
+
+.board-host {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+
+.action-panel {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  width: 300px;
+  max-width: calc(100% - 20px);
+  max-height: 80%;
+  overflow: auto;
+  z-index: 5;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.action-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.action-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.action-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.action-group-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-faint);
+}
+
+.action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 8px;
+}
+
+.action-btn:hover:not(:disabled) {
+  background: var(--panel-raised);
+}
+
+.action-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.action-stats {
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.armed {
+  background: var(--panel-2);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.armed-title {
+  font-weight: 600;
+}
+
+.armed-stats {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.armed-btns {
+  display: flex;
+  gap: 6px;
+}
+
+.action-foot {
+  font-size: 10px;
+  color: var(--text-faint);
+  border-top: 1px solid var(--border-soft);
+  padding-top: 5px;
+}

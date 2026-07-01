@@ -201,6 +201,12 @@ export async function validateMove(
   });
 }
 
+// POST /api/end_turn — end the human turn (advances to the opponent).
+export async function endTurn(): Promise<GameView> {
+  if (USE_MOCK) return clone(MOCK_VIEW);
+  return req<GameView>("/api/end_turn", { method: "POST" });
+}
+
 // POST /api/opponent_turn
 export async function opponentTurn(): Promise<OpponentTurnResult> {
   if (USE_MOCK) return { decisions: [], view: clone(MOCK_VIEW) };
