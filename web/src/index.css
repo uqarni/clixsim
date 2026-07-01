@@ -325,6 +325,12 @@ button {
   height: 100%;
 }
 
+.board-wrap .fx-canvas {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
 /* --------------------------------------------------------- dial inspector */
 
 .stat-block {
@@ -806,6 +812,10 @@ button {
 }
 .menu-start {
   margin-top: 22px;
+  width: 100%;
+}
+.menu-resume {
+  margin-top: 8px;
   width: 100%;
 }
 

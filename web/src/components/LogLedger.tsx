@@ -39,6 +39,8 @@ function eventLine(e: GameEvent, name: (uid: unknown) => string): string {
       return `${name(e.target)} takes ${clk} from ${name(e.attacker)}'s pole arm${ko}`;
     case "crit_miss_self":
       return `${name(e.figure)} backfires — ${clk} self-click${ko}`;
+    case "push_damage":
+      return `${name(e.figure)} pushes — ${clk} self-click${ko}`;
     case "healing":
     case "magic_healing":
       return `${name(e.healer)} heals ${name(e.target)} (${e.healed ?? 0} clk)`;

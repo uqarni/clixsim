@@ -13,6 +13,13 @@ interface PendingMove {
   facing: number;
 }
 
+// Transient combat effects, anchored in WORLD coords (inches).
+export type Fx =
+  | { kind: "dice"; x: number; y: number; dice: number[]; result?: string; dur: number }
+  | { kind: "float"; x: number; y: number; text: string; color: string; dur: number }
+  | { kind: "flash"; x: number; y: number; color: string; dur: number }
+  | { kind: "ko"; x: number; y: number; dur: number };
+
 interface Props {
   view: GameView;
   selectedUid: number | null;
@@ -30,6 +37,9 @@ interface Props {
   // A placed-but-uncommitted move whose facing is being aimed via the handle.
   pendingMove: PendingMove | null;
   onFaceDrag: (facing: number) => void;
+  // Combat effects to play; fxSeq bumps to trigger a new batch.
+  fx: Fx[];
+  fxSeq: number;
 }
 
 interface Transform {
@@ -174,6 +184,83 @@ function drawFigure(
   ctx.restore();
 }
 
+function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawFx(ctx: CanvasRenderingContext2D, t: Transform, f: Fx, p: number) {
+  const [sx, sy] = worldToScreen(t, f.x, f.y);
+  ctx.save();
+  if (f.kind === "float") {
+    ctx.globalAlpha = Math.max(0, 1 - p);
+    ctx.fillStyle = f.color;
+    ctx.font = "600 15px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(f.text, sx, sy - 14 - p * 26);
+  } else if (f.kind === "flash") {
+    ctx.globalAlpha = Math.max(0, (1 - p) * 0.9);
+    ctx.beginPath();
+    ctx.arc(sx, sy, 12 + p * 22, 0, Math.PI * 2);
+    ctx.strokeStyle = f.color;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+  } else if (f.kind === "ko") {
+    ctx.globalAlpha = Math.max(0, 1 - p);
+    const s = 10 + p * 16;
+    ctx.strokeStyle = COLORS.bad;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(sx - s, sy - s);
+    ctx.lineTo(sx + s, sy + s);
+    ctx.moveTo(sx + s, sy - s);
+    ctx.lineTo(sx - s, sy + s);
+    ctx.stroke();
+    ctx.fillStyle = COLORS.bad;
+    ctx.font = "600 13px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("KO", sx, sy - s - 4);
+  } else if (f.kind === "dice") {
+    const appear = Math.min(1, p * 6);
+    ctx.globalAlpha = Math.max(0, p > 0.75 ? 1 - (p - 0.75) / 0.25 : 1);
+    const cy = sy - 34;
+    const sz = 18 * appear;
+    const gap = 5;
+    const total = f.dice.length * sz + (f.dice.length - 1) * gap;
+    let x = sx - total / 2;
+    ctx.textBaseline = "middle";
+    for (const d of f.dice) {
+      ctx.fillStyle = "#e7ebf2";
+      roundRect(ctx, x, cy - sz / 2, sz, sz, 3);
+      ctx.fill();
+      ctx.fillStyle = "#10131a";
+      ctx.font = `600 ${Math.round(sz * 0.7)}px system-ui, sans-serif`;
+      ctx.textAlign = "center";
+      ctx.fillText(String(d), x + sz / 2, cy);
+      x += sz + gap;
+    }
+    ctx.textBaseline = "alphabetic";
+    if (f.result) {
+      const col =
+        f.result === "crit_hit" ? COLORS.good : f.result === "hit" ? COLORS.warn :
+        f.result === "miss" || f.result === "crit_miss" ? COLORS.bad : "#c3ccd8";
+      const label =
+        f.result === "crit_hit" ? "CRIT" : f.result === "crit_miss" ? "CRIT MISS" :
+        f.result === "hit" ? "HIT" : f.result === "miss" ? "MISS" : f.result;
+      ctx.fillStyle = col;
+      ctx.font = "600 11px system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText(label, sx, cy + sz);
+    }
+  }
+  ctx.restore();
+}
+
 function dashedRing(ctx: CanvasRenderingContext2D, cx: number, cy: number, rr: number, color: string) {
   if (rr <= 0) return;
   ctx.save();
@@ -199,8 +286,11 @@ export default function BoardCanvas({
   onMoveCancel,
   pendingMove,
   onFaceDrag,
+  fx,
+  fxSeq,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const fxCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
   const [hoverUid, setHoverUid] = useState<number | null>(null);
@@ -396,6 +486,44 @@ export default function BoardCanvas({
     }
   }, [view, size, selectedUid, hoverUid, activeUid, armedTargets, armedMembers, moveGhost, pendingMove]);
 
+  // Combat-effect overlay: an independent rAF that draws fx on a top canvas,
+  // reusing the transform the base render computed. Keyed on fxSeq.
+  useEffect(() => {
+    const canvas = fxCanvasRef.current;
+    if (!canvas || size.w === 0 || size.h === 0) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(size.w * dpr);
+    canvas.height = Math.round(size.h * dpr);
+    canvas.style.width = `${size.w}px`;
+    canvas.style.height = `${size.h}px`;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, size.w, size.h);
+    if (fx.length === 0) return;
+    const start = performance.now();
+    let raf = 0;
+    const tick = () => {
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, size.w, size.h);
+      const t = transformRef.current;
+      const now = performance.now();
+      let active = false;
+      if (t) {
+        for (const f of fx) {
+          const p = (now - start) / f.dur;
+          if (p >= 1) continue;
+          active = true;
+          drawFx(ctx, t, f, p);
+        }
+      }
+      if (active) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fxSeq, size.w, size.h]);
+
   function hitTest(clientX: number, clientY: number): number | null {
     const canvas = canvasRef.current;
     const t = transformRef.current;
@@ -509,6 +637,7 @@ export default function BoardCanvas({
           }
         }}
       />
+      <canvas ref={fxCanvasRef} className="fx-canvas" />
     </div>
   );
 }

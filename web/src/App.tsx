@@ -17,7 +17,7 @@ import {
   type GameView,
 } from "./api";
 import ActionPanel from "./components/ActionPanel";
-import BoardCanvas from "./components/BoardCanvas";
+import BoardCanvas, { type Fx } from "./components/BoardCanvas";
 import Construction from "./components/Construction";
 import DialInspector from "./components/DialInspector";
 import Draft from "./components/Draft";
@@ -57,6 +57,53 @@ function intentField(c: Candidate, key: string): number | null {
   return typeof v === "number" ? v : null;
 }
 
+// Turn a resolution's events into transient board effects (anchored using the
+// PRE-update positions, since figures may move/die when the new view applies).
+const RED = "#e05a5a";
+const GREEN = "#5bd68a";
+function deriveFx(events: GameEvent[], view: GameView): Fx[] {
+  const pos = (uid: unknown): [number, number] | null => {
+    const f = view.figures.find((x) => x.uid === uid);
+    return f ? f.pos : null;
+  };
+  const num = (v: unknown) => (typeof v === "number" ? v : 0);
+  const out: Fx[] = [];
+  for (const e of events) {
+    const t = e.type;
+    if (t === "break_away") {
+      const p = pos(e.figure);
+      if (p) out.push({ kind: "dice", x: p[0], y: p[1], dice: [num(e.roll)], result: e.success ? "hit" : "miss", dur: 900 });
+    } else if (["ranged_attack", "close_attack", "magic_blast", "flame_lightning", "shockwave"].includes(t)) {
+      const a = pos(e.attacker);
+      const tp = pos(e.target);
+      if (a && Array.isArray(e.dice)) out.push({ kind: "dice", x: a[0], y: a[1], dice: e.dice as number[], result: e.result as string, dur: 1000 });
+      const clk = num(e.clicks);
+      if (tp && clk > 0) {
+        out.push({ kind: "float", x: tp[0], y: tp[1], text: `-${clk}`, color: RED, dur: 950 });
+        out.push({ kind: "flash", x: tp[0], y: tp[1], color: RED, dur: 450 });
+      }
+    } else if (["healing", "magic_healing"].includes(t)) {
+      const hp = pos(e.target);
+      if (hp && num(e.healed) > 0) out.push({ kind: "float", x: hp[0], y: hp[1], text: `+${num(e.healed)}`, color: GREEN, dur: 950 });
+    } else if (t === "regenerate" || t === "vampirism") {
+      const p = pos(e.figure);
+      if (p && num(e.healed) > 0) out.push({ kind: "float", x: p[0], y: p[1], text: `+${num(e.healed)}`, color: GREEN, dur: 950 });
+    } else if (t === "pole_arm" || t === "crit_miss_self" || t === "push_damage") {
+      const u = t === "pole_arm" ? e.target : e.figure;
+      const p = pos(u);
+      const clk = num(e.clicks);
+      if (p && clk > 0) {
+        out.push({ kind: "float", x: p[0], y: p[1], text: `-${clk}`, color: RED, dur: 900 });
+        out.push({ kind: "flash", x: p[0], y: p[1], color: RED, dur: 400 });
+      }
+    } else if (t === "eliminated") {
+      const p = pos(e.figure);
+      if (p) out.push({ kind: "ko", x: p[0], y: p[1], dur: 700 });
+    }
+  }
+  return out;
+}
+
 export default function App() {
   const [phase, setPhase] = useState<"menu" | "drafting" | "constructing" | "battle">("menu");
   const [config, setConfig] = useState<GameConfig | null>(null);
@@ -71,6 +118,8 @@ export default function App() {
   const [explain, setExplain] = useState<AttackExplain | null>(null);
   const [moveGhost, setMoveGhost] = useState<MoveGhost | null>(null);
   const [pendingMove, setPendingMove] = useState<PendingMove | null>(null);
+  const [fx, setFx] = useState<Fx[]>([]);
+  const [fxSeq, setFxSeq] = useState(0);
   const [busy, setBusy] = useState(false);
   const lastOppTurn = useRef(-1); // turn number we've already run the opponent for
 
@@ -208,13 +257,20 @@ export default function App() {
       if (!res.ok) out.push({ type: "rejected", summary: `Rejected: ${res.reason ?? "illegal"}${res.detail ? ` — ${res.detail}` : ""}` });
       log(out);
       if (res.ok) {
+        if (view) {
+          const effects = deriveFx(res.events, view); // anchor on pre-update positions
+          if (effects.length) {
+            setFx(effects);
+            setFxSeq((n) => n + 1);
+          }
+        }
         setView(res.view);
         setArmed(null);
         setMoveGhost(null);
         setPendingMove(null);
       }
     },
-    [log],
+    [log, view],
   );
 
   const runIntent = useCallback(
@@ -374,12 +430,20 @@ export default function App() {
     setPhase("menu");
   }, []);
 
-  if (phase === "menu") return <NewGame onStart={startDraft} />;
+  const onResume = useCallback(async () => {
+    try {
+      onReady(await getState());
+    } catch {
+      /* no active game — stay on the menu */
+    }
+  }, [onReady]);
+
+  if (phase === "menu") return <NewGame onStart={startDraft} onResume={onResume} />;
   if (phase === "drafting" && config)
     return <Draft config={config} onConfirm={onDraftConfirm} onCancel={() => setPhase("menu")} />;
   if (phase === "constructing" && config)
     return <Construction config={config} humanIds={humanIds} onReady={onReady} onCancel={() => setPhase("menu")} />;
-  if (!view) return <NewGame onStart={startDraft} />;
+  if (!view) return <NewGame onStart={startDraft} onResume={onResume} />;
 
   const gameOver = view.meta.ended;
   const outcome = view.meta.winner === "human" ? "Victory" : view.meta.winner === "llm" ? "Defeat" : "Draw";
@@ -411,6 +475,8 @@ export default function App() {
               onMoveCancel={() => setMoveGhost(null)}
               pendingMove={pendingMove}
               onFaceDrag={(facing) => setPendingMove((pm) => (pm ? { ...pm, facing } : pm))}
+              fx={fx}
+              fxSeq={fxSeq}
             />
             <ActionPanel
               view={view}

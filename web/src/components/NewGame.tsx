@@ -9,7 +9,7 @@ export interface GameConfig {
 
 const CAPS = [100, 200, 300, 400, 500];
 
-export default function NewGame({ onStart }: { onStart: (c: GameConfig) => void }) {
+export default function NewGame({ onStart, onResume }: { onStart: (c: GameConfig) => void; onResume: () => void }) {
   const [mode, setMode] = useState<"preconstructed" | "sealed">("preconstructed");
   const [points, setPoints] = useState(200);
   const [opponent, setOpponent] = useState<"llm" | "heuristic">("llm");
@@ -78,6 +78,9 @@ export default function NewGame({ onStart }: { onStart: (c: GameConfig) => void 
 
         <button className="btn primary menu-start" onClick={start} type="button">
           Build armies →
+        </button>
+        <button className="btn menu-resume" onClick={onResume} type="button">
+          Resume current game
         </button>
       </div>
     </div>
