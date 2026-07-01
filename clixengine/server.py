@@ -10,6 +10,7 @@ game session lives in-process (single-player local app).
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
 
@@ -32,11 +33,21 @@ from .intents import (
     PassIntent,
     RangedIntent,
     RegenerateIntent,
+    ToggleAbilityIntent,
 )
 from .setup import build_game
 from .view import game_view
 
-app = FastAPI(title="Clix Engine")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    # Start with a default game so the client's initial GET /api/state works
+    # without an explicit new-game round-trip (single-player local app).
+    if SESSION.engine is None:
+        SESSION.new_game(points=200, seed=1)
+    yield
+
+
+app = FastAPI(title="Clix Engine", lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
@@ -69,14 +80,6 @@ class Session:
 
 
 SESSION = Session()
-
-
-@app.on_event("startup")
-def _bootstrap() -> None:
-    # Start with a default game so the client's initial GET /api/state works
-    # without an explicit new-game round-trip (single-player local app).
-    if SESSION.engine is None:
-        SESSION.new_game(points=200, seed=1)
 
 
 # ------------------------------------------------------------------ #
@@ -118,6 +121,10 @@ def intent_from_dict(d: dict):
             figure_uid=d["figure_uid"], target_uid=d["target_uid"],
             dest=_tup(d["dest"]), facing=float(d["facing"]),
         )
+    if kind == "toggle_ability":
+        return ToggleAbilityIntent(
+            figure_uid=d["figure_uid"], ability_id=int(d["ability_id"]), off=bool(d["off"]),
+        )
     raise HTTPException(400, f"unknown intent kind: {kind!r}")
 
 
@@ -141,6 +148,13 @@ class ValidateMoveReq(BaseModel):
     dest: tuple[float, float]
     facing: float = 0.0
     free: bool = False
+
+
+class ExplainReq(BaseModel):
+    attacker_uid: int
+    target_uid: int
+    attack_type: str = "close"
+    rear: bool = False
 
 
 # ------------------------------------------------------------------ #
@@ -177,6 +191,14 @@ def formation_candidates():
 def validate_move(req: ValidateMoveReq):
     eng = SESSION.require()
     return eng.validate_move(req.figure_uid, req.dest, req.facing, req.free)
+
+
+@app.post("/api/explain")
+def explain(req: ExplainReq):
+    eng = SESSION.require()
+    if req.attacker_uid not in eng.state.figures or req.target_uid not in eng.state.figures:
+        raise HTTPException(404, "unknown figure")
+    return eng.explain_attack(req.attacker_uid, req.target_uid, req.attack_type, req.rear)
 
 
 @app.post("/api/intent")

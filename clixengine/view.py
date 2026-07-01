@@ -43,6 +43,18 @@ def _dial_view(engine: Engine, f: Figure) -> list[dict]:
     return clicks
 
 
+def _optional_abilities(f: Figure) -> list[dict]:
+    """Optional abilities on the current click, with their cancel state (P4-R34)."""
+    if not f.is_alive:
+        return []
+    out, seen = [], set()
+    for a in f.definition.dial[f.current_click].abilities:
+        if a.optional and a.id not in seen:
+            seen.add(a.id)
+            out.append({"id": a.id, "name": a.name, "disabled": a.id in f.disabled_ability_ids})
+    return out
+
+
 def figure_view(engine: Engine, f: Figure) -> dict:
     contacts = [c.uid for c in engine.state.in_base_contact_with(f, engine.state.living())]
     return {
@@ -75,6 +87,7 @@ def figure_view(engine: Engine, f: Figure) -> dict:
         "defense": f.defense if f.is_alive else 0,
         "damage": f.damage if f.is_alive else 0,
         "active_abilities": _abilities_named(engine, f.active_ability_ids()) if f.is_alive else [],
+        "optional_abilities": _optional_abilities(f),  # toggleable (P4-R34)
         "in_base_contact_with": contacts,
         "dial": _dial_view(engine, f),
     }

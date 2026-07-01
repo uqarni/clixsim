@@ -36,6 +36,7 @@ from .intents import (
     RegenerateIntent,
     Rejection,
     Result,
+    ToggleAbilityIntent,
 )
 from .probability import crit_hit_probability, hit_probability, outcome
 from .rng import DiceRoller
@@ -269,7 +270,65 @@ class Engine:
             return self._apply_necromancy(intent)
         if isinstance(intent, LevitateIntent):
             return self._apply_levitate(intent)
+        if isinstance(intent, ToggleAbilityIntent):
+            return self._apply_toggle_ability(intent)
         return Rejection("unknown_intent", type(intent).__name__)
+
+    def _apply_toggle_ability(self, intent: ToggleAbilityIntent) -> Result | Rejection:
+        """Cancel/restore an optional ability shown on the figure's current click
+        (P4-R34). Not an action: no budget, no token, no acted-mark; the engine
+        clears all cancellations at the start of each owner turn."""
+        f = self.state.figures.get(intent.figure_uid)
+        if f is None or not f.is_alive:
+            return Rejection("no_such_figure", str(intent.figure_uid))
+        ref = next(
+            (a for a in f.definition.dial[f.current_click].abilities if a.id == intent.ability_id),
+            None,
+        )
+        if ref is None:
+            return Rejection("no_ability", "that ability is not on the current click")
+        if not ref.optional:
+            return Rejection("not_optional", f"{ref.name} is not an optional ability")
+        if intent.off:
+            f.disabled_ability_ids.add(intent.ability_id)
+        else:
+            f.disabled_ability_ids.discard(intent.ability_id)
+        ev = self.log.emit("toggle_ability", figure=f.uid, ability=intent.ability_id,
+                           name=ref.name, off=intent.off)
+        verb = "cancels" if intent.off else "restores"
+        return Result("toggle_ability", [ev], f"{f.short_name} {verb} {ref.name}")
+
+    def explain_attack(
+        self, attacker_uid: int, target_uid: int, attack_type: str = "close", rear: bool = False,
+    ) -> dict:
+        """Decompose an attack's numbers so the client can show WHY they changed:
+        Battle Armor / Defend on defense, Magic Enhancement / Toughness on damage."""
+        a = self.state.figure(attacker_uid)
+        t = self.state.figure(target_uid)
+        base_def = t.defense
+        ba = 2 if (attack_type == "ranged" and ab.has(t, ab.BATTLE_ARMOR)) else 0
+        best_share = 0
+        for fr in self.state.friends_of(t):
+            if ab.has(fr, ab.DEFEND) and in_base_contact(
+                t.position, t.base_radius, fr.position, fr.base_radius
+            ):
+                best_share = max(best_share, fr.defense)
+        defend = max(0, best_share - base_def)
+        eff_def = ab.effective_defense(self.state, t, attack_type)
+        base_dmg = a.damage
+        enh = ab.ranged_damage_bonus(self.state, a, t) if attack_type == "ranged" else 0
+        per_hit = ab.damage_after_defenses(t, base_dmg + enh, attack_type, is_magic=False)
+        toughness = per_hit - (base_dmg + enh)  # negative when Toughness reduces
+        return {
+            "attack": a.attack + (1 if rear else 0),
+            "rear": rear,
+            "defense": {"base": base_def, "battle_armor": ba, "defend": defend, "effective": eff_def},
+            "damage": {"base": base_dmg, "enhancement": enh, "toughness": toughness, "per_hit": per_hit},
+            "hit_odds": round(self.hit_odds(attacker_uid, target_uid, rear, attack_type), 3),
+            "expected_clicks": round(
+                self.expected_damage(attacker_uid, target_uid, rear, attack_type=attack_type), 3
+            ),
+        }
 
     def _precheck(self, figure_uid: int, free: bool = False) -> Figure | Rejection:
         if not free and self._actions_remaining() <= 0:

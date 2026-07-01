@@ -70,6 +70,18 @@ class LevitateIntent:
     kind: str = "levitate"
 
 
+@dataclass(frozen=True)
+class ToggleAbilityIntent:
+    """Turn an optional ability off (or back on) until end of turn (P4-R34).
+
+    Not an action: costs no action and places no token; cleared each owner turn."""
+
+    figure_uid: int
+    ability_id: int
+    off: bool  # True = cancel the optional ability; False = restore it
+    kind: str = "toggle_ability"
+
+
 Intent = (
     MoveIntent
     | RangedIntent
@@ -78,6 +90,7 @@ Intent = (
     | RegenerateIntent
     | NecromancyIntent
     | LevitateIntent
+    | ToggleAbilityIntent
 )
 
 
