@@ -604,6 +604,29 @@ export default function App() {
       if (bad && !reason) reason = bad;
       return { uid: m.uid, dest, facing, radius: m.radius, ok: !bad };
     });
+    // End cohesion on the EXACT numbers we submit: rigidity preserves true
+    // distances, but the view rounds positions to 3 decimals — a pair whose
+    // real gap sits a hair under the 0.02" touching tolerance can round to
+    // just over it, and the engine checks cohesion on the submitted dests.
+    if (!reason && members.length > 1) {
+      const touch = (a: (typeof members)[0], b: (typeof members)[0]) =>
+        Math.hypot(a.dest[0] - b.dest[0], a.dest[1] - b.dest[1]) <= a.radius + b.radius + 0.02;
+      const seen = new Set<number>([0]);
+      const stack = [0];
+      while (stack.length) {
+        const i = stack.pop()!;
+        members.forEach((m, j) => {
+          if (!seen.has(j) && touch(members[i], m)) {
+            seen.add(j);
+            stack.push(j);
+          }
+        });
+      }
+      if (seen.size !== members.length) {
+        reason = "the formation isn't one touching cluster — nudge the members together first";
+        for (const m of members) m.ok = false;
+      }
+    }
     return { members, pivot, ok: reason === null, reason };
   }, [view, rigidMove]);
 
@@ -1034,6 +1057,7 @@ export default function App() {
     setMoveGhost(null);
     setPendingMove(null);
     setFormationStage(null);
+    setRigidMove(null);
     setSelectedUid(null);
     setSelection([]);
     setFreeSpin(null);
@@ -1077,6 +1101,7 @@ export default function App() {
     setMoveGhost(null);
     setPendingMove(null);
     setFormationStage(null);
+    setRigidMove(null);
     setFreeSpin(null);
     setOppThoughts([]);
     setEvents([{ type: "info", summary: "Battle begins." }]);

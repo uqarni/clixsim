@@ -1264,8 +1264,15 @@ export default function BoardCanvas({
     if (dragRef.current) {
       const moved = dragRef.current.moved;
       const uid = dragRef.current.uid;
-      if (moved) onMoveDrop(clampedWorld(e.clientX, e.clientY), uid);
-      else onMoveCancel();
+      if (moved) {
+        onMoveDrop(clampedWorld(e.clientX, e.clientY), uid);
+      } else {
+        onMoveCancel();
+        // Rigid mode: the ghost-grab runs before hitTest, so a plain CLICK on a
+        // figure under/near a ghost would otherwise die here — treat it as the
+        // selection it was meant to be (inspection still works mid-rigid).
+        if (rigid) onSelect(hitTest(e.clientX, e.clientY), e.shiftKey);
+      }
       dragRef.current = null;
       return;
     }
