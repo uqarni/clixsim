@@ -59,8 +59,11 @@ def build_game(
         (human_army, "bottom", math.pi / 2),  # face up (+y)
         (llm_army, "top", -math.pi / 2),  # face down (-y)
     ):
-        positions = _deploy_positions(len(army.figure_ids), board, edge)
-        for fid, pos in zip(army.figure_ids, positions):
+        # Group faction-mates adjacently in the line (stable within a faction)
+        # so 3+ same-faction figures start cohesive and can form up turn one.
+        by_faction = sorted(army.figure_ids, key=lambda fid: db.get(fid).faction)
+        positions = _deploy_positions(len(by_faction), board, edge)
+        for fid, pos in zip(by_faction, positions):
             fdef = db.get(fid)
             fig = Figure(
                 uid=uid,

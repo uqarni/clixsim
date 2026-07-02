@@ -25,6 +25,17 @@ def _role(f: FigureDef) -> str:
     return "ranged" if f.is_ranged else "melee"
 
 
+_FORMATION_BARRED = {ab.FLIGHT, ab.AQUATIC, ab.QUICKNESS}
+
+
+def _formation_capable(f: FigureDef) -> bool:
+    """Can this figure join a movement formation? (P4-R12: Mage Spawn never
+    join formations; Flight/Aquatic/Quickness bar movement formations.)"""
+    if f.faction == "Mage Spawn":
+        return False
+    return not (_FORMATION_BARRED & f.all_ability_ids())
+
+
 def _top_abilities(db: FigureDB, f: FigureDef) -> list[str]:
     names = []
     for aid in sorted(f.all_ability_ids()):
@@ -126,6 +137,18 @@ def heuristic_army(
         cands = _affordable(db, candidate_ids, remaining, used_uniques, pool_counts)
         if not cands:
             break
+        # Formation-aware: once a faction is chosen, stick to it while options
+        # exist — 3-5 same-faction figures unlock movement/ranged formations.
+        if ids:
+            used_factions = {db.get(i).faction for i in ids}
+            same = [f for f in cands if f.faction in used_factions and f.faction != "Mage Spawn"]
+            if same:
+                cands = same
+        # ...and prefer figures that can actually join one (Flight/Aquatic/
+        # Quickness bar movement formations; Mage Spawn bar all formations).
+        grounded = [f for f in cands if _formation_capable(f)]
+        if grounded:
+            cands = grounded
         prefer = [f for f in cands if (_role(f) == "ranged") == want_ranged] or cands
         # a little variety among the top few
         top = prefer[: min(3, len(prefer))]
@@ -152,7 +175,15 @@ leave large points unspent. You pick ONE figure at a time from the offered \
 candidates (each comes with its starting stats, rank, and abilities — the official \
 ability card text is below). You may take the same non-unique more than once. Reply \
 with the chosen candidate id and a short, punchy one-sentence reason, or -1 to \
-stop when the army is strong and the budget is nearly spent."""
+stop when the army is strong and the budget is nearly spent.
+
+FORMATIONS ARE A CORE LEVER — draft for them: a movement formation is 3-5 \
+SAME-FACTION figures moving as ONE action (huge action economy), and a ranged \
+formation of same-faction shooters adds +2 to the roll per extra member. A \
+faction-salad army can never form one. Concentrate most of your points in ONE \
+faction (two at most), aiming for at least 3-4 figures of it. Caveats: figures \
+with Flight/Aquatic/Quickness cannot join MOVEMENT formations (fine as loners), \
+and Mage Spawn can never join any formation."""
 
 # A per-game drafting doctrine keeps armies varied across games (the model
 # otherwise converges on the same "best" picks every time).
@@ -166,6 +197,8 @@ DOCTRINES = (
     "shooters, Defend to share a high defense, healers to sustain.",
     "Combined arms: a balanced core of melee bruisers screening ranged support.",
     "Glass cannons: maximum damage output per point, defense be damned.",
+    "Phalanx: a single-faction block of 3-5 figures that marches as one movement "
+    "formation and pools its attacks — cohesion above all.",
 )
 
 _SCHEMA = {

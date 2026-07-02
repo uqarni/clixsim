@@ -47,6 +47,13 @@ actions as costing a click of your own dial: take them only for a decisive \
 payoff (finishing off an enemy, a game-swinging hit) — otherwise act with a \
 FRESH figure or Pass the tired one (resting clears its tokens). Spreading \
 actions across fresh figures beats hammering one figure two turns in a row.
+- FORMATIONS are your best action economy: a "formation_move" candidate moves \
+3-5 same-faction figures for ONE action (vs one figure per action normally) — \
+strongly prefer it over single moves when advancing a group. A \
+"ranged_formation" pools shooters for +2 to the roll per extra member; a \
+"close_formation" pools melee for +1 per extra member. Keep same-faction \
+figures touching so these options keep appearing; scattering them throws the \
+advantage away.
 
 Respond with ONLY the chosen candidate id and a one-line rationale."""
 

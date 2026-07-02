@@ -53,3 +53,62 @@ def test_army_builder_doctrine_varies_and_knows_the_rules(db):
     assert b.doctrine in sysprompt                 # the per-game directive
     assert "Special abilities" in sysprompt        # official card text
     assert "Formations" in sysprompt or "formation" in sysprompt  # rules digest
+
+
+def test_heuristic_army_concentrates_factions_for_formations(db):
+    """The heuristic drafter builds same-faction, formation-capable blocks so
+    movement formations (3-5 same-faction, P4-R11..12) are actually possible."""
+    from collections import Counter
+
+    from clixengine.build import _formation_capable, heuristic_army
+
+    for seed in (5, 11, 42, 101, 303):
+        army = heuristic_army(db, "llm", 200, seed)
+        figs = [db.get(i) for i in army.figure_ids]
+        capable = Counter(f.faction for f in figs if _formation_capable(f))
+        assert capable and max(capable.values()) >= 3, (
+            f"seed {seed}: no 3+ formation-capable same-faction block: "
+            f"{[(f.short_name, f.faction) for f in figs]}"
+        )
+
+
+def test_deploy_line_groups_factions_adjacently(db):
+    """build_game orders each deploy line by faction so faction-mates start in
+    base contact and can move as a formation on turn one."""
+    from clixengine.army import Army
+    from clixengine.candidates import generate_formation_candidates
+    from clixengine.setup import build_game
+
+    # Deliberately interleave two factions in draft order.
+    utem = [f for f in db.all_figures()
+            if f.faction == "Atlantis Guild" and not f.is_unique][:3]
+    orcs = [f for f in db.all_figures()
+            if f.faction == "Orc Raiders" and not f.is_unique][:2]
+    assert len(utem) == 3 and len(orcs) == 2
+    ids = [utem[0].id, orcs[0].id, utem[1].id, orcs[1].id, utem[2].id]
+    llm = Army("llm-army", "llm", ids)
+    human = Army("h-army", "human", [utem[0].id])
+    eng = build_game(human, llm, 400, seed=7)
+
+    # Faction-mates occupy contiguous x positions in the line.
+    line = sorted((f for f in eng.state.figures.values() if f.owner == "llm"),
+                  key=lambda f: f.position.x)
+    factions = [f.definition.faction for f in line]
+    for fac in set(factions):
+        idxs = [i for i, x in enumerate(factions) if x == fac]
+        assert idxs == list(range(idxs[0], idxs[-1] + 1)), f"{fac} split: {factions}"
+
+    # And the 3-strong Atlantis block yields a turn-one formation move.
+    eng.state.active_player = "llm"
+    eng._begin_player_turn("llm")
+    kinds = {c.kind for c in generate_formation_candidates(eng, "llm")}
+    assert "formation_move" in kinds
+
+
+def test_drafter_and_battle_prompts_teach_formations(db):
+    from clixengine.ai.llm import _SYSTEM as battle_system
+    from clixengine.build import _SYSTEM as draft_system
+
+    assert "SAME-FACTION" in draft_system          # draft for formations
+    assert "formation_move" in battle_system       # value the candidate in play
+    assert "ranged_formation" in battle_system
