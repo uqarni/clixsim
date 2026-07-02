@@ -4,11 +4,12 @@ Content is data, not code. This module normalises ``stats/rebellion.json`` and
 ``stats/special_abilities.json`` into immutable definition objects the engine
 instantiates in-play figures from.
 
-Arc convention (OQ-5, provisional): ``arc_raw`` is treated as the *half-angle*
-of the front arc in degrees. So ``90`` => a front wedge of facing +/- 90 deg
-(a 180-degree front hemisphere, the common case), and ``180`` => facing +/- 180
-(all-around front, no rear). This is the defensible default pending base-art
-verification; it is isolated here so it can be re-pinned in one place.
+Arc convention (OQ-5, RESOLVED): ``arc_raw`` is the TOTAL front-arc angle in
+degrees — 90 is the standard quarter-circle clix front arc (facing +/- 45), and
+the four 180 figures (Amazon Queen, Hierophant, Magus, Storm Golem — exactly
+the multi-target-arrow commanders) get the wide half-circle arc (facing +/-
+90). The old half-angle reading gave those four a 360-degree front arc with NO
+rear at all, which is what pinned the convention.
 """
 
 from __future__ import annotations
@@ -79,8 +80,9 @@ class FigureDef:
 
     @property
     def arc_half_angle(self) -> float:
-        """Front-arc half-angle in radians (see module docstring / OQ-5)."""
-        return math.radians(self.arc_deg)
+        """Front-arc half-angle in radians. ``arc_deg`` is the TOTAL arc angle
+        (see module docstring / OQ-5): 90 => facing +/- 45."""
+        return math.radians(self.arc_deg / 2.0)
 
     @property
     def num_live_clicks(self) -> int:

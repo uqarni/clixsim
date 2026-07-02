@@ -295,6 +295,6 @@ Lookahead here is **not** naive minimax. Mage Knight is continuous (movement is 
 **Still open**
 - **OQ-3 — Collation fidelity:** `Frequency` (rarity 1–6) enables rarity-weighted booster sampling, but real per-expansion **pack composition** (figures per booster, rarity slots per pack) is still unknown for Rebellion — source it, or approximate (labeled non-canonical)?
 - **OQ-4 — Time limit:** model the 50-minute standard-game limit as a real end condition, or ignore it digitally?
-- **OQ-5 — Arc convention:** arc data is in the feed (`Model.Arc`, mostly 90, a few 180) — sourcing is solved; the remaining question is the **angle convention** (does 90 mean a 180°-total front arc? what are the 180-value figures?). Pin against a known figure's base art.
+- **OQ-5 — Arc convention (RESOLVED):** `Model.Arc` is the **TOTAL** front-arc angle: 90 = the standard quarter-circle front arc (facing ±45°); the four 180 figures (Amazon Queen, Hierophant, Magus, Storm Golem — exactly the multi-target-arrow commanders) get the half-circle arc (facing ±90°). Pinned by reductio: the half-angle reading gave the 180 figures a 360° front arc with no rear at all, breaking the rear-attack rule.
 - **OQ-8 — Movement input UX:** drag-and-place-then-face, or draw-the-path?
 - **OQ-11 — LLM army-building scope:** always drafts its own, or also mirror/counter a human-built army?

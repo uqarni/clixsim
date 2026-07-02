@@ -211,15 +211,24 @@ def test_close_formation_rear_bonus(db):
     assert c.annotation["attack"] == primary.attack + 1 + 1  # +1 extra member, +1 rear
 
 
-def test_no_rear_bonus_against_all_around_arc(db):
-    # A 180-arc figure (Storm Golem) has no rear, so the rear bonus never applies.
+def test_wide_arc_figure_still_has_a_rear(db):
+    # arc_deg is the TOTAL arc (OQ-5 resolved): a 180-arc figure (Storm Golem)
+    # has a half-circle front (facing +/- 90) — an attacker directly behind IS
+    # in its rear arc, while one dead ahead is not.
     assert db.find("Storm Golem")[0].arc_deg == 180.0
     e = build_engine(db, [
-        ("llm", "Storm Golem", (18, 18), 0.0, 0),
-        ("human", "Order Of Vladd", (16.9, 18), 0.0, 0),       # "behind" — but no rear exists
-        ("human", "Order Of Vladd", (18, 16.9), math.pi / 2, 0),
+        ("llm", "Storm Golem", (18, 18), 0.0, 0),               # facing +x
+        ("human", "Order Of Vladd", (16.9, 18), 0.0, 0),        # directly BEHIND (-x)
+        ("human", "Order Of Vladd", (18, 16.9), math.pi / 2, 0),  # at its side (front edge)
     ], active="human")
     c = _find(generate_formation_candidates(e, "human"), "close_formation")
     primary = e.state.figure(c.annotation["primary"])
-    assert c.annotation["rear"] is False
-    assert c.annotation["attack"] == primary.attack + 1  # +1 extra member only
+    assert c.annotation["rear"] is True  # the behind attacker grants the +1
+    assert c.annotation["attack"] == primary.attack + 1 + 1  # extra member + rear
+    # And a standard 90-arc figure: a target 90 degrees off its facing is OUTSIDE
+    # its quarter-circle front arc now.
+    e2 = build_engine(db, [
+        ("human", "Werebear", (10, 10), 0.0, 0),   # facing +x, arc +/- 45
+        ("llm", "Werebear", (10, 11.1), 0.0, 0),   # touching, straight UP (90 deg off)
+    ], active="human")
+    assert e2.legal_close_targets(e2.state.figure(0)) == []
