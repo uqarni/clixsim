@@ -64,15 +64,14 @@ export default function Deploy({ initialView, onDone, onCancel }: Props) {
       const targets = view.figures
         .filter((o) => !o.eliminated && o.uid !== fig.uid)
         .map((o) => ({ pos: o.pos, radius: o.base_radius, uid: o.uid }));
-      const snapped = snapToContactRing(r, [x, y], targets);
-      // Keep the snap only if it stays inside the deploy band.
-      if (
-        snapped &&
-        snapped.point[0] >= r && snapped.point[0] <= W - r &&
-        snapped.point[1] >= r && snapped.point[1] <= BAND - r
-      ) {
-        [x, y] = snapped.point;
-      }
+      // Candidates are ranked (two-contact pocket first when the cursor is near
+      // the notch); take the first one that stays inside the deploy band.
+      const snapped = snapToContactRing(r, [x, y], targets).find(
+        (c) =>
+          c.point[0] >= r && c.point[0] <= W - r &&
+          c.point[1] >= r && c.point[1] <= BAND - r,
+      );
+      if (snapped) [x, y] = snapped.point;
       const overlaps = targets.some(
         (o) => Math.hypot(x - o.pos[0], y - o.pos[1]) < r + o.radius - 0.02,
       );

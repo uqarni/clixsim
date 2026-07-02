@@ -524,24 +524,21 @@ export default function App() {
   // it never counts as touching). While staging a formation move, already-placed
   // members snap at their STAGED destinations, not their old spots.
   const snapToBase = useCallback(
-    (fig: FigureView, dest: [number, number]): { point: [number, number]; uid: number } | null => {
-      if (!view) return null;
+    (fig: FigureView, dest: [number, number]): { point: [number, number]; uid: number }[] => {
+      if (!view) return [];
       const stagedByUid = new Map((formationStage?.placed ?? []).map((p) => [p.uid, p.dest]));
       const targets = view.figures
         .filter((nf) => !nf.eliminated && nf.uid !== fig.uid)
         .map((nf) => ({ pos: stagedByUid.get(nf.uid) ?? nf.pos, radius: nf.base_radius, uid: nf.uid }));
-      const snapped = snapToContactRing(fig.base_radius, dest, targets);
-      if (!snapped) return null;
-      // Pocket snap touching two bases: report the ENEMY contact as primary so
-      // the charge auto-aim (ghostFor's faceUid) targets it, not a friend.
-      if (snapped.uid2 != null) {
-        const isEnemy = (uid: number) =>
-          view.figures.some((f) => f.uid === uid && f.owner !== fig.owner && !f.eliminated);
-        if (!isEnemy(snapped.uid) && isEnemy(snapped.uid2)) {
-          return { point: snapped.point, uid: snapped.uid2 };
-        }
-      }
-      return { point: snapped.point, uid: snapped.uid };
+      const isEnemy = (uid: number) =>
+        view.figures.some((f) => f.uid === uid && f.owner !== fig.owner && !f.eliminated);
+      // Ranked candidates (pockets touching two bases first when the cursor says
+      // so); for a pocket, report the ENEMY contact as primary so the charge
+      // auto-aim (ghostFor's faceUid) targets it, not a friend.
+      return snapToContactRing(fig.base_radius, dest, targets).map((c) => ({
+        point: c.point,
+        uid: c.uid2 != null && !isEnemy(c.uid) && isEnemy(c.uid2) ? c.uid2 : c.uid,
+      }));
     },
     [view, formationStage],
   );
@@ -552,9 +549,10 @@ export default function App() {
       if (!fig) return;
       // Snap DURING the drag so the ghost visibly sticks to nearby bases; when it
       // snaps onto an ENEMY, the ghost faces that enemy (a charge should never
-      // end aimed the wrong way by accident).
-      const snapped = snapToBase(fig, dest);
-      if (snapped && ghostFor(fig, snapped.point, snapped.uid).ok) {
+      // end aimed the wrong way by accident). Candidates are ranked (two-contact
+      // pocket first when intended) — take the first one that's actually legal.
+      const snapped = snapToBase(fig, dest).find((c) => ghostFor(fig, c.point, c.uid).ok);
+      if (snapped) {
         setMoveGhost(ghostFor(fig, snapped.point, snapped.uid));
       } else {
         setMoveGhost(ghostFor(fig, dest));
@@ -568,10 +566,9 @@ export default function App() {
       const fig = view?.figures.find((f) => f.uid === activeUid);
       setMoveGhost(null);
       if (!fig) return;
-      // Prefer a snapped-to-contact destination when it's legal; otherwise the raw drop.
-      const snapped = snapToBase(fig, dest);
-      const useSnap = snapped && ghostFor(fig, snapped.point, snapped.uid).ok;
-      const g = useSnap ? ghostFor(fig, snapped!.point, snapped!.uid) : ghostFor(fig, dest);
+      // Prefer the best LEGAL snapped-to-contact destination; otherwise the raw drop.
+      const snapped = snapToBase(fig, dest).find((c) => ghostFor(fig, c.point, c.uid).ok);
+      const g = snapped ? ghostFor(fig, snapped.point, snapped.uid) : ghostFor(fig, dest);
       if (!g.ok) {
         log([{ type: "rejected", summary: `Can't move there — ${g.reason ?? "illegal move"}.` }]);
         return;

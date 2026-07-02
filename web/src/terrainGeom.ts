@@ -183,17 +183,34 @@ export function moveBlockReason(
 //
 // Two-tangent "pockets": when the cursor is near the notch where the mover would
 // touch TWO bases at once (the intersection of their contact rings), snap there —
-// `uid2` reports the second contact. A pocket only yields to a single-ring snap
-// when the cursor is decisively closer to the lone ring (POCKET_EDGE), so nestling
-// a third figure against a touching pair doesn't take pixel-perfect dropping.
+// `uid2` reports the second contact.
+//
+// Returns candidates RANKED by preference, not a single winner: a pocket can be
+// illegal for reasons only the caller knows (outside the deploy band, beyond the
+// mover's speed, fails formation cohesion), and the old best single-ring snap
+// must survive as the fallback. Callers take the first candidate that passes
+// their own legality checks.
+//
+// Pocket-vs-single ranking is aim-aware: a sloppy drop near the notch means
+// "touch both", but a cursor sitting right ON a lone contact ring is a precise
+// placement that must not be stolen into contact with a second (possibly enemy)
+// base. The pocket outranks the nearest single only while its miss distance is
+// within 3x the single's (capped at POCKET_EDGE beyond it) — dead-on ring aim
+// makes the single unbeatable except at the notch itself, where they coincide.
 const POCKET_EDGE = 0.35;
+
+export interface SnapCandidate {
+  point: Pt;
+  uid: number;
+  uid2?: number;
+}
 
 export function snapToContactRing(
   moverRadius: number,
   dest: Pt,
   targets: { pos: Pt; radius: number; uid: number }[],
   window = 0.9,
-): { point: Pt; uid: number; uid2?: number } | null {
+): SnapCandidate[] {
   const clear = (cp: Pt, skipA: number, skipB: number) =>
     !targets.some(
       (o) =>
@@ -202,24 +219,20 @@ export function snapToContactRing(
         Math.hypot(cp[0] - o.pos[0], cp[1] - o.pos[1]) < moverRadius + o.radius - 0.02,
     );
 
-  let single: { point: Pt; uid: number } | null = null;
-  let singleErr = Infinity;
+  type Cand = SnapCandidate & { err: number; pocket: boolean };
+  const cands: Cand[] = [];
+
   for (const t of targets) {
     const dx = dest[0] - t.pos[0];
     const dy = dest[1] - t.pos[1];
     const dlen = Math.hypot(dx, dy) || 1e-9;
     const gap = moverRadius + t.radius;
     const err = Math.abs(dlen - gap);
-    if (err > window || err >= singleErr) continue;
+    if (err > window) continue;
     const cp: Pt = [t.pos[0] + (dx / dlen) * gap, t.pos[1] + (dy / dlen) * gap];
-    if (clear(cp, t.uid, t.uid)) {
-      single = { point: cp, uid: t.uid };
-      singleErr = err;
-    }
+    if (clear(cp, t.uid, t.uid)) cands.push({ point: cp, uid: t.uid, err, pocket: false });
   }
 
-  let pocket: { point: Pt; uid: number; uid2: number } | null = null;
-  let pocketErr = Infinity;
   for (let i = 0; i < targets.length; i++) {
     for (let j = i + 1; j < targets.length; j++) {
       const a = targets[i];
@@ -238,17 +251,24 @@ export function snapToContactRing(
       for (const s of h > 1e-9 ? [1, -1] : [1]) {
         const cp: Pt = [mx + s * (-dy / d) * h, my + s * (dx / d) * h];
         const err = Math.hypot(dest[0] - cp[0], dest[1] - cp[1]);
-        if (err > window || err >= pocketErr) continue;
-        if (clear(cp, a.uid, b.uid)) {
-          pocket = { point: cp, uid: a.uid, uid2: b.uid };
-          pocketErr = err;
-        }
+        if (err > window) continue;
+        if (clear(cp, a.uid, b.uid)) cands.push({ point: cp, uid: a.uid, uid2: b.uid, err, pocket: true });
       }
     }
   }
 
-  if (pocket && (!single || pocketErr - singleErr <= POCKET_EDGE)) return pocket;
-  return single;
+  cands.sort((x, y) => x.err - y.err);
+  const bestSingle = cands.find((c) => !c.pocket);
+  const bestPocket = cands.find((c) => c.pocket);
+  if (
+    bestPocket &&
+    (!bestSingle ||
+      bestPocket.err <= Math.min(bestSingle.err + POCKET_EDGE, 3 * bestSingle.err + 1e-9))
+  ) {
+    const rest = cands.filter((c) => c !== bestPocket);
+    return [bestPocket, ...rest].map(({ point, uid, uid2 }) => ({ point, uid, uid2 }));
+  }
+  return cands.map(({ point, uid, uid2 }) => ({ point, uid, uid2 }));
 }
 
 // --- line-of-fire mirror (clixengine/engine.line_of_fire) --------------------
