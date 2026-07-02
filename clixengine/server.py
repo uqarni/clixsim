@@ -224,6 +224,9 @@ class Session:
             else:
                 llm = LLMOpponent()
                 self.opponent = llm if llm.available else HeuristicAI()
+            # Games created before the archive existed (or restored across a
+            # deploy) enter the all-time record immediately, not on next action.
+            self.checkpoint(reason="restored")
             return True
         except Exception:
             return False
@@ -625,6 +628,7 @@ def terrain_placement_stream():
                 if not r.ok:  # pre-validated, so this is a bug-state: forfeit, don't strand
                     eng.skip_terrain_placement("llm")
                     break
+                SESSION.checkpoint(reason="terrain")
                 yield sse({"type": "place", "summary": r.summary, "reasoning": reason,
                            "used_llm": used, "view": game_view(eng)})
             yield sse({"type": "done", "view": game_view(eng)})
