@@ -70,6 +70,7 @@ interface Props {
   onDrawPoint?: (world: [number, number]) => void;
   onDrawMove?: (world: [number, number]) => void;
   onDrawUndo?: () => void;
+  onDrawLeave?: () => void;
 }
 
 export interface DrawGhost {
@@ -467,6 +468,7 @@ export default function BoardCanvas({
   onDrawPoint,
   onDrawMove,
   onDrawUndo,
+  onDrawLeave,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const fxCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -1008,7 +1010,10 @@ export default function BoardCanvas({
           if (draw && onDrawUndo) onDrawUndo(); // right-click removes the last point
         }}
         onPointerLeave={() => {
-          if (placementMode || draw) return;
+          if (placementMode || draw) {
+            onDrawLeave?.(); // drop the rubber-band cursor when the pointer exits
+            return;
+          }
           if (faceRef.current) {
             faceRef.current = false;
           } else if (dragRef.current) {

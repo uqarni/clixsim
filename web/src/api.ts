@@ -181,8 +181,11 @@ function clone<T>(value: T): T {
 }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  // Bounded wait: a request that never completes (e.g. the server wedged on a
+  // lock) must reject rather than freeze the UI's busy state forever.
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
+    signal: AbortSignal.timeout(45_000),
     ...init,
   });
   if (!res.ok) {

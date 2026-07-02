@@ -278,6 +278,7 @@ export default function TerrainPlacement({ initialView, onDone, onCancel }: Prop
               onDrawPoint={onDrawPoint}
               onDrawMove={(w) => setCursor(w)}
               onDrawUndo={onDrawUndo}
+              onDrawLeave={() => setCursor(null)}
             />
           </div>
         </div>

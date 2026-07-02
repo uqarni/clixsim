@@ -83,8 +83,15 @@ class Session:
         self._chat_system: str | None = None
         self._placer: TerrainPlacer | None = None
         # Serializes terrain-placement streams so a duplicate/overlapping connection
-        # (e.g. React StrictMode's dev double-mount) can't double-place.
+        # (e.g. React StrictMode's dev double-mount) can't double-place. NEVER wait
+        # on this indefinitely: a stream holds it across LLM calls, and a blocking
+        # acquire in a request handler deadlocks the whole placement flow (the
+        # request also never appears in the access log — it logs on completion).
         self.terrain_lock = threading.Lock()
+
+    def terrain_guard(self, timeout: float = 3.0):
+        """Acquire the terrain lock with a bounded wait; None if unavailable."""
+        return self.terrain_lock.acquire(timeout=timeout)
 
     def placer(self) -> TerrainPlacer:
         if self._placer is None:
@@ -98,7 +105,7 @@ class Session:
                 return "(Chat is unavailable — no API key configured.)"
             import anthropic
 
-            self._chat_client = anthropic.Anthropic(api_key=key)
+            self._chat_client = anthropic.Anthropic(api_key=key, timeout=30.0, max_retries=1)
             self._chat_system = build_system(self.db)
         try:
             return chat_reply(self._chat_client, self._chat_system, message, history, self.engine)
@@ -367,6 +374,18 @@ def sealed_packs(seed: int = 1):
     return {"packs": packs}
 
 
+def _terrain_busy(eng) -> dict:
+    """Friendly non-blocking answer when the opponent's placement stream holds the
+    terrain lock — the client shows it and the user simply retries."""
+    return {
+        "ok": False,
+        "reason": "opponent_busy",
+        "detail": "the opponent is still placing terrain — try again in a moment",
+        "summary": "",
+        "view": game_view(eng),
+    }
+
+
 class PlaceTerrainReq(BaseModel):
     key: str
     center: tuple[float, float]
@@ -395,8 +414,12 @@ class PlaceTerrainPolygonReq(BaseModel):
 def place_terrain_polygon(req: PlaceTerrainPolygonReq):
     """The human places one hand-drawn terrain polygon during the setup phase."""
     eng = SESSION.require()
-    with SESSION.terrain_lock:
+    if not SESSION.terrain_guard():
+        return _terrain_busy(eng)
+    try:
         result = eng.place_terrain_polygon(SESSION.human_side, req.type, req.polygon)
+    finally:
+        SESSION.terrain_lock.release()
     return {
         "ok": result.ok,
         "reason": getattr(result, "reason", None),
@@ -417,8 +440,12 @@ def terrain_candidates(owner: str = "human"):
 def place_terrain(req: PlaceTerrainReq):
     """The human places one terrain piece during the setup phase."""
     eng = SESSION.require()
-    with SESSION.terrain_lock:  # don't race a concurrent opponent placement stream
+    if not SESSION.terrain_guard():  # don't race the opponent stream — but never hang
+        return _terrain_busy(eng)
+    try:
         result = eng.place_terrain(SESSION.human_side, req.key, req.center, req.rotation)
+    finally:
+        SESSION.terrain_lock.release()
     return {
         "ok": result.ok,
         "reason": getattr(result, "reason", None),
@@ -432,8 +459,12 @@ def place_terrain(req: PlaceTerrainReq):
 def skip_terrain():
     """The human forfeits their remaining terrain and hands off (Done placing)."""
     eng = SESSION.require()
-    with SESSION.terrain_lock:
+    if not SESSION.terrain_guard():
+        return _terrain_busy(eng)
+    try:
         result = eng.skip_terrain_placement(SESSION.human_side)
+    finally:
+        SESSION.terrain_lock.release()
     return {
         "ok": result.ok,
         "reason": getattr(result, "reason", None),
@@ -454,36 +485,50 @@ def terrain_placement_stream():
         if eng.state.phase != "terrain":
             yield sse({"type": "done", "view": game_view(eng)})
             return
+        # One placement stream at a time — a duplicate connection (StrictMode's
+        # dev double-mount, or a refresh racing a zombie stream) no-ops instead of
+        # queueing on the lock. NEVER block here: this generator holds the lock
+        # across LLM calls, and a second waiter deadlocks the whole placement UI.
+        if not SESSION.terrain_lock.acquire(blocking=False):
+            yield sse({"type": "done", "view": game_view(eng)})
+            return
         placer = SESSION.placer()
         allow_llm = not isinstance(SESSION.opponent, HeuristicAI)
         llm_ranged = any(f.is_ranged for f in eng.state.living("llm"))
         step = 0
         try:
-            with SESSION.terrain_lock:  # one placement stream at a time
-                while eng.state.phase == "terrain" and eng.state.terrain_turn == "llm":
-                    cands = eng.terrain_placement_candidates("llm")
-                    if not cands:  # nowhere legal left: forfeit the rest and hand off
-                        eng.skip_terrain_placement("llm")
-                        break
-                    context = {
-                        "my_army_has_ranged": llm_ranged,
-                        "pieces_left": eng.state.terrain_budget.get("llm", 0),
-                        "already_placed": [{"type": t.kind, "elevated": t.elevated, "owner": t.owner}
-                                           for t in eng.state.terrain],
-                    }
-                    seed = 4000 + len(eng.state.terrain) * 7 + step
-                    choice, reason, used = placer.pick(cands, context, llm_ranged, seed, allow_llm)
-                    step += 1
-                    if choice is None:
-                        break
-                    r = eng.place_terrain("llm", choice["key"], choice["center"], choice["rotation"])
-                    if not r.ok:  # candidates are pre-validated; stop rather than loop
-                        break
-                    yield sse({"type": "place", "summary": r.summary, "reasoning": reason,
-                               "used_llm": used, "view": game_view(eng)})
+            while eng.state.phase == "terrain" and eng.state.terrain_turn == "llm":
+                if eng is not SESSION.engine:
+                    break  # a new game replaced this engine — stop the zombie stream
+                cands = eng.terrain_placement_candidates("llm")
+                if not cands:  # nowhere legal left: forfeit the rest and hand off
+                    eng.skip_terrain_placement("llm")
+                    break
+                context = {
+                    "my_army_has_ranged": llm_ranged,
+                    "pieces_left": eng.state.terrain_budget.get("llm", 0),
+                    "already_placed": [{"type": t.kind, "elevated": t.elevated, "owner": t.owner}
+                                       for t in eng.state.terrain],
+                }
+                seed = 4000 + len(eng.state.terrain) * 7 + step
+                choice, reason, used = placer.pick(cands, context, llm_ranged, seed, allow_llm)
+                step += 1
+                if choice is None:
+                    # The placer gave up (shouldn't happen — candidates exist). Never
+                    # strand the turn on "llm": forfeit so the human can proceed.
+                    eng.skip_terrain_placement("llm")
+                    break
+                r = eng.place_terrain("llm", choice["key"], choice["center"], choice["rotation"])
+                if not r.ok:  # pre-validated, so this is a bug-state: forfeit, don't strand
+                    eng.skip_terrain_placement("llm")
+                    break
+                yield sse({"type": "place", "summary": r.summary, "reasoning": reason,
+                           "used_llm": used, "view": game_view(eng)})
             yield sse({"type": "done", "view": game_view(eng)})
         except Exception as e:
             yield sse({"type": "error", "message": str(e), "view": game_view(eng)})
+        finally:
+            SESSION.terrain_lock.release()
 
     return StreamingResponse(
         gen(), media_type="text/event-stream",

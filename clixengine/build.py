@@ -201,7 +201,7 @@ class ArmyBuilder:
         try:
             import anthropic
 
-            self._client = anthropic.Anthropic(api_key=key)
+            self._client = anthropic.Anthropic(api_key=key, timeout=30.0, max_retries=1)
             self.available = True
         except Exception as e:  # pragma: no cover
             self.last_error = f"anthropic init failed: {e}"
