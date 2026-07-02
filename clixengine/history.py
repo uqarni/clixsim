@@ -32,6 +32,12 @@ def history_dir() -> Path:
     return Path(override) if override else Path.home() / ".clixengine" / "history"
 
 
+# Which checkout produced a record: the server's repo/worktree dirname (the
+# prod worktree vs clix-dev vs a review agent's scratch checkout). The training
+# set filters on this — no launch-command discipline required.
+_INSTANCE = Path(__file__).resolve().parents[1].name
+
+
 def _army_brief(engine, owner: str) -> list[dict]:
     return [
         {
@@ -62,6 +68,7 @@ def archive_game(
         game_id = getattr(engine, "game_id", "") or "unknown"
         record = {
             "game_id": game_id,
+            "instance": _INSTANCE,
             "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "saved_reason": reason,
             "build_total": engine.state.build_total,
@@ -109,6 +116,7 @@ def list_games() -> list[dict]:
                 r = json.load(fh)
             out.append({
                 "game_id": r.get("game_id"),
+                "instance": r.get("instance"),
                 "saved_at": r.get("saved_at"),
                 "saved_reason": r.get("saved_reason"),
                 "build_total": r.get("build_total"),
