@@ -18,7 +18,7 @@ export default function Chat() {
       const reply = await chat(text, next);
       setMsgs((m) => [...m, { role: "assistant", content: reply }]);
     } catch {
-      setMsgs((m) => [...m, { role: "assistant", content: "(I couldn't reach you just now.)" }]);
+      setMsgs((m) => [...m, { role: "assistant", content: "(Connection hiccup — mind saying that again?)" }]);
     } finally {
       setSending(false);
       requestAnimationFrame(() => listRef.current?.scrollTo(0, listRef.current.scrollHeight));

@@ -119,7 +119,11 @@ class Session:
                 return "(Chat is unavailable — no API key configured.)"
             import anthropic
 
-            self._chat_client = anthropic.Anthropic(api_key=key, timeout=30.0, max_retries=1)
+            # Fail FAST and always answer inside the client's 45s abort window:
+            # with timeout=30 + a retry the server could take ~60s, finish after
+            # the browser gave up, and strand the reply as a ghost in chat_log
+            # (the AI then "remembers" saying something the human never saw).
+            self._chat_client = anthropic.Anthropic(api_key=key, timeout=30.0, max_retries=0)
             self._chat_system = build_system(self.db)
         try:
             reply = chat_reply(self._chat_client, self._chat_system, message, history,
@@ -134,6 +138,7 @@ class Session:
         turn = self.engine.state.turn_number if self.engine else 0
         self.chat_archive.append({"turn": turn, "role": "human", "content": message})
         self.chat_archive.append({"turn": turn, "role": "opponent", "content": reply})
+        self.checkpoint(reason="chat")  # conversations archive immediately, not on next action
         return reply
 
     def checkpoint(self, reason: str = "checkpoint") -> None:
