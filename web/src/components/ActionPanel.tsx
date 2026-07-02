@@ -1,4 +1,87 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+
 import type { AssistOption, AttackExplain, Candidate, FigureView, GameView } from "../api";
+
+// The panel floats over the board and can cover the very units being moved on
+// small screens — dragging its header repositions it; the offset persists.
+function useDraggablePanel() {
+  const [offset, setOffset] = useState<{ x: number; y: number }>(() => {
+    try {
+      const s = localStorage.getItem("clix-actions-offset");
+      if (s) return JSON.parse(s) as { x: number; y: number };
+    } catch {
+      /* ignore */
+    }
+    return { x: 0, y: 0 };
+  });
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const drag = useRef<{
+    sx: number;
+    sy: number;
+    ox: number;
+    oy: number;
+    base: { left: number; top: number; w: number };
+  } | null>(null);
+
+  // A remembered offset from a bigger monitor could park the panel off-screen
+  // on a laptop — snap back to home if it's not reachable.
+  useEffect(() => {
+    const r = rootRef.current?.getBoundingClientRect();
+    if (!r) return;
+    if (r.right < 60 || r.left > window.innerWidth - 60 || r.bottom < 40 || r.top > window.innerHeight - 40) {
+      setOffset({ x: 0, y: 0 });
+    }
+  }, []);
+
+  const onPointerDown = useCallback(
+    (e: React.PointerEvent) => {
+      if (e.button !== 0) return;
+      const root = rootRef.current;
+      if (!root) return;
+      const r = root.getBoundingClientRect();
+      drag.current = {
+        sx: e.clientX,
+        sy: e.clientY,
+        ox: offset.x,
+        oy: offset.y,
+        base: { left: r.left - offset.x, top: r.top - offset.y, w: r.width },
+      };
+      (e.target as Element).setPointerCapture?.(e.pointerId);
+      e.preventDefault();
+    },
+    [offset],
+  );
+
+  const onPointerMove = useCallback((e: React.PointerEvent) => {
+    const d = drag.current;
+    if (!d) return;
+    let x = d.ox + e.clientX - d.sx;
+    let y = d.oy + e.clientY - d.sy;
+    // Keep a grabbable strip of the header on screen.
+    x = Math.max(-(d.base.left + d.base.w) + 80, Math.min(window.innerWidth - d.base.left - 80, x));
+    y = Math.max(-d.base.top, Math.min(window.innerHeight - d.base.top - 40, y));
+    setOffset({ x, y });
+  }, []);
+
+  const onPointerUp = useCallback(() => {
+    if (!drag.current) return;
+    drag.current = null;
+    setOffset((o) => {
+      try {
+        localStorage.setItem("clix-actions-offset", JSON.stringify(o));
+      } catch {
+        /* ignore */
+      }
+      return o;
+    });
+  }, []);
+
+  return {
+    rootRef,
+    style: { transform: `translate(${offset.x}px, ${offset.y}px)` } as const,
+    headProps: { onPointerDown, onPointerMove, onPointerUp, title: "Drag to move this panel" },
+  };
+}
 
 interface PendingMove {
   dest: [number, number];
@@ -228,19 +311,20 @@ export default function ActionPanel({
   onRigidCancel,
 }: Props) {
   const isHumanTurn = view.meta.active_player === "human" && !view.meta.ended;
+  const { rootRef, style, headProps } = useDraggablePanel();
 
   if (view.meta.ended) {
     return (
-      <div className="action-panel">
-        <div className="action-head"><span>Actions</span></div>
+      <div className="action-panel" ref={rootRef} style={style}>
+        <div className="action-head" {...headProps}><span><span className="drag-grip">⠿</span>Actions</span></div>
         <div className="empty">Game over — winner: {view.meta.winner ?? "draw"}.</div>
       </div>
     );
   }
   if (!isHumanTurn) {
     return (
-      <div className="action-panel">
-        <div className="action-head"><span>Actions</span></div>
+      <div className="action-panel" ref={rootRef} style={style}>
+        <div className="action-head" {...headProps}><span><span className="drag-grip">⠿</span>Actions</span></div>
         <div className="empty">Opponent's turn.</div>
       </div>
     );
@@ -268,9 +352,9 @@ export default function ActionPanel({
   const armedIsAttack = armed != null && ATTACK_KINDS.has(armed.kind);
 
   return (
-    <div className="action-panel">
-      <div className="action-head">
-        <span>Actions</span>
+    <div className="action-panel" ref={rootRef} style={style}>
+      <div className="action-head" {...headProps}>
+        <span><span className="drag-grip">⠿</span>Actions</span>
         {selectedFig && <span className="fig-sub">{selectedFig.short_name}</span>}
       </div>
 

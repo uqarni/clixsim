@@ -647,6 +647,10 @@ button {
 }
 
 .action-head {
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -654,6 +658,14 @@ button {
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--text-dim);
+}
+.action-head:active {
+  cursor: grabbing;
+}
+.drag-grip {
+  margin-right: 6px;
+  opacity: 0.55;
+  letter-spacing: 0;
 }
 
 .action-groups {
