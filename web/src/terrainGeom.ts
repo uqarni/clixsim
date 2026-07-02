@@ -176,6 +176,12 @@ export function moveBlockReason(
   return null;
 }
 
+// Distance from a point to a segment — mirrors the engine's
+// segment_circle_intersects check (a mover's path crossing another base).
+export function pointToSegment(p: Pt, a: Pt, b: Pt): number {
+  return segDist(p, p, a, b);
+}
+
 // --- base-contact snapping ---------------------------------------------------
 // Shared by the battle drag and the deployment drag: pull a point onto the EXACT
 // contact ring of the nearest base when within `window` inches of it. Exactness

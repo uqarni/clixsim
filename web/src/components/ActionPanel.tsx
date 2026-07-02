@@ -34,6 +34,13 @@ interface Props {
   onFormationDefer: () => void;
   onFormationCancel: () => void;
   onFormationSubmit: () => void;
+  // Rigid formation move: drag the whole block as-is, then pivot it. Red when
+  // any member can't land at the reoriented destination.
+  onFormationRigid: () => void;
+  rigidPanel: { ok: boolean; reason: string | null; pending: boolean; speed: number; count: number } | null;
+  onRigidConfirm: () => void;
+  onRigidBack: () => void;
+  onRigidCancel: () => void;
   // Marquee / shift+click group selection: live formation legality + entry point.
   group: { uids: number[]; names: string[]; ok: boolean; reason: string | null } | null;
   onGroupMove: () => void;
@@ -214,6 +221,11 @@ export default function ActionPanel({
   onGroupClear,
   assist,
   onAssist,
+  onFormationRigid,
+  rigidPanel,
+  onRigidConfirm,
+  onRigidBack,
+  onRigidCancel,
 }: Props) {
   const isHumanTurn = view.meta.active_player === "human" && !view.meta.ended;
 
@@ -262,6 +274,41 @@ export default function ActionPanel({
         {selectedFig && <span className="fig-sub">{selectedFig.short_name}</span>}
       </div>
 
+      {/* Rigid formation move: drag the whole block, drop, pivot, confirm. */}
+      {rigidPanel && (
+        <div className="armed formation-stage">
+          <div className="armed-title">
+            Formation move · as one piece · speed {rigidPanel.speed}″
+          </div>
+          <div className="armed-stats">
+            {rigidPanel.pending
+              ? "Drag the handle to pivot the whole formation, then confirm. Red members can't land there."
+              : `Drag any of the ${rigidPanel.count} members — the whole formation moves with it, arrangement intact.`}
+          </div>
+          {rigidPanel.reason ? (
+            <div className="group-reason">✕ {rigidPanel.reason}</div>
+          ) : (
+            <div className="group-reason ok">✓ everyone can land — one action moves all {rigidPanel.count}</div>
+          )}
+          <div className="armed-btns">
+            {rigidPanel.pending && (
+              <button
+                className="btn primary"
+                onClick={onRigidConfirm}
+                disabled={busy || !rigidPanel.ok}
+                title={rigidPanel.ok ? "One action moves the whole formation" : rigidPanel.reason ?? ""}
+              >
+                Confirm formation move
+              </button>
+            )}
+            <button className="btn" onClick={onRigidBack} disabled={busy}>
+              {rigidPanel.pending ? "Re-drag" : "Place one at a time"}
+            </button>
+            <button className="btn" onClick={onRigidCancel} disabled={busy}>Cancel</button>
+          </div>
+        </div>
+      )}
+
       {/* Interactive formation move: place each member, then submit as one action */}
       {formation && (
         <div className="armed formation-stage">
@@ -292,6 +339,16 @@ export default function ActionPanel({
                         Place later
                       </button>
                     )}
+                    {formation.placedCount === 0 && (
+                      <button
+                        className="btn"
+                        onClick={onFormationRigid}
+                        disabled={busy}
+                        title="Drag the whole formation to a spot, then pivot it — keeps the arrangement as-is"
+                      >
+                        Move as one
+                      </button>
+                    )}
                   </>
                 )}
                 <button className="btn" onClick={onFormationBack} disabled={busy || (formation.placedCount === 0 && !pendingMove)}>
@@ -317,7 +374,7 @@ export default function ActionPanel({
 
       {/* Group selection (marquee / shift+click): move as a formation, or the
           exact reason the group can't. */}
-      {!formation && !pendingMove && !armed && group && (
+      {!formation && !rigidPanel && !pendingMove && !armed && group && (
         <div className="armed group-panel">
           <div className="armed-title">Group · {group.uids.length} selected</div>
           <div className="armed-stats group-names">{group.names.join(" · ")}</div>
@@ -345,7 +402,7 @@ export default function ActionPanel({
       )}
 
       {/* Pending free move: place -> aim -> confirm */}
-      {!formation && pendingMove && (
+      {!formation && !rigidPanel && pendingMove && (
         <div className="armed">
           <div className="armed-title">
             Move to ({pendingMove.dest[0].toFixed(1)}, {pendingMove.dest[1].toFixed(1)})
@@ -359,7 +416,7 @@ export default function ActionPanel({
       )}
 
       {/* Armed candidate (attack / support / etc.) */}
-      {!formation && !pendingMove && armed && (
+      {!formation && !rigidPanel && !pendingMove && armed && (
         <div className="armed">
           <div className="armed-title">{armed.label}</div>
           {armedIsAttack && explain ? <Breakdown x={explain} /> : annLine(armed) && <div className="armed-stats">{annLine(armed)}</div>}
@@ -371,7 +428,7 @@ export default function ActionPanel({
       )}
 
       {/* Candidate menu */}
-      {!formation && !pendingMove && !armed && !group && (
+      {!formation && !rigidPanel && !pendingMove && !armed && !group && (
         <div className="action-groups">
           {!selectedFig && formations.length === 0 && (
             <div className="empty">Select one of your figures, or drag it on the board to move.</div>

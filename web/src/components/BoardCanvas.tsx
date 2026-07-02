@@ -47,8 +47,10 @@ interface Props {
   // Friendly formation members of an armed formation — highlighted.
   armedMembers: number[];
   moveGhost: MoveGhost | null;
-  onMoveDrag: (dest: [number, number]) => void;
-  onMoveDrop: (dest: [number, number]) => void;
+  // The optional uid reports WHICH figure was grabbed (rigid formation drags
+  // accept any member; single-figure drags always pass the active figure).
+  onMoveDrag: (dest: [number, number], dragUid?: number) => void;
+  onMoveDrop: (dest: [number, number], dragUid?: number) => void;
   onMoveCancel: () => void;
   // A placed-but-uncommitted move whose facing is being aimed via the handle.
   pendingMove: PendingMove | null;
@@ -68,9 +70,15 @@ interface Props {
   // Interactive formation move: members already placed this staging (ghosts at
   // their destinations), figures to dim (they've been staged away), and the
   // formation speed that overrides the active figure's reach ring (P4-R13).
-  staged?: { dest: [number, number]; facing: number; radius: number }[] | null;
+  // `ok` colors a ghost green (legal) / red (can't land there); undefined keeps
+  // the neutral staged blue.
+  staged?: { dest: [number, number]; facing: number; radius: number; ok?: boolean; uid?: number }[] | null;
   dimUids?: number[];
   reachOverride?: number | null;
+  // Rigid formation move: drag ANY member to translate the whole block; once
+  // pending, a pivot handle at the block's centroid rotates it (like facing).
+  rigid?: { uids: number[]; pivot: [number, number]; theta: number; pending: boolean } | null;
+  onRigidPivot?: (theta: number) => void;
   // Deploy setup: shade the human's 3" starting band as the legal deploy zone.
   deployBand?: boolean;
   // Terrain draw tool: an in-progress hand-drawn polygon + click/move/undo hooks.
@@ -522,6 +530,8 @@ export default function BoardCanvas({
   staged = null,
   dimUids = [],
   reachOverride = null,
+  rigid = null,
+  onRigidPivot,
   deployBand = false,
   draw = null,
   onDrawPoint,
@@ -538,7 +548,7 @@ export default function BoardCanvas({
   const [marquee, setMarquee] = useState<{ a: [number, number]; b: [number, number] } | null>(null);
   const marqueeRef = useRef(false);
   const transformRef = useRef<Transform | null>(null);
-  const dragRef = useRef<{ moved: boolean } | null>(null);
+  const dragRef = useRef<{ moved: boolean; uid?: number } | null>(null);
   const faceRef = useRef<boolean>(false);
 
   useEffect(() => {
@@ -826,6 +836,33 @@ export default function BoardCanvas({
       ctx.restore();
     }
 
+    // Rigid formation pivot: a handle at the block's centroid — drag to rotate
+    // the whole formation (member ghosts and facings follow via `staged`).
+    if (rigid?.pending) {
+      const [gx, gy] = worldToScreen(t, rigid.pivot[0], rigid.pivot[1]);
+      const r = Math.max(6, 0.7 * t.scale);
+      const sf = -rigid.theta;
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(gx, gy, 5, 0, Math.PI * 2);
+      ctx.fillStyle = COLORS.select;
+      ctx.fill();
+      const hr = r * 2.4;
+      const hx = gx + Math.cos(sf) * hr;
+      const hy = gy + Math.sin(sf) * hr;
+      ctx.beginPath();
+      ctx.moveTo(gx, gy);
+      ctx.lineTo(hx, hy);
+      ctx.strokeStyle = COLORS.select;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(hx, hy, 6, 0, Math.PI * 2);
+      ctx.fillStyle = COLORS.select;
+      ctx.fill();
+      ctx.restore();
+    }
+
     // Armed-action highlights: red reticle on targets, blue ring on formation members.
     const armedSet = new Set(armedTargets);
     const memberSet = new Set(armedMembers);
@@ -923,10 +960,13 @@ export default function BoardCanvas({
         ctx.save();
         ctx.beginPath();
         ctx.arc(sx, sy, sr, 0, Math.PI * 2);
-        ctx.fillStyle = "rgba(124,156,255,0.45)";
+        // ok=true/false → live green/red legality (rigid move); undefined keeps
+        // the neutral staged blue (place-one-at-a-time ghosts).
+        ctx.fillStyle =
+          s.ok === false ? "rgba(224,90,90,0.4)" : s.ok === true ? "rgba(91,214,138,0.35)" : "rgba(124,156,255,0.45)";
         ctx.fill();
         ctx.setLineDash([4, 3]);
-        ctx.strokeStyle = COLORS.select;
+        ctx.strokeStyle = s.ok === false ? "#e05a5a" : s.ok === true ? "#5bd68a" : COLORS.select;
         ctx.lineWidth = 1.5;
         ctx.stroke();
         ctx.setLineDash([]);
@@ -1011,7 +1051,7 @@ export default function BoardCanvas({
         { ok: placingGhost.ok },
       );
     }
-  }, [view, size, selectedUid, hoverUid, activeUid, armedTargets, armedMembers, moveGhost, pendingMove, placementMode, placingGhost, spin, deployBand, draw, staged, dimUids, reachOverride, marquee]);
+  }, [view, size, selectedUid, hoverUid, activeUid, armedTargets, armedMembers, moveGhost, pendingMove, placementMode, placingGhost, spin, deployBand, draw, staged, dimUids, reachOverride, rigid, marquee]);
 
   // Combat-effect overlay: an independent rAF that draws fx on a top canvas,
   // reusing the transform the base render computed. Keyed on fxSeq.
@@ -1080,7 +1120,8 @@ export default function BoardCanvas({
     const t = transformRef.current!;
     const rect = canvas.getBoundingClientRect();
     const [wx, wy] = screenToWorld(t, clientX - rect.left, clientY - rect.top);
-    const r = view.figures.find((f) => f.uid === activeUid)?.base_radius ?? 0.55;
+    const uidForR = dragRef.current?.uid ?? activeUid;
+    const r = view.figures.find((f) => f.uid === uidForR)?.base_radius ?? 0.55;
     const { width, height } = view.meta.board;
     return [
       Math.max(r, Math.min(width - r, wx)),
@@ -1098,6 +1139,10 @@ export default function BoardCanvas({
     if (spin) {
       const s = view.figures.find((f) => f.uid === spin.uid);
       return { pos: spin.pos, radius: s?.base_radius ?? 0.55, facing: spin.facing, set: onSpinFace ?? (() => {}) };
+    }
+    if (rigid?.pending) {
+      // Pivot handle: rotates the whole formation about its centroid.
+      return { pos: rigid.pivot, radius: 0.7, facing: rigid.theta, set: onRigidPivot ?? (() => {}) };
     }
     return null;
   }
@@ -1133,16 +1178,29 @@ export default function BoardCanvas({
       if (e.button === 0 && onPlacePointer) onPlacePointer(worldPoint(e.clientX, e.clientY), true);
       return;
     }
-    if (pendingMove || spin) {
+    if (pendingMove || spin || rigid?.pending) {
       if (nearHandle(e.clientX, e.clientY)) {
         faceRef.current = true;
         (e.target as Element).setPointerCapture?.(e.pointerId);
       }
-      return; // a facing edit is pending — only the handle is interactive
+      return; // a facing/pivot edit is pending — only the handle is interactive
+    }
+    // Rigid mode: the displaced GHOSTS are grabbable too — after the block has
+    // moved, re-dragging it from where it now appears is the natural gesture.
+    if (rigid != null && staged) {
+      const w = worldPoint(e.clientX, e.clientY);
+      const g = staged.find(
+        (s) => s.uid != null && Math.hypot(w[0] - s.dest[0], w[1] - s.dest[1]) <= s.radius + 0.1,
+      );
+      if (g) {
+        dragRef.current = { moved: false, uid: g.uid };
+        (e.target as Element).setPointerCapture?.(e.pointerId);
+        return;
+      }
     }
     const hit = hitTest(e.clientX, e.clientY);
-    if (hit != null && hit === activeUid) {
-      dragRef.current = { moved: false };
+    if (hit != null && (hit === activeUid || (rigid != null && rigid.uids.includes(hit)))) {
+      dragRef.current = { moved: false, uid: hit };
       (e.target as Element).setPointerCapture?.(e.pointerId);
     } else if (hit == null && e.button === 0 && onMarquee) {
       // Drag on empty felt = marquee selection box (StarCraft-style).
@@ -1171,10 +1229,10 @@ export default function BoardCanvas({
       setMarquee((m) => (m ? { a: m.a, b: w } : m));
       return;
     }
-    if (pendingMove || spin) return;
+    if (pendingMove || spin || rigid?.pending) return;
     if (dragRef.current) {
       dragRef.current.moved = true;
-      onMoveDrag(clampedWorld(e.clientX, e.clientY));
+      onMoveDrag(clampedWorld(e.clientX, e.clientY), dragRef.current.uid);
     } else {
       setHoverUid(hitTest(e.clientX, e.clientY));
     }
@@ -1202,12 +1260,13 @@ export default function BoardCanvas({
       }
       return;
     }
-    if (pendingMove || spin) return;
+    if (pendingMove || spin || rigid?.pending) return;
     if (dragRef.current) {
       const moved = dragRef.current.moved;
-      dragRef.current = null;
-      if (moved) onMoveDrop(clampedWorld(e.clientX, e.clientY));
+      const uid = dragRef.current.uid;
+      if (moved) onMoveDrop(clampedWorld(e.clientX, e.clientY), uid);
       else onMoveCancel();
+      dragRef.current = null;
       return;
     }
     onSelect(hitTest(e.clientX, e.clientY), e.shiftKey);

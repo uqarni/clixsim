@@ -31,7 +31,7 @@ import NewGame, { type GameConfig } from "./components/NewGame";
 import OpponentPanel from "./components/OpponentPanel";
 import TerrainPlacement from "./components/TerrainPlacement";
 import TurnHud from "./components/TurnHud";
-import { effectiveSpeed, moveBlockReason, snapToContactRing } from "./terrainGeom";
+import { effectiveSpeed, moveBlockReason, pointToSegment, snapToContactRing } from "./terrainGeom";
 
 interface MoveGhost {
   dest: [number, number];
@@ -147,6 +147,19 @@ export default function App() {
     placed: { uid: number; dest: [number, number]; facing: number }[];
     speed: number; // slowest member's hindering-halved speed (P4-R13)
   } | null>(null);
+  // Rigid formation move: drag the WHOLE formation as one piece (the grabbed
+  // member follows the cursor), then pivot it around its centroid with a handle
+  // (member facings rotate with it). The ghost is red when ANY member's
+  // destination is illegal; submits the same member_dests intent as staging.
+  const [rigidMove, setRigidMove] = useState<{
+    uids: number[];
+    speed: number; // slowest member's hindering-halved speed (P4-R13)
+    origin: { uid: number; pos: [number, number]; facing: number; radius: number; name: string }[];
+    centroid: [number, number];
+    offset: [number, number]; // pivot displacement from the original centroid
+    theta: number; // rotation about the pivot (radians)
+    pending: boolean; // dropped — pivot handle showing, awaiting confirm
+  } | null>(null);
   const viewRef = useRef<GameView | null>(null);
   const oppStreamRef = useRef<EventSource | null>(null);
   // Set after onReady is defined; lets early effects trigger a server resync.
@@ -168,9 +181,11 @@ export default function App() {
   const stagingUid = formationStage ? (formationStage.uids[formationStage.placed.length] ?? null) : null;
   const activeUid = formationStage
     ? stagingUid
-    : selectedFig && selectedFig.owner === "human" && selectedFig.can_act && isHumanTurn
-      ? selectedFig.uid
-      : null;
+    : rigidMove
+      ? null // the whole formation drags via BoardCanvas's rigid mode
+      : selectedFig && selectedFig.owner === "human" && selectedFig.can_act && isHumanTurn
+        ? selectedFig.uid
+        : null;
   const canToggle = !!selectedFig && selectedFig.owner === "human" && isHumanTurn;
 
   useEffect(() => {
@@ -545,8 +560,81 @@ export default function App() {
     [view, formationStage],
   );
 
+  // Rigid-move ghost: every member's transformed destination + facing, checked
+  // against the SAME rules the engine's formation applier enforces (P4-R13
+  // speed, board bounds, path/end vs non-member bases, terrain). Red overall if
+  // any member fails; cohesion is preserved automatically by rigidity.
+  const rigidGhost = useMemo(() => {
+    if (!view || !rigidMove) return null;
+    const { origin, centroid, offset, theta, speed, uids } = rigidMove;
+    const cos = Math.cos(theta);
+    const sin = Math.sin(theta);
+    const pivot: [number, number] = [centroid[0] + offset[0], centroid[1] + offset[1]];
+    const memberIds = new Set(uids);
+    const others = view.figures.filter((f) => !f.eliminated && !memberIds.has(f.uid));
+    const { width, height } = view.meta.board;
+    let reason: string | null = null;
+    const members = origin.map((m) => {
+      const rx = m.pos[0] - centroid[0];
+      const ry = m.pos[1] - centroid[1];
+      const dest: [number, number] = [pivot[0] + rx * cos - ry * sin, pivot[1] + rx * sin + ry * cos];
+      const facing = m.facing + theta;
+      const dist = Math.hypot(dest[0] - m.pos[0], dest[1] - m.pos[1]);
+      let bad: string | null = null;
+      if (dest[0] < m.radius || dest[0] > width - m.radius || dest[1] < m.radius || dest[1] > height - m.radius) {
+        bad = `${m.name} would leave the board`;
+      } else if (dist > speed + 1e-9) {
+        bad = `${m.name} exceeds formation speed ${speed}″`;
+      } else {
+        const t = moveBlockReason(m.pos, dest, m.radius, view.terrain, false);
+        if (t) bad = `${m.name}: ${t}`;
+      }
+      if (!bad) {
+        for (const o of others) {
+          if (Math.hypot(dest[0] - o.pos[0], dest[1] - o.pos[1]) < m.radius + o.base_radius - 0.02) {
+            bad = `${m.name} would end on ${o.short_name}'s base`;
+            break;
+          }
+          if (dist > 1e-9 && pointToSegment(o.pos, m.pos, dest) <= o.base_radius + 1e-6) {
+            bad = `${m.name}'s path crosses ${o.short_name}'s base`;
+            break;
+          }
+        }
+      }
+      if (bad && !reason) reason = bad;
+      return { uid: m.uid, dest, facing, radius: m.radius, ok: !bad };
+    });
+    return { members, pivot, ok: reason === null, reason };
+  }, [view, rigidMove]);
+
+  // Drag: the grabbed member follows the cursor — pivot = cursor − R(θ)·(p_g − c).
+  const onRigidDrag = useCallback((dest: [number, number], uid: number | undefined, drop: boolean) => {
+    setRigidMove((rm) => {
+      if (!rm) return rm;
+      const g = rm.origin.find((m) => m.uid === uid) ?? rm.origin[0];
+      const cos = Math.cos(rm.theta);
+      const sin = Math.sin(rm.theta);
+      const rx = g.pos[0] - rm.centroid[0];
+      const ry = g.pos[1] - rm.centroid[1];
+      const pivot: [number, number] = [dest[0] - (rx * cos - ry * sin), dest[1] - (rx * sin + ry * cos)];
+      return {
+        ...rm,
+        offset: [pivot[0] - rm.centroid[0], pivot[1] - rm.centroid[1]],
+        pending: drop ? true : rm.pending,
+      };
+    });
+  }, []);
+
+  const onRigidPivot = useCallback((theta: number) => {
+    setRigidMove((rm) => (rm ? { ...rm, theta } : rm));
+  }, []);
+
   const onMoveDrag = useCallback(
-    (dest: [number, number]) => {
+    (dest: [number, number], dragUid?: number) => {
+      if (rigidMove) {
+        onRigidDrag(dest, dragUid, false);
+        return;
+      }
       const fig = view?.figures.find((f) => f.uid === activeUid);
       if (!fig) return;
       // Snap DURING the drag so the ghost visibly sticks to nearby bases; when it
@@ -560,11 +648,15 @@ export default function App() {
         setMoveGhost(ghostFor(fig, dest));
       }
     },
-    [view, activeUid, ghostFor, snapToBase],
+    [view, activeUid, ghostFor, snapToBase, rigidMove, onRigidDrag],
   );
 
   const onMoveDrop = useCallback(
-    (dest: [number, number]) => {
+    (dest: [number, number], dragUid?: number) => {
+      if (rigidMove) {
+        onRigidDrag(dest, dragUid, true); // drop → pivot handle appears
+        return;
+      }
       const fig = view?.figures.find((f) => f.uid === activeUid);
       setMoveGhost(null);
       if (!fig) return;
@@ -577,7 +669,7 @@ export default function App() {
       }
       setPendingMove({ dest: g.dest, facing: g.facing });
     },
-    [view, activeUid, ghostFor, snapToBase, log],
+    [view, activeUid, ghostFor, snapToBase, log, rigidMove, onRigidDrag],
   );
 
   const confirmMove = useCallback(async () => {
@@ -801,6 +893,81 @@ export default function App() {
     setPendingMove(null);
   }, []);
 
+  // --- rigid formation move (drag the whole block, then pivot) --------------
+  const startRigidMove = useCallback(() => {
+    if (!view || !formationStage || busy) return;
+    const origin = formationStage.uids.map((u) => {
+      const f = view.figures.find((x) => x.uid === u)!;
+      return {
+        uid: u,
+        pos: f.pos,
+        facing: (f.facing_deg * Math.PI) / 180,
+        radius: f.base_radius,
+        name: f.short_name,
+      };
+    });
+    const centroid: [number, number] = [
+      origin.reduce((s, m) => s + m.pos[0], 0) / origin.length,
+      origin.reduce((s, m) => s + m.pos[1], 0) / origin.length,
+    ];
+    setPendingMove(null);
+    setMoveGhost(null);
+    setFormationStage(null);
+    setRigidMove({
+      uids: origin.map((m) => m.uid),
+      speed: formationStage.speed,
+      origin,
+      centroid,
+      offset: [0, 0],
+      theta: 0,
+      pending: false,
+    });
+  }, [view, formationStage, busy]);
+
+  const confirmRigid = useCallback(async () => {
+    if (!rigidMove || !rigidGhost || !rigidGhost.ok || busy) return;
+    setBusy(true);
+    try {
+      const ms = rigidGhost.members;
+      const res = await applyIntent({
+        kind: "move",
+        figure_uid: ms[0].uid,
+        dest: ms[0].dest,
+        facing: ms[0].facing,
+        free: false,
+        formation_uids: ms.map((m) => m.uid),
+        member_dests: ms.map((m) => m.dest),
+        member_facings: ms.map((m) => m.facing),
+      });
+      handleApply(res);
+      if (res.ok) {
+        setRigidMove(null);
+      } else {
+        const incurable = ["already_acted", "no_actions", "pushed_out", "bad_formation", "game_over"];
+        if (incurable.includes(res.reason ?? "")) setRigidMove(null);
+      }
+    } catch (err) {
+      log([{ type: "error", summary: `Formation move failed: ${String(err)}` }]);
+    } finally {
+      setBusy(false);
+    }
+  }, [rigidMove, rigidGhost, busy, handleApply, log]);
+
+  const rigidBack = useCallback(() => {
+    if (!rigidMove) return;
+    if (rigidMove.pending) {
+      // Un-pend: hide the pivot handle and keep dragging the block.
+      setRigidMove((rm) => (rm ? { ...rm, pending: false } : rm));
+      return;
+    }
+    // Back to the place-one-at-a-time flow.
+    const uids = rigidMove.uids;
+    setRigidMove(null);
+    startFormationStaging(uids);
+  }, [rigidMove, startFormationStaging]);
+
+  const cancelRigid = useCallback(() => setRigidMove(null), []);
+
   const formationBack = useCallback(() => {
     if (pendingMove) {
       setPendingMove(null);
@@ -1023,15 +1190,40 @@ export default function App() {
               spin={spinGhost}
               onSpinFace={onSpinFace}
               staged={
-                formationStage
-                  ? formationStage.placed.map((p) => ({
-                      dest: p.dest,
-                      facing: p.facing,
-                      radius: view.figures.find((f) => f.uid === p.uid)?.base_radius ?? 0.55,
+                rigidGhost
+                  ? rigidGhost.members.map((m) => ({
+                      dest: m.dest,
+                      facing: m.facing,
+                      radius: m.radius,
+                      ok: m.ok,
+                      uid: m.uid,
                     }))
+                  : formationStage
+                    ? formationStage.placed.map((p) => ({
+                        dest: p.dest,
+                        facing: p.facing,
+                        radius: view.figures.find((f) => f.uid === p.uid)?.base_radius ?? 0.55,
+                      }))
+                    : null
+              }
+              dimUids={
+                rigidMove
+                  ? rigidMove.uids
+                  : formationStage
+                    ? formationStage.placed.map((p) => p.uid)
+                    : []
+              }
+              rigid={
+                rigidMove && rigidGhost
+                  ? {
+                      uids: rigidMove.uids,
+                      pivot: rigidGhost.pivot,
+                      theta: rigidMove.theta,
+                      pending: rigidMove.pending,
+                    }
                   : null
               }
-              dimUids={formationStage ? formationStage.placed.map((p) => p.uid) : []}
+              onRigidPivot={onRigidPivot}
               reachOverride={formationStage ? formationStage.speed : null}
             />
             {freeSpin && spinFig && (
@@ -1084,6 +1276,21 @@ export default function App() {
               group={groupInfo}
               assist={assistOptions}
               onAssist={onAssistAttack}
+              onFormationRigid={startRigidMove}
+              rigidPanel={
+                rigidMove && rigidGhost
+                  ? {
+                      ok: rigidGhost.ok,
+                      reason: rigidGhost.reason,
+                      pending: rigidMove.pending,
+                      speed: rigidMove.speed,
+                      count: rigidMove.uids.length,
+                    }
+                  : null
+              }
+              onRigidConfirm={confirmRigid}
+              onRigidBack={rigidBack}
+              onRigidCancel={cancelRigid}
               onGroupMove={() => groupInfo?.ok && startFormationStaging(groupInfo.uids)}
               onGroupClear={() => {
                 setSelection([]);
