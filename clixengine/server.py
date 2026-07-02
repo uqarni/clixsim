@@ -144,12 +144,14 @@ class Session:
         archive_game(self.engine, opponent_kind=kind, chat=self.chat_archive,
                      ai_notes=self.ai_notes_log, reason=reason)
 
-    def record_opponent_notes(self) -> None:
-        """Bank this opponent turn's action rationales into the archive feed."""
+    def record_opponent_notes(self, turn: int) -> None:
+        """Bank this opponent turn's action rationales into the archive feed.
+        ``turn`` is snapshotted when the stream STARTS — stream_turn calls
+        end_turn() before finishing, so reading turn_number here would label
+        every completed turn's notes with the NEXT turn."""
         if self.engine is None or not self.last_turn_notes:
             return
-        self.ai_notes_log.append({"turn": self.engine.state.turn_number,
-                                  "notes": list(self.last_turn_notes)})
+        self.ai_notes_log.append({"turn": turn, "notes": list(self.last_turn_notes)})
         self.checkpoint(reason="opponent_turn")
 
     def start_game(self, human_army: Army, llm_army: Army, build_total: int,
@@ -780,6 +782,7 @@ def opponent_turn_stream():
             return
         try:
             SESSION.last_turn_notes = []  # fresh notes for this opponent turn
+            notes_turn = eng.state.turn_number  # before stream_turn's end_turn()
             for step in SESSION.opponent.stream_turn(eng, table_talk=SESSION.chat_log[-8:]):
                 SESSION.last_turn_notes.append(f"{step['summary']} — {step['reasoning']}")
                 yield sse({"type": "action", "summary": step["summary"],
@@ -799,11 +802,11 @@ def opponent_turn_stream():
                         and eng.state.opposing_contacts(g)
                     ]
                     if spinners:
-                        SESSION.record_opponent_notes()
+                        SESSION.record_opponent_notes(notes_turn)
                         yield sse({"type": "free_spin", "spinners": spinners,
                                    "by": offer.get("by"), "view": game_view(eng)})
                         return
-            SESSION.record_opponent_notes()
+            SESSION.record_opponent_notes(notes_turn)
             yield sse({"type": "done", "view": game_view(eng)})
         except Exception as e:
             yield sse({"type": "error", "message": str(e), "view": game_view(eng)})

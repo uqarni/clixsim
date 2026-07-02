@@ -16,8 +16,15 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
+import uuid
 from pathlib import Path
+
+# Serializes writers within this process (the opponent-stream thread and a
+# request handler can checkpoint the same game concurrently); the unique tmp
+# name guards the rename against any writer the lock doesn't cover.
+_WRITE_LOCK = threading.Lock()
 
 
 def history_dir() -> Path:
@@ -77,10 +84,14 @@ def archive_game(
         d = history_dir()
         d.mkdir(parents=True, exist_ok=True)
         path = d / f"{game_id}.json"
-        tmp = d / f".{game_id}.json.tmp"
-        with open(tmp, "w") as fh:
-            json.dump(record, fh, default=str)
-        tmp.replace(path)
+        tmp = d / f".{game_id}.{uuid.uuid4().hex}.tmp"
+        with _WRITE_LOCK:
+            try:
+                with open(tmp, "w") as fh:
+                    json.dump(record, fh, default=str)
+                tmp.replace(path)
+            finally:
+                tmp.unlink(missing_ok=True)  # clean up if the dump/rename failed
         return path
     except Exception:
         return None

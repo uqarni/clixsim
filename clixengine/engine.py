@@ -378,7 +378,10 @@ class Engine:
         self.state.terrain.append(piece)
         self.state.terrain_budget[owner] = self.state.terrain_budget.get(owner, 0) - 1
         label = terr.POLYGON_TYPES[type_key]["label"]
-        ev = self.log.emit("place_terrain", owner=owner, kind=type_key, id=piece.id, custom=True)
+        # Record the vertices: the archive's deterministic replay (seed + events)
+        # must be able to reconstruct hand-drawn pieces, not just templates.
+        ev = self.log.emit("place_terrain", owner=owner, kind=type_key, id=piece.id, custom=True,
+                           polygon=[[p.x, p.y] for p in poly])
         self._advance_terrain_turn(owner)
         return Result("place_terrain", [ev], f"{owner} places {label}")
 
@@ -1736,6 +1739,9 @@ class Engine:
         assist, +1 rear)? Reuses the appliers' own checks, so a legal option
         here is precisely an intent the engine will accept — and an illegal
         one carries the applier's exact reason for the client to display."""
+        # apply() gates ended/phase ABOVE the appliers this reuses — mirror it.
+        if self.state.ended or self.state.phase != "battle":
+            return []
         figs = [self.state.figures.get(u) for u in uids]
         if not uids or any(f is None or not f.is_alive for f in figs):
             return []

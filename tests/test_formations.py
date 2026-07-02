@@ -299,3 +299,23 @@ def test_ranged_formation_candidates_cover_every_visible_target(db):
     )
     cands = [c for c in generate_formation_candidates(e, "human") if c.kind == "ranged_formation"]
     assert {c.annotation["target"] for c in cands} == {3, 4}
+
+
+def test_formation_attack_options_gated_on_phase_and_ended(db):
+    """The options mirror apply()'s ended gate and only exist in battle —
+    an ok:true option must ALWAYS be an intent the applier accepts."""
+    e = build_engine(
+        db,
+        [
+            ("human", "Chaos Mage", (10, 10), math.pi / 2, 0),
+            ("human", "Chaos Mage", (11.1, 10), math.pi / 2, 0),
+            ("human", "Chaos Mage", (12.2, 10), math.pi / 2, 0),
+            ("llm", "Werebear", (11.1, 16), -math.pi / 2, 0),
+        ],
+    )
+    assert any(o["ok"] for o in e.formation_attack_options([0, 1, 2]))
+    e.state.phase = "deploy"
+    assert e.formation_attack_options([0, 1, 2]) == []
+    e.state.phase = "battle"
+    e.state.ended = True
+    assert e.formation_attack_options([0, 1, 2]) == []

@@ -748,10 +748,13 @@ export default function App() {
   const [assistOptions, setAssistOptions] = useState<AssistOption[]>([]);
   useEffect(() => {
     let stale = false;
+    // Clear FIRST: the previous group's buttons must never survive the fetch
+    // round-trip — a click on them would fire that group's attack, and the
+    // engine would rightly accept it.
+    setAssistOptions([]);
     const battle = !!view && view.meta.phase === "battle" && !view.meta.ended &&
       view.meta.active_player === "human";
     if (!battle || selection.length < 2 || selection.length > 5 || formationStage) {
-      setAssistOptions([]);
       return;
     }
     getFormationAttackOptions(selection)
@@ -762,6 +765,9 @@ export default function App() {
 
   const onAssistAttack = useCallback(
     (o: AssistOption) => {
+      // Belt-and-braces vs stale render: the option must match the live selection.
+      const sel = new Set(selection);
+      if (o.members.length !== sel.size || !o.members.every((u) => sel.has(u))) return;
       runIntent(
         o.kind === "ranged_formation"
           ? { kind: "ranged", attacker_uid: o.primary, target_uids: [o.target],
@@ -770,7 +776,7 @@ export default function App() {
               formation_uids: o.members },
       );
     },
-    [runIntent],
+    [runIntent, selection],
   );
 
   // Defer the member being placed to the end of the queue, so arrangements that

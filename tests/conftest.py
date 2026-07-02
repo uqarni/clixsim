@@ -16,6 +16,13 @@ from clixengine.geometry import Vec
 from clixengine.state import Board, Figure, GameState
 
 
+@pytest.fixture(autouse=True)
+def _isolated_history(monkeypatch, tmp_path):
+    """NEVER let tests write into the user's real all-time game archive
+    (~/.clixengine/history) — server tests start real games, which checkpoint."""
+    monkeypatch.setenv("CLIX_HISTORY_DIR", str(tmp_path / "clix-history"))
+
+
 @pytest.fixture(scope="session")
 def db():
     return load_db()

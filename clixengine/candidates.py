@@ -611,8 +611,10 @@ def _make_ranged_formations(engine: Engine, cluster: list[Figure], cands: list[C
         if not all(engine.line_of_fire(f.uid, target.uid)[0] for f in cluster):
             continue
         # Score against the defense the engine actually resolves against (Battle
-        # Armor / Defend via effective_defense; Toughness via damage_after_defenses).
-        eff_def = ab.effective_defense(engine.state, target, "ranged")
+        # Armor / Defend via effective_defense; hindering terrain via the mod;
+        # Toughness via damage_after_defenses).
+        eff_def = ab.effective_defense(engine.state, target, "ranged",
+                                       engine.terrain_defense_mod(primary, target, "ranged"))
         hit = hit_probability(atk, eff_def)
         per_hit = ab.damage_after_defenses(target, primary.damage, "ranged", False)
         cands.append(Candidate(
@@ -642,7 +644,8 @@ def _make_close_formations(engine: Engine, members: list[Figure], cands: list[Ca
             in_rear_arc(t.position, t.facing, f.position, t.arc_half_angle) for f in chosen
         ) else 0
         atk = primary.attack + (n - 1) + rear
-        eff_def = ab.effective_defense(engine.state, t, "close")
+        eff_def = ab.effective_defense(engine.state, t, "close",
+                                       engine.terrain_defense_mod(primary, t, "close"))
         hit = hit_probability(atk, eff_def)
         per_hit = ab.damage_after_defenses(t, primary.damage, "close", False)
         uids = tuple(f.uid for f in chosen)
