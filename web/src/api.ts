@@ -89,6 +89,7 @@ export interface AttackExplain {
 }
 
 export interface GameMeta {
+  game_id: string; // identity for client/server sync detection
   turn: number;
   active_player: Owner;
   first_player: string;

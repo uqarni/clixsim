@@ -147,6 +147,8 @@ export default function App() {
   } | null>(null);
   const viewRef = useRef<GameView | null>(null);
   const oppStreamRef = useRef<EventSource | null>(null);
+  // Set after onReady is defined; lets early effects trigger a server resync.
+  const resyncRef = useRef<() => void>(() => {});
 
   const log = useCallback((items: GameEvent[]) => {
     if (items.length === 0) return;
@@ -314,6 +316,9 @@ export default function App() {
         if (cancelled) return;
         setCandidates([]);
         setHints([]);
+        // A failing candidates fetch for a figure we can see usually means the
+        // SERVER holds a different game (it restarted) — detect and resync.
+        resyncRef.current();
       });
     return () => {
       cancelled = true;
@@ -888,6 +893,33 @@ export default function App() {
     setView(null);
     setPhase("menu");
   }, []);
+
+  // Client/server desync detection: if the server's game_id differs from the one
+  // this tab is rendering (a restart replaced the in-memory game), announce it
+  // and adopt the server's game instead of showing dead controls.
+  const resyncingRef = useRef(false);
+  const resyncFromServer = useCallback(async () => {
+    if (resyncingRef.current) return;
+    resyncingRef.current = true;
+    try {
+      const server = await getState();
+      if (viewRef.current && server.meta.game_id !== viewRef.current.meta.game_id) {
+        log([{ type: "info", summary: "The server restarted with a different game — synced to it. Start a new game from the menu if this isn't yours." }]);
+        onReady(server);
+      } else {
+        setView(server); // same game — just refresh the stale view
+      }
+    } catch {
+      /* server unreachable — keep the local view */
+    } finally {
+      setTimeout(() => {
+        resyncingRef.current = false;
+      }, 1500);
+    }
+  }, [log, onReady]);
+  useEffect(() => {
+    resyncRef.current = resyncFromServer;
+  }, [resyncFromServer]);
 
   const onResume = useCallback(async () => {
     try {

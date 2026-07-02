@@ -133,6 +133,7 @@ def game_view(engine: Engine) -> dict:
     remaining = engine._actions_remaining()
     return {
         "meta": {
+            "game_id": getattr(engine, "game_id", ""),
             "turn": state.turn_number,
             "active_player": state.active_player,
             "first_player": state.first_player,

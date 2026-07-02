@@ -112,6 +112,7 @@ function figure(f: Omit<FigureView, "speed" | "attack" | "defense" | "damage" | 
 
 export const MOCK_VIEW: GameView = {
   meta: {
+    game_id: "mock",
     turn: 4,
     active_player: "human",
     first_player: "human",

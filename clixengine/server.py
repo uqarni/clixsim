@@ -11,10 +11,12 @@ game session lives in-process (single-player local app).
 from __future__ import annotations
 
 import json
+import pickle
 import threading
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -58,11 +60,13 @@ from .view import game_view, terrain_template_view
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
-    # Start with a default game so the client's initial GET /api/state works
-    # without an explicit new-game round-trip (single-player local app).
-    if SESSION.engine is None:
+    # Restore the previous session if one was saved (a deploy/restart must not
+    # eat an in-progress game); otherwise start a default game so the client's
+    # initial GET /api/state works without an explicit new-game round-trip.
+    if SESSION.engine is None and not SESSION.restore():
         SESSION.new_game(points=200, seed=1)
     yield
+    SESSION.persist()  # graceful shutdown (SIGTERM) saves the live game
 
 
 app = FastAPI(title="Clix Engine", lifespan=_lifespan)
@@ -120,6 +124,9 @@ class Session:
         self.engine = build_game(human_army, llm_army, build_total=build_total, seed=seed,
                                  board_size=board, db=self.db, with_terrain=with_terrain,
                                  terrain_per_player=terrain_per_player, with_deploy=with_deploy)
+        # Identity for client/server sync detection: a tab rendering a DIFFERENT
+        # game than the server holds (e.g. after a restart) can notice and resync.
+        self.engine.game_id = uuid4().hex
         if opponent == "heuristic":
             self.opponent = HeuristicAI()
         else:
@@ -137,6 +144,40 @@ class Session:
             raise HTTPException(409, "no active game — POST /api/new_game first")
         return self.engine
 
+    # -- persistence: a restart (deploy) must not eat an in-progress game -----
+    def persist(self) -> None:
+        """Best-effort snapshot of the live game on shutdown."""
+        if self.engine is None:
+            return
+        try:
+            _SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+            kind = "heuristic" if isinstance(self.opponent, HeuristicAI) else "llm"
+            with open(_SESSION_FILE, "wb") as fh:
+                pickle.dump({"engine": self.engine, "opponent": kind}, fh)
+        except Exception:
+            pass  # persistence is a convenience — never block shutdown
+
+    def restore(self) -> bool:
+        """Reload the last session; False (fresh game) on any mismatch/error —
+        e.g. schema drift across deploys."""
+        try:
+            with open(_SESSION_FILE, "rb") as fh:
+                data = pickle.load(fh)
+            eng = data["engine"]
+            eng.game_id = getattr(eng, "game_id", "") or uuid4().hex
+            _ = game_view(eng)  # smoke-test the restored object against current code
+            self.engine = eng
+            if data.get("opponent") == "heuristic":
+                self.opponent = HeuristicAI()
+            else:
+                llm = LLMOpponent()
+                self.opponent = llm if llm.available else HeuristicAI()
+            return True
+        except Exception:
+            return False
+
+
+_SESSION_FILE = Path(__file__).resolve().parent.parent / ".claude" / "session.pkl"
 
 SESSION = Session()
 
