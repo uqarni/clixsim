@@ -180,31 +180,75 @@ export function moveBlockReason(
 // Shared by the battle drag and the deployment drag: pull a point onto the EXACT
 // contact ring of the nearest base when within `window` inches of it. Exactness
 // matters — engine contact tolerance is 0.02", so eyeballed gaps don't count.
+//
+// Two-tangent "pockets": when the cursor is near the notch where the mover would
+// touch TWO bases at once (the intersection of their contact rings), snap there —
+// `uid2` reports the second contact. A pocket only yields to a single-ring snap
+// when the cursor is decisively closer to the lone ring (POCKET_EDGE), so nestling
+// a third figure against a touching pair doesn't take pixel-perfect dropping.
+const POCKET_EDGE = 0.35;
+
 export function snapToContactRing(
   moverRadius: number,
   dest: Pt,
   targets: { pos: Pt; radius: number; uid: number }[],
   window = 0.9,
-): { point: Pt; uid: number } | null {
-  let best: { point: Pt; uid: number } | null = null;
-  let bestErr = Infinity;
+): { point: Pt; uid: number; uid2?: number } | null {
+  const clear = (cp: Pt, skipA: number, skipB: number) =>
+    !targets.some(
+      (o) =>
+        o.uid !== skipA &&
+        o.uid !== skipB &&
+        Math.hypot(cp[0] - o.pos[0], cp[1] - o.pos[1]) < moverRadius + o.radius - 0.02,
+    );
+
+  let single: { point: Pt; uid: number } | null = null;
+  let singleErr = Infinity;
   for (const t of targets) {
     const dx = dest[0] - t.pos[0];
     const dy = dest[1] - t.pos[1];
     const dlen = Math.hypot(dx, dy) || 1e-9;
     const gap = moverRadius + t.radius;
     const err = Math.abs(dlen - gap);
-    if (err > window || err >= bestErr) continue;
+    if (err > window || err >= singleErr) continue;
     const cp: Pt = [t.pos[0] + (dx / dlen) * gap, t.pos[1] + (dy / dlen) * gap];
-    const overlaps = targets.some(
-      (o) => o.uid !== t.uid && Math.hypot(cp[0] - o.pos[0], cp[1] - o.pos[1]) < moverRadius + o.radius - 0.02,
-    );
-    if (!overlaps) {
-      best = { point: cp, uid: t.uid };
-      bestErr = err;
+    if (clear(cp, t.uid, t.uid)) {
+      single = { point: cp, uid: t.uid };
+      singleErr = err;
     }
   }
-  return best;
+
+  let pocket: { point: Pt; uid: number; uid2: number } | null = null;
+  let pocketErr = Infinity;
+  for (let i = 0; i < targets.length; i++) {
+    for (let j = i + 1; j < targets.length; j++) {
+      const a = targets[i];
+      const b = targets[j];
+      const ra = moverRadius + a.radius;
+      const rb = moverRadius + b.radius;
+      const dx = b.pos[0] - a.pos[0];
+      const dy = b.pos[1] - a.pos[1];
+      const d = Math.hypot(dx, dy);
+      // Contact rings must intersect for a both-touching spot to exist.
+      if (d < 1e-9 || d > ra + rb || d < Math.abs(ra - rb)) continue;
+      const along = (ra * ra - rb * rb + d * d) / (2 * d);
+      const h = Math.sqrt(Math.max(0, ra * ra - along * along));
+      const mx = a.pos[0] + (dx / d) * along;
+      const my = a.pos[1] + (dy / d) * along;
+      for (const s of h > 1e-9 ? [1, -1] : [1]) {
+        const cp: Pt = [mx + s * (-dy / d) * h, my + s * (dx / d) * h];
+        const err = Math.hypot(dest[0] - cp[0], dest[1] - cp[1]);
+        if (err > window || err >= pocketErr) continue;
+        if (clear(cp, a.uid, b.uid)) {
+          pocket = { point: cp, uid: a.uid, uid2: b.uid };
+          pocketErr = err;
+        }
+      }
+    }
+  }
+
+  if (pocket && (!single || pocketErr - singleErr <= POCKET_EDGE)) return pocket;
+  return single;
 }
 
 // --- line-of-fire mirror (clixengine/engine.line_of_fire) --------------------

@@ -530,7 +530,18 @@ export default function App() {
       const targets = view.figures
         .filter((nf) => !nf.eliminated && nf.uid !== fig.uid)
         .map((nf) => ({ pos: stagedByUid.get(nf.uid) ?? nf.pos, radius: nf.base_radius, uid: nf.uid }));
-      return snapToContactRing(fig.base_radius, dest, targets);
+      const snapped = snapToContactRing(fig.base_radius, dest, targets);
+      if (!snapped) return null;
+      // Pocket snap touching two bases: report the ENEMY contact as primary so
+      // the charge auto-aim (ghostFor's faceUid) targets it, not a friend.
+      if (snapped.uid2 != null) {
+        const isEnemy = (uid: number) =>
+          view.figures.some((f) => f.uid === uid && f.owner !== fig.owner && !f.eliminated);
+        if (!isEnemy(snapped.uid) && isEnemy(snapped.uid2)) {
+          return { point: snapped.point, uid: snapped.uid2 };
+        }
+      }
+      return { point: snapped.point, uid: snapped.uid };
     },
     [view, formationStage],
   );
