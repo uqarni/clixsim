@@ -581,7 +581,21 @@ class Engine:
                 else:
                     clear, reason = self.line_of_fire(figure.uid, e.uid)
                     if not clear:
-                        hints.append(f"Can't shoot {e.short_name}: {reason} (P4-R24).")
+                        # A blocked PLAIN shot isn't the end: Magic Blast's line of
+                        # fire cannot be blocked (§Magic Blast) — point at it when
+                        # the blast is actually available against this target.
+                        blast_ok = (
+                            ab.MAGIC_BLAST in aids
+                            and ab.MAGIC_IMMUNITY not in e.active_ability_ids()
+                            and not any(
+                                in_base_contact(e.position, e.base_radius,
+                                                fr.position, fr.base_radius)
+                                for fr in friends
+                            )
+                        )
+                        extra = (" Your Magic Blast can still hit it — its line of "
+                                 "fire can't be blocked." if blast_ok else "")
+                        hints.append(f"Can't shoot {e.short_name}: {reason} (P4-R24).{extra}")
             if len(hints) >= 3:
                 break
 

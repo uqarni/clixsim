@@ -226,6 +226,7 @@ export interface LofFigure {
   elevation: number;
   eliminated: boolean;
   short_name: string;
+  active_abilities?: { name: string }[];
 }
 
 export interface LofVerdict {
@@ -267,19 +268,33 @@ export function lofBlocker(
   if (dist > a.range + 1e-9) {
     return { clear: false, reason: `beyond range (${dist.toFixed(1)}″ of ${a.range}″)` };
   }
+  // Magic Blast ignores blocked lines of fire (§Magic Blast) — when the plain
+  // shot is blocked but the blast is available, the verdict should say so.
+  const blastOk =
+    (a.active_abilities?.some((x) => x.name === "Magic Blast") ?? false) &&
+    !(t.active_abilities?.some((x) => x.name === "Magic Immunity") ?? false) &&
+    !figures.some(
+      (o) =>
+        !o.eliminated &&
+        o.owner === a.owner &&
+        o.uid !== a.uid &&
+        Math.hypot(tp[0] - (o.pos as Pt)[0], tp[1] - (o.pos as Pt)[1]) <=
+          t.base_radius + o.base_radius + 0.02,
+    );
+  const blastNote = blastOk ? " — Magic Blast still hits (unblockable)" : "";
   const bothElev = a.elevation === 1 && t.elevation === 1;
   for (const piece of terrain) {
     const poly = piece.polygon as Pt[];
     if (!segmentCrossesPoly(ap, tp, poly)) continue;
     if (piece.kind === "blocking" && piece.water === null) {
-      return { clear: false, reason: "blocked by blocking terrain", terrainId: piece.id };
+      return { clear: false, reason: `blocked by blocking terrain${blastNote}`, terrainId: piece.id };
     }
     if (piece.elevated) {
       if (bothElev) continue; // both up high — see over the feature
       const standsOn =
         (a.elevation === 1 && pointInPoly(ap, poly)) || (t.elevation === 1 && pointInPoly(tp, poly));
       if (standsOn) continue; // your own hill never blocks your shot
-      return { clear: false, reason: "blocked by elevated terrain", terrainId: piece.id };
+      return { clear: false, reason: `blocked by elevated terrain${blastNote}`, terrainId: piece.id };
     }
   }
   for (const o of figures) {
@@ -287,7 +302,7 @@ export function lofBlocker(
     const op = o.pos as Pt;
     if (bothElev && o.elevation === 0) continue; // shot passes over ground bases
     if (segDist(ap, tp, op, op) <= o.base_radius + 1e-6) {
-      return { clear: false, reason: `blocked by ${o.short_name}'s base`, figUid: o.uid };
+      return { clear: false, reason: `blocked by ${o.short_name}'s base${blastNote}`, figUid: o.uid };
     }
   }
   for (const o of figures) {
