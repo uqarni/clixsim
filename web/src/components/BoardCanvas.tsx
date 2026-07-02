@@ -37,7 +37,9 @@ export type Fx =
 interface Props {
   view: GameView;
   selectedUid: number | null;
-  onSelect: (uid: number | null) => void;
+  onSelect: (uid: number | null, additive?: boolean) => void;
+  // Marquee (drag a box on empty felt) selecting the player's figures inside it.
+  onMarquee?: (a: [number, number], b: [number, number]) => void;
   // The selected friendly figure that may be dragged to move (null if none).
   activeUid: number | null;
   // Figures currently targeted by an armed action — highlighted as reticles.
@@ -452,6 +454,7 @@ export default function BoardCanvas({
   view,
   selectedUid,
   onSelect,
+  onMarquee,
   activeUid,
   armedTargets,
   armedMembers,
@@ -484,6 +487,9 @@ export default function BoardCanvas({
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
   const [hoverUid, setHoverUid] = useState<number | null>(null);
+  // Marquee selection (drag on empty felt), in world coords.
+  const [marquee, setMarquee] = useState<{ a: [number, number]; b: [number, number] } | null>(null);
+  const marqueeRef = useRef(false);
   const transformRef = useRef<Transform | null>(null);
   const dragRef = useRef<{ moved: boolean } | null>(null);
   const faceRef = useRef<boolean>(false);
@@ -796,6 +802,22 @@ export default function BoardCanvas({
       }
     }
 
+    // Marquee selection box.
+    if (marquee) {
+      const [mx0, my0] = worldToScreen(t, marquee.a[0], marquee.a[1]);
+      const [mx1, my1] = worldToScreen(t, marquee.b[0], marquee.b[1]);
+      ctx.save();
+      ctx.setLineDash([5, 4]);
+      ctx.strokeStyle = COLORS.select;
+      ctx.fillStyle = "rgba(124,156,255,0.10)";
+      ctx.lineWidth = 1.5;
+      const rx = Math.min(mx0, mx1);
+      const ry = Math.min(my0, my1);
+      ctx.fillRect(rx, ry, Math.abs(mx1 - mx0), Math.abs(my1 - my0));
+      ctx.strokeRect(rx, ry, Math.abs(mx1 - mx0), Math.abs(my1 - my0));
+      ctx.restore();
+    }
+
     // Staged formation members: ghosts at their placed destinations, numbered
     // in placement order, with facing ticks.
     if (staged) {
@@ -894,7 +916,7 @@ export default function BoardCanvas({
         { ok: placingGhost.ok },
       );
     }
-  }, [view, size, selectedUid, hoverUid, activeUid, armedTargets, armedMembers, moveGhost, pendingMove, placementMode, placingGhost, spin, deployBand, draw, staged, dimUids, reachOverride]);
+  }, [view, size, selectedUid, hoverUid, activeUid, armedTargets, armedMembers, moveGhost, pendingMove, placementMode, placingGhost, spin, deployBand, draw, staged, dimUids, reachOverride, marquee]);
 
   // Combat-effect overlay: an independent rAF that draws fx on a top canvas,
   // reusing the transform the base render computed. Keyed on fxSeq.
@@ -1027,6 +1049,12 @@ export default function BoardCanvas({
     if (hit != null && hit === activeUid) {
       dragRef.current = { moved: false };
       (e.target as Element).setPointerCapture?.(e.pointerId);
+    } else if (hit == null && e.button === 0 && onMarquee) {
+      // Drag on empty felt = marquee selection box (StarCraft-style).
+      const w = worldPoint(e.clientX, e.clientY);
+      marqueeRef.current = true;
+      setMarquee({ a: w, b: w });
+      (e.target as Element).setPointerCapture?.(e.pointerId);
     }
   }
 
@@ -1041,6 +1069,11 @@ export default function BoardCanvas({
     }
     if (faceRef.current) {
       facePoint()?.set(facingFromCursor(e.clientX, e.clientY));
+      return;
+    }
+    if (marqueeRef.current) {
+      const w = worldPoint(e.clientX, e.clientY);
+      setMarquee((m) => (m ? { a: m.a, b: w } : m));
       return;
     }
     if (pendingMove || spin) return;
@@ -1063,6 +1096,17 @@ export default function BoardCanvas({
       faceRef.current = false;
       return;
     }
+    if (marqueeRef.current) {
+      marqueeRef.current = false;
+      const m = marquee;
+      setMarquee(null);
+      if (m && Math.hypot(m.b[0] - m.a[0], m.b[1] - m.a[1]) > 0.4) {
+        onMarquee?.(m.a, m.b);
+      } else {
+        onSelect(null); // a plain click on empty felt deselects
+      }
+      return;
+    }
     if (pendingMove || spin) return;
     if (dragRef.current) {
       const moved = dragRef.current.moved;
@@ -1071,7 +1115,7 @@ export default function BoardCanvas({
       else onMoveCancel();
       return;
     }
-    onSelect(hitTest(e.clientX, e.clientY));
+    onSelect(hitTest(e.clientX, e.clientY), e.shiftKey);
   }
 
   return (
@@ -1089,6 +1133,11 @@ export default function BoardCanvas({
         onPointerLeave={() => {
           if (placementMode || draw) {
             onDrawLeave?.(); // drop the rubber-band cursor when the pointer exits
+            return;
+          }
+          if (marqueeRef.current) {
+            marqueeRef.current = false;
+            setMarquee(null);
             return;
           }
           if (faceRef.current) {

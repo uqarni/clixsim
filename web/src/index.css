@@ -1558,3 +1558,19 @@ kbd {
 .formation-stage {
   border-left: 3px solid var(--accent);
 }
+
+/* --- group selection panel ------------------------------------------------ */
+.group-panel {
+  border-left: 3px solid var(--accent);
+}
+.group-names {
+  overflow-wrap: anywhere;
+}
+.group-reason {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--bad);
+}
+.group-reason.ok {
+  color: var(--good);
+}

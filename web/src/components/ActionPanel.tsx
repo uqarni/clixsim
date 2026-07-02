@@ -34,6 +34,10 @@ interface Props {
   onFormationDefer: () => void;
   onFormationCancel: () => void;
   onFormationSubmit: () => void;
+  // Marquee / shift+click group selection: live formation legality + entry point.
+  group: { uids: number[]; names: string[]; ok: boolean; reason: string | null } | null;
+  onGroupMove: () => void;
+  onGroupClear: () => void;
 }
 
 const ATTACK_KINDS = new Set([
@@ -152,6 +156,9 @@ export default function ActionPanel({
   onFormationDefer,
   onFormationCancel,
   onFormationSubmit,
+  group,
+  onGroupMove,
+  onGroupClear,
 }: Props) {
   const isHumanTurn = view.meta.active_player === "human" && !view.meta.ended;
 
@@ -253,6 +260,34 @@ export default function ActionPanel({
         </div>
       )}
 
+      {/* Group selection (marquee / shift+click): move as a formation, or the
+          exact reason the group can't. */}
+      {!formation && !pendingMove && !armed && group && (
+        <div className="armed group-panel">
+          <div className="armed-title">Group · {group.uids.length} selected</div>
+          <div className="armed-stats group-names">{group.names.join(" · ")}</div>
+          <div className="armed-btns">
+            <button
+              className="btn primary"
+              onClick={onGroupMove}
+              disabled={busy || !group.ok}
+              title={group.ok ? "One action moves the whole group" : group.reason ?? ""}
+            >
+              Move as formation
+            </button>
+            <button className="btn" onClick={onGroupClear} disabled={busy}>
+              Clear
+            </button>
+          </div>
+          {!group.ok && group.reason && (
+            <div className="group-reason">✕ {group.reason}</div>
+          )}
+          {group.ok && (
+            <div className="group-reason ok">✓ legal formation — one action moves all {group.uids.length}</div>
+          )}
+        </div>
+      )}
+
       {/* Pending free move: place -> aim -> confirm */}
       {!formation && pendingMove && (
         <div className="armed">
@@ -280,7 +315,7 @@ export default function ActionPanel({
       )}
 
       {/* Candidate menu */}
-      {!formation && !pendingMove && !armed && (
+      {!formation && !pendingMove && !armed && !group && (
         <div className="action-groups">
           {!selectedFig && formations.length === 0 && (
             <div className="empty">Select one of your figures, or drag it on the board to move.</div>

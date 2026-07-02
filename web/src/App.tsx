@@ -122,6 +122,9 @@ export default function App() {
 
   const [view, setView] = useState<GameView | null>(null);
   const [selectedUid, setSelectedUid] = useState<number | null>(null);
+  // Multi-selection (marquee / shift+click), in selection order — the group the
+  // user wants to move together; legality is judged live, never persisted.
+  const [selection, setSelection] = useState<number[]>([]);
   const [events, setEvents] = useState<GameEvent[]>([]);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [hints, setHints] = useState<string[]>([]);
@@ -367,8 +370,9 @@ export default function App() {
   const armedMembers = useMemo<number[]>(() => {
     if (formationStage) return formationStage.uids;
     const m = armed?.annotation.members;
-    return Array.isArray(m) ? m.filter((x): x is number => typeof x === "number") : [];
-  }, [armed, formationStage]);
+    if (Array.isArray(m)) return m.filter((x): x is number => typeof x === "number");
+    return selection.length >= 2 ? selection : []; // group-selection rings
+  }, [armed, formationStage, selection]);
 
   const handleApply = useCallback(
     (res: ApplyResult) => {
@@ -603,14 +607,11 @@ export default function App() {
   }, [view, activeUid, pendingMove, busy, formationStage, handleApply, log]);
 
   // --- interactive formation move (P4-R14: members placed one at a time) ----
-  const startFormationMove = useCallback(
-    (c: Candidate) => {
-      if (!view) return;
-      const members = (c.annotation.members as number[] | undefined) ?? [];
-      if (members.length < 3) return;
-      // Re-validate against the CURRENT view — the candidate list refreshes
-      // asynchronously, so a stale button could stage an already-acted member
-      // and dead-end at submit.
+  const startFormationStaging = useCallback(
+    (members: number[]) => {
+      if (!view || members.length < 3) return;
+      // Re-validate against the CURRENT view — a stale entry point could stage
+      // an already-acted member and dead-end at submit.
       const figs = members.map((u) => view.figures.find((x) => x.uid === u));
       const bad = figs.find((f) => !f || f.eliminated || !f.can_act);
       if (bad !== undefined || view.meta.active_player !== "human") {
@@ -621,11 +622,109 @@ export default function App() {
       setArmed(null);
       setMoveGhost(null);
       setPendingMove(null);
+      setSelection([]);
       setFormationStage({ uids: members, placed: [], speed: Math.max(1, Math.min(...speeds)) });
       setSelectedUid(members[0]);
     },
     [view, log],
   );
+
+  const startFormationMove = useCallback(
+    (c: Candidate) => {
+      const members = (c.annotation.members as number[] | undefined) ?? [];
+      startFormationStaging(members);
+    },
+    [startFormationStaging],
+  );
+
+  // --- StarCraft-style group selection --------------------------------------
+  const handleSelect = useCallback((uid: number | null, additive = false) => {
+    if (uid == null) {
+      setSelectedUid(null);
+      setSelection([]);
+      return;
+    }
+    const fig = viewRef.current?.figures.find((f) => f.uid === uid);
+    setSelectedUid(uid);
+    const groupable = !!fig && fig.owner === "human" && !fig.eliminated;
+    if (additive && groupable) {
+      setSelection((sel) => (sel.includes(uid) ? sel.filter((u) => u !== uid) : [...sel, uid]));
+    } else {
+      setSelection(groupable ? [uid] : []);
+    }
+  }, []);
+
+  const handleMarquee = useCallback((a: [number, number], b: [number, number]) => {
+    const v = viewRef.current;
+    if (!v) return;
+    const [x0, x1] = [Math.min(a[0], b[0]), Math.max(a[0], b[0])];
+    const [y0, y1] = [Math.min(a[1], b[1]), Math.max(a[1], b[1])];
+    const picked = v.figures
+      .filter(
+        (f) =>
+          !f.eliminated &&
+          f.owner === "human" &&
+          f.pos[0] >= x0 && f.pos[0] <= x1 && f.pos[1] >= y0 && f.pos[1] <= y1,
+      )
+      .sort((p, q) => p.pos[0] - q.pos[0] || p.pos[1] - q.pos[1])
+      .map((f) => f.uid);
+    setSelection(picked);
+    setSelectedUid(picked[0] ?? null);
+  }, []);
+
+  // Live legality of the selected group as a movement formation — the button is
+  // greyed out with THIS reason when the group can't form up (contact truth comes
+  // from the engine-computed in_base_contact_with, not eyeballed pixels).
+  const groupInfo = useMemo(() => {
+    if (!view || selection.length < 2 || formationStage) return null;
+    const figs = selection
+      .map((u) => view.figures.find((f) => f.uid === u))
+      .filter((f): f is FigureView => !!f && !f.eliminated);
+    if (figs.length < 2) return null;
+    const names = figs.map((f) => f.short_name);
+    const barredOf = (f: FigureView) =>
+      f.active_abilities.find((x) => ["Flight", "Aquatic", "Quickness"].includes(x.name));
+    let reason: string | null = null;
+    if (figs.length < 3 || figs.length > 5) {
+      reason = `movement formations are 3–5 figures (${figs.length} selected)`;
+    } else if (new Set(figs.map((f) => f.faction)).size > 1) {
+      reason = "mixed factions — members must share a faction";
+    } else if (figs[0].faction === "Mage Spawn") {
+      reason = "Mage Spawn cannot form formations";
+    } else {
+      const acted = figs.find((f) => !f.can_act);
+      const demoral = figs.find((f) => f.demoralized);
+      const engaged = figs.find((f) =>
+        f.in_base_contact_with.some((u) => view.figures.find((o) => o.uid === u)?.owner !== "human"),
+      );
+      const barred = figs.find((f) => barredOf(f));
+      if (acted) reason = `${acted.short_name} has already acted this turn`;
+      else if (demoral) reason = `${demoral.short_name} is demoralized`;
+      else if (engaged) reason = `${engaged.short_name} is in enemy contact — it must move individually`;
+      else if (barred) {
+        reason = `${barred.short_name}'s ${barredOf(barred)!.name} bars movement formations — cancel the optional ability to join`;
+      } else {
+        const ids = new Set(selection);
+        const adj = new Map(figs.map((f) => [f.uid, f.in_base_contact_with.filter((u) => ids.has(u))]));
+        const loner = figs.find((f) => (adj.get(f.uid) ?? []).length === 0);
+        if (loner) reason = `${loner.short_name} isn't touching the group — every member must touch another`;
+        else {
+          const seen = new Set<number>([figs[0].uid]);
+          const stack = [figs[0].uid];
+          while (stack.length) {
+            for (const n of adj.get(stack.pop()!) ?? []) {
+              if (!seen.has(n)) {
+                seen.add(n);
+                stack.push(n);
+              }
+            }
+          }
+          if (seen.size !== figs.length) reason = "the group is split — it must be one touching cluster";
+        }
+      }
+    }
+    return { uids: figs.map((f) => f.uid), names, ok: reason === null, reason };
+  }, [view, selection, formationStage]);
 
   // Defer the member being placed to the end of the queue, so arrangements that
   // aren't reachable in the default order (e.g. A—C—B chains) can be staged.
@@ -716,6 +815,7 @@ export default function App() {
     setPendingMove(null);
     setFormationStage(null);
     setSelectedUid(null);
+    setSelection([]);
     setFreeSpin(null);
     setOppThoughts([]);
     setBusy(true);
@@ -752,6 +852,7 @@ export default function App() {
       oppStreamRef.current = null;
     }
     setSelectedUid(null);
+    setSelection([]);
     setArmed(null);
     setMoveGhost(null);
     setPendingMove(null);
@@ -813,7 +914,7 @@ export default function App() {
     <div className="app">
       <TurnHud view={view} onEndTurn={handleEndTurn} onNewGame={handleNewGame} />
       <div className="zones">
-        <ForceRail figures={view.figures} selectedUid={selectedUid} onSelect={setSelectedUid} />
+        <ForceRail figures={view.figures} selectedUid={selectedUid} onSelect={handleSelect} />
         <DialInspector fig={selectedFig} canToggle={canToggle} onToggle={onToggle} />
         <div className="zone board-zone">
           <div className="zone-head">
@@ -826,7 +927,8 @@ export default function App() {
             <BoardCanvas
               view={view}
               selectedUid={selectedUid}
-              onSelect={setSelectedUid}
+              onSelect={handleSelect}
+              onMarquee={handleMarquee}
               activeUid={activeUid}
               armedTargets={armedTargets}
               armedMembers={armedMembers}
@@ -899,6 +1001,12 @@ export default function App() {
                     }
                   : null
               }
+              group={groupInfo}
+              onGroupMove={() => groupInfo?.ok && startFormationStaging(groupInfo.uids)}
+              onGroupClear={() => {
+                setSelection([]);
+                setSelectedUid(null);
+              }}
               onFormationStart={startFormationMove}
               onFormationBack={formationBack}
               onFormationLeave={formationLeaveInPlace}
@@ -908,7 +1016,7 @@ export default function App() {
             />
           </div>
         </div>
-        <OpponentPanel figures={view.figures} selectedUid={selectedUid} onSelect={setSelectedUid} thoughts={oppThoughts} />
+        <OpponentPanel figures={view.figures} selectedUid={selectedUid} onSelect={handleSelect} thoughts={oppThoughts} />
         <LogLedger view={view} events={events} />
       </div>
 
