@@ -185,8 +185,8 @@ export function snapToContactRing(
   dest: Pt,
   targets: { pos: Pt; radius: number; uid: number }[],
   window = 0.9,
-): Pt | null {
-  let best: Pt | null = null;
+): { point: Pt; uid: number } | null {
+  let best: { point: Pt; uid: number } | null = null;
   let bestErr = Infinity;
   for (const t of targets) {
     const dx = dest[0] - t.pos[0];
@@ -200,7 +200,7 @@ export function snapToContactRing(
       (o) => o.uid !== t.uid && Math.hypot(cp[0] - o.pos[0], cp[1] - o.pos[1]) < moverRadius + o.radius - 0.02,
     );
     if (!overlaps) {
-      best = cp;
+      best = { point: cp, uid: t.uid };
       bestErr = err;
     }
   }

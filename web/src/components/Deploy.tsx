@@ -50,8 +50,12 @@ export default function Deploy({ initialView, onDone, onCancel }: Props) {
         .map((o) => ({ pos: o.pos, radius: o.base_radius, uid: o.uid }));
       const snapped = snapToContactRing(r, [x, y], targets);
       // Keep the snap only if it stays inside the deploy band.
-      if (snapped && snapped[0] >= r && snapped[0] <= W - r && snapped[1] >= r && snapped[1] <= BAND - r) {
-        [x, y] = snapped;
+      if (
+        snapped &&
+        snapped.point[0] >= r && snapped.point[0] <= W - r &&
+        snapped.point[1] >= r && snapped.point[1] <= BAND - r
+      ) {
+        [x, y] = snapped.point;
       }
       const overlaps = targets.some(
         (o) => Math.hypot(x - o.pos[0], y - o.pos[1]) < r + o.radius - 0.02,

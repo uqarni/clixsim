@@ -257,6 +257,53 @@ function drawFigure(
   ctx.restore();
 }
 
+// Is `targetPos` inside the front arc of a figure standing at `from` with the
+// given world facing (radians) and arc HALF-angle (degrees)?
+function inArcFrom(
+  from: [number, number],
+  facingRad: number,
+  arcDeg: number,
+  targetPos: [number, number],
+): boolean {
+  const bearing = Math.atan2(targetPos[1] - from[1], targetPos[0] - from[0]);
+  let d = Math.abs(bearing - facingRad) % (2 * Math.PI);
+  if (d > Math.PI) d = 2 * Math.PI - d;
+  return d <= (arcDeg * Math.PI) / 180 + 1e-9;
+}
+
+// While placing/aiming a move next to enemies, ring each ADJACENT enemy green
+// (in the front arc = attackable after this move) or red (behind you — not).
+function drawAdjacencyArcs(
+  ctx: CanvasRenderingContext2D,
+  t: Transform,
+  active: FigureView,
+  live: FigureView[],
+  dest: [number, number],
+  facingRad: number,
+) {
+  for (const o of live) {
+    if (o.owner === active.owner || o.uid === active.uid) continue;
+    const touching =
+      Math.hypot(dest[0] - o.pos[0], dest[1] - o.pos[1]) <= active.base_radius + o.base_radius + 0.05;
+    if (!touching) continue;
+    const ok = inArcFrom(dest, facingRad, active.arc_deg, o.pos);
+    const [ox, oy] = worldToScreen(t, o.pos[0], o.pos[1]);
+    const rr = Math.max(6, o.base_radius * t.scale) + 5;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(ox, oy, rr, 0, Math.PI * 2);
+    ctx.strokeStyle = ok ? COLORS.good : COLORS.bad;
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    ctx.fillStyle = ok ? COLORS.good : COLORS.bad;
+    ctx.font = "600 10px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "bottom";
+    ctx.fillText(ok ? "⚔ attackable" : "behind you", ox, oy - rr - 2);
+    ctx.restore();
+  }
+}
+
 function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
   ctx.beginPath();
   ctx.moveTo(x + r, y);
@@ -701,6 +748,9 @@ export default function BoardCanvas({
         ctx.fillText(ghostLabel, gx, gy - gr - 3);
       }
       ctx.restore();
+      if (moveGhost.ok) {
+        drawAdjacencyArcs(ctx, t, active, live, moveGhost.dest, moveGhost.facing);
+      }
     }
 
     // Pending move: placed ghost with a draggable facing handle (aim, then confirm).
@@ -735,6 +785,9 @@ export default function BoardCanvas({
       ctx.fillStyle = COLORS.select;
       ctx.fill();
       ctx.restore();
+      // Live attackability while AIMING: adjacent enemies ring green (in the
+      // front arc) or red (behind you) as the handle rotates.
+      drawAdjacencyArcs(ctx, t, active, live, pendingMove.dest, pendingMove.facing);
     }
 
     // Free spin: an amber facing handle on the contacted figure being re-faced.
@@ -822,10 +875,19 @@ export default function BoardCanvas({
             f.pos[0] + (dx / L) * f.base_radius,
             f.pos[1] + (dy / L) * f.base_radius,
           );
+          // For the SELECTED figure's enemy contacts, the dot tells arc truth:
+          // green = in its front arc (close attack legal), red = behind it.
+          let fill = o.owner !== f.owner ? "rgba(224,192,74,0.95)" : "rgba(255,255,255,0.85)";
+          if (o.owner !== f.owner && (f.uid === selectedUid || o.uid === selectedUid)) {
+            const me = f.uid === selectedUid ? f : o;
+            const them = f.uid === selectedUid ? o : f;
+            const ok = inArcFrom(me.pos, (me.facing_deg * Math.PI) / 180, me.arc_deg, them.pos);
+            fill = ok ? "rgba(91,214,138,0.95)" : "rgba(224,90,90,0.95)";
+          }
           ctx.save();
           ctx.beginPath();
-          ctx.arc(sx, sy, 3, 0, Math.PI * 2);
-          ctx.fillStyle = o.owner !== f.owner ? "rgba(224,192,74,0.95)" : "rgba(255,255,255,0.85)";
+          ctx.arc(sx, sy, 3.5, 0, Math.PI * 2);
+          ctx.fillStyle = fill;
           ctx.fill();
           ctx.strokeStyle = "rgba(0,0,0,0.55)";
           ctx.lineWidth = 1;

@@ -451,9 +451,15 @@ export default function App() {
   );
 
   const ghostFor = useCallback(
-    (fig: FigureView, dest: [number, number]): MoveGhost => {
+    (fig: FigureView, dest: [number, number], faceUid?: number): MoveGhost => {
       const dist = Math.hypot(dest[0] - fig.pos[0], dest[1] - fig.pos[1]);
-      const enemy = nearestEnemy(dest, fig.owner);
+      // Face the figure we snapped onto when it's an ENEMY (that's a charge);
+      // otherwise face the nearest enemy from the destination.
+      const snapTarget =
+        faceUid != null
+          ? view?.figures.find((f) => f.uid === faceUid && f.owner !== fig.owner && !f.eliminated)
+          : undefined;
+      const enemy = snapTarget ?? nearestEnemy(dest, fig.owner);
       const facing = enemy ? facingToward(dest, [enemy.pos[0], enemy.pos[1]]) : (fig.facing_deg * Math.PI) / 180;
       const inEnemyContact =
         !!view &&
@@ -513,7 +519,7 @@ export default function App() {
   // it never counts as touching). While staging a formation move, already-placed
   // members snap at their STAGED destinations, not their old spots.
   const snapToBase = useCallback(
-    (fig: FigureView, dest: [number, number]): [number, number] | null => {
+    (fig: FigureView, dest: [number, number]): { point: [number, number]; uid: number } | null => {
       if (!view) return null;
       const stagedByUid = new Map((formationStage?.placed ?? []).map((p) => [p.uid, p.dest]));
       const targets = view.figures
@@ -528,10 +534,15 @@ export default function App() {
     (dest: [number, number]) => {
       const fig = view?.figures.find((f) => f.uid === activeUid);
       if (!fig) return;
-      // Snap DURING the drag so the ghost visibly sticks to nearby bases.
+      // Snap DURING the drag so the ghost visibly sticks to nearby bases; when it
+      // snaps onto an ENEMY, the ghost faces that enemy (a charge should never
+      // end aimed the wrong way by accident).
       const snapped = snapToBase(fig, dest);
-      const use = snapped && ghostFor(fig, snapped).ok ? snapped : dest;
-      setMoveGhost(ghostFor(fig, use));
+      if (snapped && ghostFor(fig, snapped.point, snapped.uid).ok) {
+        setMoveGhost(ghostFor(fig, snapped.point, snapped.uid));
+      } else {
+        setMoveGhost(ghostFor(fig, dest));
+      }
     },
     [view, activeUid, ghostFor, snapToBase],
   );
@@ -543,13 +554,13 @@ export default function App() {
       if (!fig) return;
       // Prefer a snapped-to-contact destination when it's legal; otherwise the raw drop.
       const snapped = snapToBase(fig, dest);
-      const candidate = snapped && ghostFor(fig, snapped).ok ? snapped : dest;
-      const g = ghostFor(fig, candidate);
+      const useSnap = snapped && ghostFor(fig, snapped.point, snapped.uid).ok;
+      const g = useSnap ? ghostFor(fig, snapped!.point, snapped!.uid) : ghostFor(fig, dest);
       if (!g.ok) {
         log([{ type: "rejected", summary: `Can't move there — ${g.reason ?? "illegal move"}.` }]);
         return;
       }
-      setPendingMove({ dest: candidate, facing: g.facing });
+      setPendingMove({ dest: g.dest, facing: g.facing });
     },
     [view, activeUid, ghostFor, snapToBase, log],
   );
