@@ -353,6 +353,7 @@ def _construct_stream(mode: str, points: int, opponent: str, seed: int,
             builder.available = False
         yield sse({"type": "llm_start", "available": builder.available})
         llm_ids: list[int] = []
+        draft_notes: list[str] = []
         used_uniques: set[int] = set()
         remaining = budget
         pool_counts = None
@@ -376,6 +377,7 @@ def _construct_stream(mode: str, points: int, opponent: str, seed: int,
                 used_uniques.add(pick.id)
             if pool_counts is not None:
                 pool_counts[pick.id] -= 1
+            draft_notes.append(f"{pick.short_name} ({pick.points}pts): {reason}")
             yield sse({"type": "llm_pick", "figure": _brief(pick.id), "reasoning": reason,
                        "used_llm": used_llm, "remaining": remaining,
                        "army": [_brief(i) for i in llm_ids], "points": budget - remaining})
@@ -387,6 +389,11 @@ def _construct_stream(mode: str, points: int, opponent: str, seed: int,
 
         SESSION.start_game(human_army, llm_army, budget, seed, opponent,
                            with_terrain=terrain, with_deploy=deploy)
+        # ONE agent across phases: the battle picker, terrain placer, and chat
+        # all inherit the drafter's doctrine + pick reasoning (stored on the
+        # engine so it survives restarts with the game).
+        SESSION.engine.doctrine = builder.doctrine
+        SESSION.engine.draft_notes = draft_notes[:12]
         yield sse({"type": "ready", "view": game_view(SESSION.engine)})
     except Exception as e:  # never leave the client hanging
         yield sse({"type": "error", "message": str(e)})
@@ -559,6 +566,7 @@ def terrain_placement_stream():
                     break
                 context = {
                     "my_army_has_ranged": llm_ranged,
+                    "my_doctrine": getattr(eng, "doctrine", ""),
                     "pieces_left": eng.state.terrain_budget.get("llm", 0),
                     "already_placed": [{"type": t.kind, "elevated": t.elevated, "owner": t.owner}
                                        for t in eng.state.terrain],

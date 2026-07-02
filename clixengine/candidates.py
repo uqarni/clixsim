@@ -480,6 +480,39 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
                     add_move(dest, _facing_toward(dest, enemy.position),
                              f"Form up with {friend.short_name}", {"intent_hint": "rally"})
 
+    # Healer positioning: close the gap to a wounded friendly so a heal becomes
+    # possible — without this, healers only ever orbit ENEMIES and a hurt ally
+    # across the board is invisible to them.
+    heal_aids = figure.active_ability_ids()
+    if not demoralized and (ab.HEALING in heal_aids or ab.MAGIC_HEALING in heal_aids):
+        heal_ranged = ab.MAGIC_HEALING in heal_aids
+        wounded = [fr for fr in engine.state.friends_of(figure)
+                   if fr.is_alive and fr.current_click > fr.definition.starting_click
+                   and not engine.state.opposing_contacts(fr)]
+        wounded.sort(key=lambda fr: fr.current_click - fr.definition.starting_click,
+                     reverse=True)
+        for ally in wounded[:2]:
+            d = distance(figure.position, ally.position)
+            if heal_ranged:
+                need = d - max(0.5, figure.range - 0.5)  # inside range, small margin
+            else:
+                need = d - (figure.base_radius + ally.base_radius)  # to base contact
+            if need <= 1e-6:
+                continue  # already in reach — the heal candidate itself covers it
+            step = min(eff_speed, need)
+            dest = _point_toward(figure.position, ally.position, step)
+            added = add_move(dest, _facing_toward(dest, ally.position),
+                             f"Move to heal {ally.short_name}",
+                             {"target": ally.uid, "intent_hint": "heal_approach",
+                              "in_reach_after": step >= need - 1e-6})
+            if not added:
+                det = _detour_toward(ally)
+                if det is not None:
+                    add_move(det, _facing_toward(det, ally.position),
+                             f"Move to heal {ally.short_name} (around terrain)",
+                             {"target": ally.uid, "intent_hint": "heal_approach",
+                              "in_reach_after": False})
+
 
 # ====================================================================== #
 # Formation candidates (P4-R11..R16, R29) — turn-level, not per-figure.

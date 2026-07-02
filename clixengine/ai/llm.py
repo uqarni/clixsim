@@ -147,7 +147,16 @@ class LLMOpponent:
                 lines.append(f"- {a.name}: {a.description.strip()}")
         card = ("Official ability card text for the abilities in this battle:\n"
                 + "\n".join(lines))
-        return f"{_SYSTEM}\n\n{rules_digest()}\n\n{card}"
+        # Continuity with the drafting phase: this is the SAME agent that built
+        # the army — play to the doctrine it drafted under.
+        identity = ""
+        doctrine = getattr(engine, "doctrine", "")
+        notes = getattr(engine, "draft_notes", [])
+        if doctrine:
+            identity = (f"\n\nYou drafted this army yourself, under the doctrine: "
+                        f"{doctrine}\nYour draft picks and reasons:\n- "
+                        + "\n- ".join(notes) + "\nPlay to that plan.")
+        return f"{_SYSTEM}\n\n{rules_digest()}\n\n{card}{identity}"
 
     def _ask(self, engine: Engine, ranked, table_talk: list[dict] | None = None) -> tuple[int | None, str]:
         prompt = self._prompt(engine, ranked, table_talk)

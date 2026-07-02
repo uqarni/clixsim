@@ -65,6 +65,10 @@ def chat_reply(client, system: str, message: str, history: list[dict], engine,
     content = message
     if engine is not None:
         content += "\n\n[Live board state]\n" + json.dumps(board_snapshot(engine))
+        doctrine = getattr(engine, "doctrine", "")
+        if doctrine:
+            content += (f"\n\n[You drafted your army under this doctrine — it's your "
+                        f"game plan]\n{doctrine}")
     if recent_moves:
         content += ("\n\n[Your battle actions last turn, and why — stay consistent "
                     "with what you actually did]\n" + "\n".join(recent_moves[-10:]))

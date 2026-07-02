@@ -185,3 +185,44 @@ def test_table_talk_flows_into_the_picker_prompt(db):
     assert payload["table_talk"] == talk
     assert "consistent with your words" in payload["table_talk_note"]
     assert "table_talk" not in json.loads(opp._prompt(e, ranked))  # absent when no chat
+
+
+def test_healer_walks_toward_wounded_ally(db):
+    """Regression: 'it kept its Elemental Priest back while I was obliterating
+    its units' — healers had NO candidate approaching a wounded friendly."""
+    import math
+    from .conftest import build_engine
+    from clixengine.candidates import generate_candidates
+    from clixengine.ai.heuristic import HeuristicAI
+
+    e = build_engine(db, [
+        ("llm", "Mending Priestess", (14, 34), -math.pi / 2, 0),
+        ("llm", "Dwarven Jarl", (17.7, 20.6), -math.pi / 2, 0),  # 14" away, dying
+        ("human", "Amazon Queen", (18, 10), math.pi / 2, 0),
+    ], active="llm")
+    e.state.figure(1).take_clicks(4)
+    cands = generate_candidates(e, e.state.figure(0))
+    approach = [c for c in cands if c.annotation.get("intent_hint") == "heal_approach"]
+    assert approach, "healer has no move toward its wounded ally"
+    assert "Move to heal" in approach[0].label
+    # And the heuristic actually PREFERS it for the healer over wandering at foes.
+    from clixengine.ai.evaluation import score_candidate
+    best = max(cands, key=lambda c: score_candidate(e, e.state.figure(0), c))
+    assert best.annotation.get("intent_hint") == "heal_approach", best.label
+
+
+def test_doctrine_identity_reaches_battle_and_chat(db):
+    """One agent across phases: doctrine + draft notes flow to the battle brain."""
+    import math
+    from .conftest import build_engine
+    from clixengine.ai.llm import LLMOpponent
+
+    e = build_engine(db, [
+        ("human", "Werebear", (10, 10), math.pi / 2, 0),
+        ("llm", "Werebear", (10, 20), -math.pi / 2, 0),
+    ], active="llm")
+    e.doctrine = "Gunline: maximize ranged attackers."
+    e.draft_notes = ["Utem Crossbowman (16pts): cheap ranged body."]
+    sysprompt = LLMOpponent()._battle_system(e)
+    assert "Gunline" in sysprompt and "Utem Crossbowman (16pts)" in sysprompt
+    assert "Play to that plan" in sysprompt

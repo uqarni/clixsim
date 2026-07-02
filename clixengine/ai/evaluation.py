@@ -130,6 +130,15 @@ def _move_value(engine: Engine, figure: Figure, cand: Candidate) -> float:
     ann = cand.annotation
     enemies = engine.state.opponents_of(figure)
     dest = ann.get("dest")
+    if ann.get("intent_hint") == "heal_approach":
+        # Walking a healer toward a wounded ally is worth a meaningful slice of
+        # the clicks it can restore — more when this move gets the ally in reach.
+        tgt = engine.state.figures.get(ann.get("target"))
+        if tgt is None or not tgt.is_alive:
+            return 0.05
+        missing = tgt.current_click - tgt.definition.starting_click
+        base = _vpc(tgt) * min(missing, 3) * 0.15
+        return base if ann.get("in_reach_after") else 0.6 * base
     if not enemies or dest is None:
         return 0.05
     if ann.get("intent_hint") == "rally":
