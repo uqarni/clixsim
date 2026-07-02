@@ -17,6 +17,7 @@ from . import abilities as ab
 from . import terrain as terr
 from .engine import Engine
 from .geometry import (
+    CONTACT_TOLERANCE,
     Vec,
     angle_to,
     distance,
@@ -292,7 +293,7 @@ def _support_candidates(engine, figure, cands, aids):
             dest = _clamp_to_board(engine, _point_toward(fr.position, tgt.position, reach), fr.base_radius)
             # Skip if the drop point would overlap any other figure (engine rejects).
             if any(o.uid != fr.uid
-                   and distance(dest, o.position) < fr.base_radius + o.base_radius - 1e-6
+                   and distance(dest, o.position) < fr.base_radius + o.base_radius - CONTACT_TOLERANCE
                    for o in state.living()):
                 continue
             cands.append(Candidate(
@@ -327,7 +328,7 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
             ):
                 return True
             # Nobody may END overlapping another base (engine end_on_base rule).
-            if distance(dest, other.position) < figure.base_radius + other.base_radius - 1e-6:
+            if distance(dest, other.position) < figure.base_radius + other.base_radius - CONTACT_TOLERANCE:
                 return True
         if pieces:
             if terr.base_in_blocking(pieces, dest, figure.base_radius):
@@ -386,6 +387,9 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
 
     enemies_by_dist = sorted(enemies, key=lambda e: distance(figure.position, e.position))
     for target in ([] if demoralized else enemies_by_dist[:3]):
+        if in_base_contact(figure.position, figure.base_radius,
+                           target.position, target.base_radius):
+            continue  # already engaged — close combat is the action, not another approach
         dvec_len = distance(figure.position, target.position)
         facing = _facing_toward(figure.position, target.position)
         contact = _contact_point(engine, figure, target)
@@ -519,7 +523,7 @@ def _make_formation_move(engine: Engine, cluster: list[Figure]) -> Candidate | N
                 continue
             if segment_circle_intersects(f.position, nd, other.position, other.base_radius):
                 return None
-            if distance(nd, other.position) < f.base_radius + other.base_radius - 1e-6:
+            if distance(nd, other.position) < f.base_radius + other.base_radius - CONTACT_TOLERANCE:
                 return None
         if pieces:
             if terr.base_in_blocking(pieces, nd, f.base_radius):

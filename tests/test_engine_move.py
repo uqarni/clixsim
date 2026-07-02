@@ -108,3 +108,44 @@ def test_move_may_not_end_overlapping_a_base(db):
     # Exact base contact remains the closest legal stop.
     ok = fresh().apply(MoveIntent(0, (13 - 1.1, 10), 0.0))
     assert ok.ok
+
+
+def test_etiquette_tolerance_contact_survives_view_rounding(db):
+    """Live bug: the client snaps using view positions rounded to 3 decimals, so a
+    'snapped' landing could be ~1e-3 short of true contact — and the old 1e-6
+    contact epsilon then denied the close attack ("Advance into contact 0.0\"").
+    Near-touching counts as touching (P4-R39 / §Etiquette)."""
+    from clixengine.candidates import generate_candidates
+
+    e = build_engine(db, [
+        ("human", "Crystal Bladesman", (10, 10.0004), 0.0, 0),
+        ("llm", "Nightstalker", (14, 9.9996), math.pi, 0),
+    ], active="human")
+    mover, target = e.state.figure(0), e.state.figure(1)
+    # Contact point computed from the ROUNDED enemy position, like the client:
+    rx, ry = round(target.position.x, 3), round(target.position.y, 3)
+    gap = mover.base_radius + target.base_radius
+    r = e.apply(MoveIntent(0, (rx - gap, ry), 0.0))
+    assert r.ok, r
+    # Sub-millimetre error vs the TRUE position — still legally in base contact:
+    assert [t.uid for t, _ in e.legal_close_targets(mover)] == [target.uid]
+    # And the generator offers the close attack, not another "advance into contact".
+    e._acted_uids.clear()  # pretend it's a fresh turn for this figure
+    kinds = {(c.kind, c.annotation.get("intent_hint")) for c in generate_candidates(e, mover)}
+    assert ("close", None) in kinds
+    assert not any(h == "charge" for _, h in kinds), kinds
+
+
+def test_overlap_tolerance_bounds(db):
+    """Overlap within the etiquette tolerance counts as touching; deeper is
+    still an illegal end_on_base."""
+    def try_dest(offset):
+        e = build_engine(db, [
+            ("human", "Crystal Bladesman", (10, 10), 0.0, 0),
+            ("llm", "Nightstalker", (14, 10), math.pi, 0),
+        ], active="human")
+        return e.apply(MoveIntent(0, (14 - offset, 10), 0.0))
+
+    assert try_dest(1.09).ok            # 0.01" overlap — etiquette-touching
+    r = try_dest(1.05)                  # 0.05" overlap — genuinely on top
+    assert not r.ok and r.reason == "end_on_base"

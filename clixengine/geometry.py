@@ -13,10 +13,16 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-# Tolerance for "close enough" base-contact / on-segment decisions
-# (see PRD P4-R39 / §Etiquette rule 3). Distances within this many inches are
-# treated as touching.
+# Geometric epsilon for on-segment / grazing decisions (LoF, path checks).
 CONTACT_EPS = 1e-6
+
+# Etiquette tolerance for BASE CONTACT (PRD P4-R39 / §Etiquette rule 3: close
+# enough to touching counts as touching). Deliberately much looser than the
+# geometric epsilon: client-side placements are computed from view positions
+# rounded to 3 decimals, so "exact" contact can be off by ~1e-3 — invisible on
+# screen and, per the tabletop rule, still touching. 0.02" renders under a
+# pixel at normal zoom.
+CONTACT_TOLERANCE = 0.02
 
 
 @dataclass(frozen=True)
@@ -55,8 +61,9 @@ def edge_distance(a: Vec, ra: float, b: Vec, rb: float) -> float:
     return distance(a, b) - ra - rb
 
 
-def in_base_contact(a: Vec, ra: float, b: Vec, rb: float, eps: float = CONTACT_EPS) -> bool:
-    """True if two bases touch or overlap (edge gap <= eps)."""
+def in_base_contact(a: Vec, ra: float, b: Vec, rb: float, eps: float = CONTACT_TOLERANCE) -> bool:
+    """True if two bases touch or overlap (edge gap <= eps). The default eps is
+    the ETIQUETTE tolerance — near-touching counts as touching (§Etiquette)."""
     return edge_distance(a, ra, b, rb) <= eps
 
 

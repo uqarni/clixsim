@@ -481,7 +481,7 @@ export default function App() {
         for (const o of view.figures) {
           if (o.eliminated || o.uid === fig.uid) continue;
           if (formationStage?.placed.some((p) => p.uid === o.uid)) continue; // staged elsewhere
-          if (Math.hypot(dest[0] - o.pos[0], dest[1] - o.pos[1]) < fig.base_radius + o.base_radius - 1e-3) {
+          if (Math.hypot(dest[0] - o.pos[0], dest[1] - o.pos[1]) < fig.base_radius + o.base_radius - 0.02) {
             reason = `overlaps ${o.short_name}'s base`;
             break;
           }
@@ -494,11 +494,11 @@ export default function App() {
           const pf = view?.figures.find((f) => f.uid === p.uid);
           if (!pf) return false;
           const d = Math.hypot(dest[0] - p.dest[0], dest[1] - p.dest[1]);
-          return d <= fig.base_radius + pf.base_radius + 1e-4;
+          return d <= fig.base_radius + pf.base_radius + 0.02;
         });
         const overlapping = formationStage.placed.some((p) => {
           const pf = view?.figures.find((f) => f.uid === p.uid);
-          return pf && Math.hypot(dest[0] - p.dest[0], dest[1] - p.dest[1]) < fig.base_radius + pf.base_radius - 1e-3;
+          return pf && Math.hypot(dest[0] - p.dest[0], dest[1] - p.dest[1]) < fig.base_radius + pf.base_radius - 0.02;
         });
         if (overlapping) reason = "overlaps a placed member";
         else if (!touching) reason = "must end touching the formation";
@@ -533,7 +533,7 @@ export default function App() {
         if (err > SNAP || err >= bestErr) continue;
         const cp: [number, number] = [t.pos[0] + (dx / dlen) * gap, t.pos[1] + (dy / dlen) * gap];
         const overlaps = targets.some(
-          (o) => o.uid !== t.uid && Math.hypot(cp[0] - o.pos[0], cp[1] - o.pos[1]) < fig.base_radius + o.radius - 1e-3,
+          (o) => o.uid !== t.uid && Math.hypot(cp[0] - o.pos[0], cp[1] - o.pos[1]) < fig.base_radius + o.radius - 0.02,
         );
         if (!overlaps) {
           best = cp;

@@ -18,6 +18,7 @@ from . import terrain as terr
 from .data import FigureDB, load_db
 from .gamelog import GameLog
 from .geometry import (
+    CONTACT_TOLERANCE,
     Vec,
     angle_to,
     distance,
@@ -297,7 +298,7 @@ class Engine:
         for o in self.state.living():
             if o.uid == uid:
                 continue
-            if distance(p, o.position) < r + o.base_radius - 1e-6:
+            if distance(p, o.position) < r + o.base_radius - CONTACT_TOLERANCE:
                 return Rejection("overlap", f"would overlap {o.short_name}")
         if self.state.terrain and terr.base_in_blocking(self.state.terrain, p, r):
             return Rejection("in_blocking", "cannot deploy in blocking terrain")
@@ -863,7 +864,7 @@ class Engine:
             # NOBODY may END overlapping another base — touching is the closest
             # legal stop. (The path check treats the mover as a point, so without
             # this a walker could legally land half-on-top of a neighbour.)
-            if distance(dest, other.position) < f.base_radius + other.base_radius - 1e-6:
+            if distance(dest, other.position) < f.base_radius + other.base_radius - CONTACT_TOLERANCE:
                 return Rejection("end_on_base",
                                  f"would end overlapping {other.short_name}'s base")
         return None
@@ -1390,7 +1391,7 @@ class Engine:
         for o in self.state.living():
             if o.uid == t.uid:
                 continue
-            if distance(dest, o.position) < t.base_radius + o.base_radius - 1e-6:
+            if distance(dest, o.position) < t.base_radius + o.base_radius - CONTACT_TOLERANCE:
                 return Rejection("end_on_base", "levitated figure may not end on a base")
         events: list[dict] = []
         pushing = self._consume_nonpass(f)
@@ -1414,7 +1415,7 @@ class Engine:
                 continue
             if not any(
                 o.uid != anchor.uid
-                and distance(p, o.position) < radius + o.base_radius - 1e-6
+                and distance(p, o.position) < radius + o.base_radius - CONTACT_TOLERANCE
                 for o in self.state.living()
             ):
                 return p
@@ -1525,7 +1526,7 @@ class Engine:
                 ):
                     return Rejection("path_blocked",
                                      f"{g.short_name}'s path crosses {other.short_name}'s base")
-                if distance(d, other.position) < g.base_radius + other.base_radius - 1e-6:
+                if distance(d, other.position) < g.base_radius + other.base_radius - CONTACT_TOLERANCE:
                     return Rejection("end_on_base",
                                      f"{g.short_name} would end on {other.short_name}'s base")
             # Terrain is validated per member exactly like a single move — a
