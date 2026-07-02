@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { deployFigure, finishDeploy, type FigureView, type GameView } from "../api";
 import { snapToContactRing } from "../terrainGeom";
 import BoardCanvas from "./BoardCanvas";
@@ -25,6 +25,22 @@ export default function Deploy({ initialView, onDone, onCancel }: Props) {
   const [pending, setPending] = useState<{ dest: [number, number]; facing: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+  // Guard against skipping deployment by accident: the screen can appear the
+  // instant the last terrain piece lands, so the start button stays disabled
+  // briefly (click-through protection), and starting without having moved any
+  // figure requires a second, explicit click.
+  const [armedStart, setArmedStart] = useState(false);
+  const [movedAny, setMovedAny] = useState(false);
+  const [confirmSkip, setConfirmSkip] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setArmedStart(true), 1200);
+    return () => clearTimeout(t);
+  }, []);
+  useEffect(() => {
+    if (!confirmSkip) return;
+    const t = setTimeout(() => setConfirmSkip(false), 4000);
+    return () => clearTimeout(t);
+  }, [confirmSkip]);
 
   const W = view.meta.board.width;
 
@@ -100,6 +116,7 @@ export default function Deploy({ initialView, onDone, onCancel }: Props) {
       } else {
         setView(res.view);
         setPending(null);
+        setMovedAny(true);
       }
     } catch (err) {
       setMsg(String(err));
@@ -109,7 +126,13 @@ export default function Deploy({ initialView, onDone, onCancel }: Props) {
   }, [pending, activeUid, busy]);
 
   const start = useCallback(async () => {
-    if (busy) return;
+    if (busy || !armedStart) return;
+    if (!movedAny && !confirmSkip) {
+      // First click without any repositioning: ask, don't start.
+      setConfirmSkip(true);
+      setMsg("You haven't repositioned anyone — click again to start as-is.");
+      return;
+    }
     setBusy(true);
     try {
       const res = await finishDeploy();
@@ -120,7 +143,7 @@ export default function Deploy({ initialView, onDone, onCancel }: Props) {
     } finally {
       setBusy(false);
     }
-  }, [busy, onDone]);
+  }, [busy, armedStart, movedAny, confirmSkip, onDone]);
 
   const selFig = activeUid != null ? view.figures.find((f) => f.uid === activeUid) ?? null : null;
 
@@ -134,8 +157,8 @@ export default function Deploy({ initialView, onDone, onCancel }: Props) {
           </span>
         </div>
         <div className="hud-right">
-          <button className="btn primary" type="button" onClick={start} disabled={busy}>
-            Start battle →
+          <button className="btn primary" type="button" onClick={start} disabled={busy || !armedStart}>
+            {confirmSkip ? "Start without repositioning?" : "Done deploying — start battle →"}
           </button>
           <button className="btn" type="button" onClick={onCancel}>
             Quit
