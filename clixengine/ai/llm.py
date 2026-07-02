@@ -47,6 +47,12 @@ actions as costing a click of your own dial: take them only for a decisive \
 payoff (finishing off an enemy, a game-swinging hit) — otherwise act with a \
 FRESH figure or Pass the tired one (resting clears its tokens). Spreading \
 actions across fresh figures beats hammering one figure two turns in a row.
+- SPORTSMANSHIP / ENDGAME: never stall a decided game. If you have no \
+realistic path to victory (your last figures are battered and outgunned), do \
+NOT loop retreat/rest turn after turn to delay the end — advance toward the \
+enemy and fight to a swift, honorable finish. Dragging out a lost game is the \
+one unforgivable move. (Retreating to heal or regroup mid-game is fine; this \
+is about hopeless positions only.)
 - FORMATIONS are your best action economy: a "formation_move" candidate moves \
 3-5 same-faction figures for ONE action (vs one figure per action normally) — \
 strongly prefer it over single moves when advancing a group. A \
@@ -67,6 +73,25 @@ _SCHEMA = {
     "required": ["choice_id", "rationale"],
     "additionalProperties": False,
 }
+
+
+def position_hopeless(engine: Engine, ratio: float = 0.35) -> bool:
+    """The sportsmanship trigger: True when the llm side's effective strength is
+    a small fraction of the human's, so the picker is told to fight forward and
+    end the game rather than stall with retreat/rest loops (a real game dragged
+    a decided position from turn 53 to turn 60 this way). Strength = points x
+    remaining-dial fraction; demoralized figures count at 30%."""
+    def strength(owner: str) -> float:
+        total = 0.0
+        for f in engine.state.living(owner):
+            s = f.definition.points * max(0.1, f.health_fraction())
+            if f.is_demoralized:
+                s *= 0.3
+            total += s
+        return total
+    mine = strength("llm")
+    theirs = strength("human")
+    return theirs > 0 and mine < ratio * theirs
 
 
 @dataclass
@@ -112,6 +137,7 @@ class LLMOpponent:
 
     def _prompt(self, engine: Engine, ranked, table_talk: list[dict] | None = None) -> str:
         snap = board_snapshot(engine)
+        endgame = position_hopeless(engine)
         options = []
         for cid, fig, cand in ranked:
             options.append(
@@ -137,6 +163,14 @@ class LLMOpponent:
                 "you stated when they are tactically sound — your play should feel "
                 "consistent with your words — but never sacrifice a winning line "
                 "to keep a banter promise."
+            )
+        if endgame:
+            payload["endgame_note"] = (
+                "Your position is almost certainly LOST — your remaining strength "
+                "is a small fraction of the enemy's. Per the sportsmanship rule: "
+                "stop retreating and resting to delay the end. Advance toward the "
+                "enemy and fight — attack when you can, close distance when you "
+                "can't. End the game with dignity."
             )
         return json.dumps(payload, indent=2)
 

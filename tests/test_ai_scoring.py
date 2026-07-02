@@ -226,3 +226,52 @@ def test_doctrine_identity_reaches_battle_and_chat(db):
     sysprompt = LLMOpponent()._battle_system(e)
     assert "Gunline" in sysprompt and "Utem Crossbowman (16pts)" in sysprompt
     assert "Play to that plan" in sysprompt
+
+
+def test_hopeless_position_triggers_endgame_note(db):
+    """A battered remnant vs a healthy army must get the sportsmanship push
+    (the Magus game stalled turns 53-60 with retreat/rest loops); an even
+    game must not."""
+    import json
+    import math
+
+    from clixengine.ai.llm import LLMOpponent, position_hopeless
+
+    from .conftest import build_engine
+
+    # Lone wounded figure vs a healthy, expensive army -> hopeless.
+    losing = build_engine(
+        db,
+        [
+            ("human", "Magus Draconum", (10, 10), math.pi / 2, 0),
+            ("human", "Troll Artillerist", (12, 10), math.pi / 2, 0),
+            ("llm", "Nightstalker", (11, 30), -math.pi / 2, 0),
+        ],
+        active="llm",
+    )
+    tgt = losing.state.figure(2)
+    tgt.take_clicks(tgt.definition.num_live_clicks - tgt.definition.starting_click - 1)
+    assert position_hopeless(losing)
+
+    prompt = json.loads(LLMOpponent()._prompt(losing, []))
+    assert "endgame_note" in prompt and "LOST" in prompt["endgame_note"]
+
+    # Even game -> no note.
+    even = build_engine(
+        db,
+        [
+            ("human", "Magus Draconum", (10, 10), math.pi / 2, 0),
+            ("llm", "Magus Draconum", (11, 30), -math.pi / 2, 0),
+        ],
+        active="llm",
+    )
+    assert not position_hopeless(even)
+    assert "endgame_note" not in json.loads(LLMOpponent()._prompt(even, []))
+
+
+def test_prompts_carry_sportsmanship_and_warmth(db):
+    from clixengine.ai.llm import _SYSTEM
+    from clixengine.chat import _PERSONA
+
+    assert "SPORTSMANSHIP" in _SYSTEM and "stall" in _SYSTEM
+    assert "READ THE ROOM" in _PERSONA
