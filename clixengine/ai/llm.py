@@ -40,7 +40,13 @@ attacks and scores its point value).
 - Use ranged attackers to hit without being hit; keep them out of base contact.
 - Advance melee figures into contact; attack the target's rear arc for +1 when \
 you can.
-- Don't push a figure to exhaustion for a marginal gain.
+- PUSHING: any candidate whose facts say "pushes": true deals 1 click of \
+SELF-damage to that figure the moment the action resolves (P4-R4), and \
+"push_would_eliminate": true means it would KILL your own figure. Treat pushed \
+actions as costing a click of your own dial: take them only for a decisive \
+payoff (finishing off an enemy, a game-swinging hit) — otherwise act with a \
+FRESH figure or Pass the tired one (resting clears its tokens). Spreading \
+actions across fresh figures beats hammering one figure two turns in a row.
 
 Respond with ONLY the chosen candidate id and a one-line rationale."""
 

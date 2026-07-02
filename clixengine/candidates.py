@@ -111,6 +111,19 @@ def generate_candidates(engine: Engine, figure: Figure) -> list[Candidate]:
             PassIntent(figure.uid), "pass", "Pass (rest, clear push tokens)",
             {"clears_tokens": figure.action_tokens > 0},
         ))
+
+    # A tokened figure PUSHES on any non-pass action: 1 click of self-damage
+    # (P4-R4). Stamp the fact on every candidate so the AI picker sees the cost
+    # instead of having to cross-reference tokens in the board snapshot.
+    if figure.action_tokens >= 1:
+        dying = (figure.definition.num_live_clicks - 1 - figure.current_click) <= 0
+        for c in cands:
+            if c.kind == "pass":
+                continue
+            c.annotation["pushes"] = True
+            c.annotation["push_self_damage"] = 1
+            if dying:
+                c.annotation["push_would_eliminate"] = True
     return cands
 
 
@@ -675,4 +688,13 @@ def generate_formation_candidates(
                     cands.append(c)
         # Close formation: 2-3 members ganging one enemy (need not touch each other).
         _make_close_formations(engine, [f for f in members if not f.is_demoralized], cands)
+
+    # Formations token EVERY member (P4-R12) — name the members that would push.
+    for c in cands:
+        pushers = [state.figure(u).short_name
+                   for u in (c.annotation.get("members") or [])
+                   if state.figure(u).action_tokens >= 1]
+        if pushers:
+            c.annotation["pushes"] = True
+            c.annotation["pushing_members"] = pushers
     return cands

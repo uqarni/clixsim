@@ -116,3 +116,30 @@ def test_regeneration_offered_while_demoralized(db):
     tc.demoralized = True
     assert tc.is_demoralized
     assert len(_kind(generate_candidates(e, tc), "regenerate")) == 1
+
+
+def test_push_facts_stamped_on_candidates(db):
+    """The AI picker must SEE the pushing cost (P4-R4): every non-pass candidate
+    of a tokened figure carries pushes/push_self_damage; pass does not."""
+    from .conftest import build_engine
+    from clixengine.candidates import generate_candidates
+    import math
+
+    e = build_engine(db, [
+        ("human", "Werebear", (10, 10), math.pi / 2, 0),
+        ("llm", "Werebear", (10, 14), -math.pi / 2, 0),
+    ], active="human")
+    f = e.state.figure(0)
+    f.action_tokens = 1  # acted last turn -> next non-pass action pushes
+    for c in generate_candidates(e, f):
+        if c.kind == "pass":
+            assert "pushes" not in c.annotation
+            assert c.annotation.get("clears_tokens") is True
+        else:
+            assert c.annotation.get("pushes") is True, c.label
+            assert c.annotation.get("push_self_damage") == 1
+    # A figure on its last click would DIE from the push — flagged loudly.
+    f.current_click = f.definition.num_live_clicks - 1
+    kill_flags = [c.annotation.get("push_would_eliminate")
+                  for c in generate_candidates(e, f) if c.kind != "pass"]
+    assert kill_flags and all(kill_flags)
