@@ -1,4 +1,4 @@
-import type { AttackExplain, Candidate, FigureView, GameView } from "../api";
+import type { AssistOption, AttackExplain, Candidate, FigureView, GameView } from "../api";
 
 interface PendingMove {
   dest: [number, number];
@@ -38,6 +38,9 @@ interface Props {
   group: { uids: number[]; names: string[]; ok: boolean; reason: string | null } | null;
   onGroupMove: () => void;
   onGroupClear: () => void;
+  // Assist attacks (combat formations) for the selected group — engine-computed.
+  assist: AssistOption[];
+  onAssist: (o: AssistOption) => void;
 }
 
 const ATTACK_KINDS = new Set([
@@ -48,6 +51,56 @@ const ATTACK_KINDS = new Set([
   "flame_lightning",
   "shockwave",
 ]);
+
+// Assist attacks (P4-R29): legal pooled attacks as buttons, sorted by expected
+// damage; illegal ones greyed with the ENGINE's own rejection reason (deduped —
+// "no actions remaining" once, not once per enemy).
+function AssistList({ assist, busy, onAssist }: {
+  assist: AssistOption[];
+  busy: boolean;
+  onAssist: (o: AssistOption) => void;
+}) {
+  if (!assist.length) return null;
+  const legal = assist
+    .filter((o) => o.ok)
+    .sort((a, b) => (b.expected_clicks ?? 0) - (a.expected_clicks ?? 0));
+  const blockedReasons = new Map<string, string>();
+  for (const o of assist) {
+    if (!o.ok && o.reason) {
+      const label = o.kind === "ranged_formation" ? "volley" : "gang up";
+      const key = `${label}: ${o.reason}`;
+      if (!blockedReasons.has(key)) blockedReasons.set(key, label);
+    }
+  }
+  return (
+    <div className="assist-list">
+      <div className="armed-title assist-title">Assist attacks</div>
+      {legal.map((o) => (
+        <button
+          key={`${o.kind}-${o.target}`}
+          className="btn assist-btn"
+          disabled={busy}
+          onClick={() => onAssist(o)}
+          title={
+            o.pushes
+              ? `Pushes ${o.pushing_members?.join(", ")} — 1 self-click each`
+              : `${o.primary_name} leads; each assist adds ${o.kind === "ranged_formation" ? "+2" : "+1"} to the roll`
+          }
+        >
+          {o.kind === "ranged_formation"
+            ? `Volley at ${o.target_name}`
+            : `Gang up on ${o.target_name}${o.rear ? " (rear +1)" : ""}`}
+          {" — "}atk {o.attack}, {Math.round((o.hit_odds ?? 0) * 100)}%
+          {o.pushes ? " ⚡push" : ""}
+        </button>
+      ))}
+      {legal.length === 0 &&
+        [...blockedReasons.keys()].slice(0, 4).map((k) => (
+          <div key={k} className="group-reason">✕ {k}</div>
+        ))}
+    </div>
+  );
+}
 
 function variantName(kind: string): string {
   switch (kind) {
@@ -159,6 +212,8 @@ export default function ActionPanel({
   group,
   onGroupMove,
   onGroupClear,
+  assist,
+  onAssist,
 }: Props) {
   const isHumanTurn = view.meta.active_player === "human" && !view.meta.ended;
 
@@ -285,6 +340,7 @@ export default function ActionPanel({
           {group.ok && (
             <div className="group-reason ok">✓ legal formation — one action moves all {group.uids.length}</div>
           )}
+          <AssistList assist={assist} busy={busy} onAssist={onAssist} />
         </div>
       )}
 

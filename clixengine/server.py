@@ -40,6 +40,7 @@ from .chat import build_system, chat_reply
 from .config import get_api_key
 from .data import load_db
 from .demo import demo_armies
+from .history import archive_game, history_dir, list_games
 from .engine import Engine
 from .setup import build_game
 from .terrain import TERRAIN_LIBRARY
@@ -91,6 +92,10 @@ class Session:
         # actually did last turn (and why), so promises and play stay coherent.
         self.chat_log: list[dict] = []
         self.last_turn_notes: list[str] = []
+        # All-time archive feeds (untrimmed, per game): the full chat transcript
+        # and the AI's per-turn rationales, checkpointed to the history dir.
+        self.chat_archive: list[dict] = []
+        self.ai_notes_log: list[dict] = []
         # Serializes terrain-placement streams so a duplicate/overlapping connection
         # (e.g. React StrictMode's dev double-mount) can't double-place. NEVER wait
         # on this indefinitely: a stream holds it across LLM calls, and a blocking
@@ -126,13 +131,37 @@ class Session:
         self.chat_log.append({"role": "human", "content": message})
         self.chat_log.append({"role": "opponent", "content": reply})
         del self.chat_log[:-16]
+        turn = self.engine.state.turn_number if self.engine else 0
+        self.chat_archive.append({"turn": turn, "role": "human", "content": message})
+        self.chat_archive.append({"turn": turn, "role": "opponent", "content": reply})
         return reply
+
+    def checkpoint(self, reason: str = "checkpoint") -> None:
+        """Refresh this game's all-time archive file (best-effort, never raises)."""
+        if self.engine is None:
+            return
+        kind = "heuristic" if isinstance(self.opponent, HeuristicAI) else "llm"
+        archive_game(self.engine, opponent_kind=kind, chat=self.chat_archive,
+                     ai_notes=self.ai_notes_log, reason=reason)
+
+    def record_opponent_notes(self) -> None:
+        """Bank this opponent turn's action rationales into the archive feed."""
+        if self.engine is None or not self.last_turn_notes:
+            return
+        self.ai_notes_log.append({"turn": self.engine.state.turn_number,
+                                  "notes": list(self.last_turn_notes)})
+        self.checkpoint(reason="opponent_turn")
 
     def start_game(self, human_army: Army, llm_army: Army, build_total: int,
                    seed: int, opponent: str = "llm", board: float = 36.0,
                    with_terrain: bool = False, terrain_per_player: int = 3,
                    with_deploy: bool = False):
         """Finalize a game from two prebuilt armies + wire the opponent controller."""
+        # Flush the outgoing game's final record before replacing it — the
+        # all-time archive must not lose abandoned games.
+        self.checkpoint(reason="replaced")
+        self.chat_log, self.last_turn_notes = [], []
+        self.chat_archive, self.ai_notes_log = [], []
         self.engine = build_game(human_army, llm_army, build_total=build_total, seed=seed,
                                  board_size=board, db=self.db, with_terrain=with_terrain,
                                  terrain_per_player=terrain_per_player, with_deploy=with_deploy)
@@ -144,6 +173,7 @@ class Session:
         else:
             llm = LLMOpponent()
             self.opponent = llm if llm.available else HeuristicAI()
+        self.checkpoint(reason="created")
         return self.engine
 
     def new_game(self, points: int, seed: int, board: float = 36.0, opponent: str = "llm",
@@ -161,11 +191,15 @@ class Session:
         """Best-effort snapshot of the live game on shutdown."""
         if self.engine is None:
             return
+        self.checkpoint(reason="shutdown")
         try:
             _SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
             kind = "heuristic" if isinstance(self.opponent, HeuristicAI) else "llm"
             with open(_SESSION_FILE, "wb") as fh:
-                pickle.dump({"engine": self.engine, "opponent": kind}, fh)
+                pickle.dump({"engine": self.engine, "opponent": kind,
+                             "chat_log": self.chat_log,
+                             "chat_archive": self.chat_archive,
+                             "ai_notes_log": self.ai_notes_log}, fh)
         except Exception:
             pass  # persistence is a convenience — never block shutdown
 
@@ -179,6 +213,10 @@ class Session:
             eng.game_id = getattr(eng, "game_id", "") or uuid4().hex
             _ = game_view(eng)  # smoke-test the restored object against current code
             self.engine = eng
+            # Archive feeds ride along so a deploy doesn't truncate the record.
+            self.chat_log = list(data.get("chat_log") or [])
+            self.chat_archive = list(data.get("chat_archive") or [])
+            self.ai_notes_log = list(data.get("ai_notes_log") or [])
             if data.get("opponent") == "heuristic":
                 self.opponent = HeuristicAI()
             else:
@@ -480,6 +518,8 @@ def place_terrain_polygon(req: PlaceTerrainPolygonReq):
         result = eng.place_terrain_polygon(SESSION.human_side, req.type, req.polygon)
     finally:
         SESSION.terrain_lock.release()
+    if result.ok:
+        SESSION.checkpoint(reason="terrain")
     return {
         "ok": result.ok,
         "reason": getattr(result, "reason", None),
@@ -617,11 +657,30 @@ def deploy_figure(req: DeployFigureReq):
     }
 
 
+@app.get("/api/formation_attack_options")
+def formation_attack_options(uids: str):
+    """Assist-attack options for a player-chosen group (engine-computed: a legal
+    option is exactly an intent the engine will accept)."""
+    eng = SESSION.require()
+    try:
+        ids = [int(x) for x in uids.split(",") if x.strip()]
+    except ValueError:
+        raise HTTPException(400, "uids must be a comma-separated list of ints")
+    return {"options": eng.formation_attack_options(ids)}
+
+
+@app.get("/api/history")
+def history():
+    """All-time archived game summaries (full records live one-per-game on disk)."""
+    return {"dir": str(history_dir()), "games": list_games()}
+
+
 @app.post("/api/finish_deploy")
 def finish_deploy():
     """The human is done arranging — begin the first battle turn."""
     eng = SESSION.require()
     result = eng.finish_deploy(SESSION.human_side)
+    SESSION.checkpoint(reason="deploy_done")
     return {
         "ok": result.ok,
         "reason": getattr(result, "reason", None),
@@ -673,6 +732,8 @@ def apply_intent(intent: dict):
     eng = SESSION.require()
     result = eng.apply(intent_from_dict(intent))
     _auto_free_spin_opponents(eng, result)  # AI defenders re-face when the human contacts them
+    if result.ok:
+        SESSION.checkpoint(reason="intent")
     return {
         "ok": result.ok,
         "reason": getattr(result, "reason", None),
@@ -687,6 +748,7 @@ def apply_intent(intent: dict):
 def end_turn():
     eng = SESSION.require()
     eng.end_turn()
+    SESSION.checkpoint(reason="end_turn")
     return game_view(eng)
 
 
@@ -737,9 +799,11 @@ def opponent_turn_stream():
                         and eng.state.opposing_contacts(g)
                     ]
                     if spinners:
+                        SESSION.record_opponent_notes()
                         yield sse({"type": "free_spin", "spinners": spinners,
                                    "by": offer.get("by"), "view": game_view(eng)})
                         return
+            SESSION.record_opponent_notes()
             yield sse({"type": "done", "view": game_view(eng)})
         except Exception as e:
             yield sse({"type": "error", "message": str(e), "view": game_view(eng)})

@@ -232,3 +232,70 @@ def test_wide_arc_figure_still_has_a_rear(db):
         ("llm", "Werebear", (10, 11.1), 0.0, 0),   # touching, straight UP (90 deg off)
     ], active="human")
     assert e2.legal_close_targets(e2.state.figure(0)) == []
+
+
+# --- assist-attack options (the human's group-select combat formations) -----
+def test_formation_attack_options_volley_matches_applier(db):
+    """A legal option is exactly an intent the engine accepts; an illegal one
+    carries the applier's own reason (per target, per kind)."""
+    e = build_engine(
+        db,
+        [
+            ("human", "Chaos Mage", (10, 10), math.pi / 2, 0),
+            ("human", "Chaos Mage", (11.1, 10), math.pi / 2, 0),
+            ("human", "Chaos Mage", (12.2, 10), math.pi / 2, 0),
+            ("llm", "Werebear", (11.1, 16), -math.pi / 2, 0),   # in range/arc of all
+            ("llm", "Werebear", (11.1, 33), -math.pi / 2, 0),   # far beyond range 12
+        ],
+    )
+    uids = [0, 1, 2]
+    opts = e.formation_attack_options(uids)
+    volley = next(o for o in opts if o["kind"] == "ranged_formation" and o["target"] == 3)
+    assert volley["ok"] and volley["attack"] == e.state.figure(volley["primary"]).attack + 4
+    far = next(o for o in opts if o["kind"] == "ranged_formation" and o["target"] == 4)
+    assert not far["ok"] and far["reason"]
+    # Close formation of 3 vs an untouched target: illegal with the contact reason.
+    gang = next(o for o in opts if o["kind"] == "close_formation" and o["target"] == 3)
+    assert not gang["ok"] and "base contact" in gang["reason"]
+    # The legal volley round-trips through the applier unchanged.
+    r = e.apply(RangedIntent(volley["primary"], (volley["target"],),
+                             formation_uids=tuple(volley["members"])))
+    assert r.ok
+
+
+def test_formation_attack_options_close_gang_with_rear(db):
+    e = build_engine(
+        db,
+        [
+            ("human", "Chaos Mage", (15, 13.9), math.pi / 2, 0),    # in front of target
+            ("human", "Chaos Mage", (15, 16.1), -math.pi / 2, 0),   # behind it (rear)
+            ("llm", "Werebear", (15, 15), math.pi / 2, 0),          # faces +y
+        ],
+    )
+    opts = e.formation_attack_options([0, 1])
+    gang = next(o for o in opts if o["kind"] == "close_formation")
+    assert gang["ok"] and gang["rear"]
+    primary = e.state.figure(gang["primary"])
+    assert gang["attack"] == primary.attack + 1 + 1  # +1 assist, +1 rear
+    r = e.apply(CloseIntent(gang["primary"], gang["target"],
+                            formation_uids=tuple(gang["members"])))
+    assert r.ok
+    # 2 members can't volley: no ranged_formation entries for a pair.
+    assert not [o for o in opts if o["kind"] == "ranged_formation"]
+
+
+def test_ranged_formation_candidates_cover_every_visible_target(db):
+    """The AI's candidate list has one volley per enemy the whole cluster sees
+    (first-visible-only starved it of the better target)."""
+    e = build_engine(
+        db,
+        [
+            ("human", "Chaos Mage", (10, 10), math.pi / 2, 0),
+            ("human", "Chaos Mage", (11.1, 10), math.pi / 2, 0),
+            ("human", "Chaos Mage", (12.2, 10), math.pi / 2, 0),
+            ("llm", "Werebear", (9, 16), -math.pi / 2, 0),
+            ("llm", "Werebear", (14, 16), -math.pi / 2, 0),
+        ],
+    )
+    cands = [c for c in generate_formation_candidates(e, "human") if c.kind == "ranged_formation"]
+    assert {c.annotation["target"] for c in cands} == {3, 4}

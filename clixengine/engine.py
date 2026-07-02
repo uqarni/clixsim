@@ -1598,23 +1598,24 @@ class Engine:
         self._check_victory(events)
         return Result("formation_move", events, f"formation of {len(figs)} advances")
 
-    def _apply_ranged_formation(self, intent) -> Result | Rejection:
+    def _check_ranged_formation(self, uids: list[int], primary_uid: int,
+                                target_uid: int) -> tuple | Rejection:
+        """Full legality check for a ranged formation attack (P4-R29). Shared by
+        the applier and formation_attack_options, so the client's assist panel
+        can never drift from what the engine actually accepts."""
         if self._actions_remaining() <= 0:
             return Rejection("no_actions", "no actions remaining this turn")
-        uids = list(intent.formation_uids)
         if not (3 <= len(uids) <= 5):
             return Rejection("bad_formation", "a ranged formation is 3-5 figures")
         figs = self._validate_formation(uids, "ranged")
         if isinstance(figs, Rejection):
             return figs
-        primary = self.state.figures.get(intent.attacker_uid)
+        primary = self.state.figures.get(primary_uid)
         if primary is None or primary.uid not in uids:
             return Rejection("bad_formation", "primary attacker must be a member")
         if not self._positions_cohesive([g.position for g in figs], [g.base_radius for g in figs]):
             return Rejection("bad_formation", "members must each touch another member")
-        if len(intent.target_uids) != 1:
-            return Rejection("bad_target", "a ranged formation attacks a single target")
-        target = self.state.figures.get(intent.target_uids[0])
+        target = self.state.figures.get(target_uid)
         if target is None or not target.is_alive or target.owner == primary.owner:
             return Rejection("bad_target", "target must be a living opponent")
         for g in figs:
@@ -1627,6 +1628,17 @@ class Engine:
             clear, reason = self.line_of_fire(g.uid, target.uid)
             if not clear:
                 return Rejection("no_lof", f"{g.short_name}: {reason}")
+        return figs, primary, target
+
+    def _apply_ranged_formation(self, intent) -> Result | Rejection:
+        if len(intent.target_uids) != 1:
+            return Rejection("bad_target", "a ranged formation attacks a single target")
+        chk = self._check_ranged_formation(
+            list(intent.formation_uids), intent.attacker_uid, intent.target_uids[0])
+        if isinstance(chk, Rejection):
+            return chk
+        figs, primary, target = chk
+        uids = list(intent.formation_uids)
         events: list[dict] = []
         pushers = self._token_formation(figs)
         atk = primary.attack + 2 * (len(figs) - 1)  # +2 per extra member
@@ -1651,19 +1663,22 @@ class Engine:
         return Result("ranged_formation", events,
                       f"{len(figs)}-figure ranged formation fires at {target.short_name}")
 
-    def _apply_close_formation(self, intent) -> Result | Rejection:
+    def _check_close_formation(self, uids: list[int], primary_uid: int,
+                               target_uid: int) -> tuple | Rejection:
+        """Full legality check for a close formation attack (P4-R29) — members
+        need not touch each other, only the target. Shared by the applier and
+        formation_attack_options."""
         if self._actions_remaining() <= 0:
             return Rejection("no_actions", "no actions remaining this turn")
-        uids = list(intent.formation_uids)
         if not (2 <= len(uids) <= 3):
             return Rejection("bad_formation", "a close formation is 2-3 figures")
         figs = self._validate_formation(uids, "close")
         if isinstance(figs, Rejection):
             return figs
-        primary = self.state.figures.get(intent.attacker_uid)
+        primary = self.state.figures.get(primary_uid)
         if primary is None or primary.uid not in uids:
             return Rejection("bad_formation", "primary attacker must be a member")
-        target = self.state.figures.get(intent.target_uid)
+        target = self.state.figures.get(target_uid)
         if target is None or not target.is_alive or target.owner == primary.owner:
             return Rejection("bad_target", "target must be a living opponent")
         for g in figs:
@@ -1673,6 +1688,15 @@ class Engine:
                 return Rejection("not_adjacent", f"{g.short_name} is not in base contact with the target")
             if not in_front_arc(g.position, g.facing, target.position, g.arc_half_angle):
                 return Rejection("out_of_arc", f"{g.short_name}'s front arc is not on the target")
+        return figs, primary, target
+
+    def _apply_close_formation(self, intent) -> Result | Rejection:
+        chk = self._check_close_formation(
+            list(intent.formation_uids), intent.attacker_uid, intent.target_uid)
+        if isinstance(chk, Rejection):
+            return chk
+        figs, primary, target = chk
+        uids = list(intent.formation_uids)
         events: list[dict] = []
         pushers = self._token_formation(figs)
         rear = 1 if any(
@@ -1704,6 +1728,57 @@ class Engine:
         self._check_victory(events)
         return Result("close_formation", events,
                       f"{len(figs)}-figure close formation attacks {target.short_name}")
+
+    def formation_attack_options(self, uids: list[int]) -> list[dict]:
+        """Assist-attack options for a player-chosen group: for every living
+        enemy, can this EXACT group volley (ranged formation, 3-5 members,
+        +2 attack per assist) or gang up in close combat (2-3 members, +1 per
+        assist, +1 rear)? Reuses the appliers' own checks, so a legal option
+        here is precisely an intent the engine will accept — and an illegal
+        one carries the applier's exact reason for the client to display."""
+        figs = [self.state.figures.get(u) for u in uids]
+        if not uids or any(f is None or not f.is_alive for f in figs):
+            return []
+        primary = max(figs, key=lambda f: (f.damage, f.attack))
+        pushers = [f.short_name for f in figs if f.action_tokens >= 1]
+        out: list[dict] = []
+        for t in sorted(self.state.figures.values(), key=lambda f: f.uid):
+            if not t.is_alive or t.owner == primary.owner:
+                continue
+            for kind, lo, hi in (("ranged_formation", 3, 5), ("close_formation", 2, 3)):
+                if not (lo <= len(uids) <= hi):
+                    continue
+                chk = (self._check_ranged_formation(list(uids), primary.uid, t.uid)
+                       if kind == "ranged_formation"
+                       else self._check_close_formation(list(uids), primary.uid, t.uid))
+                entry: dict = {"kind": kind, "target": t.uid, "target_name": t.short_name,
+                               "primary": primary.uid, "primary_name": primary.short_name,
+                               "members": list(uids)}
+                if isinstance(chk, Rejection):
+                    entry["ok"] = False
+                    entry["reason"] = chk.detail or chk.reason
+                else:
+                    _figs, prim, tgt = chk
+                    n = len(uids)
+                    mode = "ranged" if kind == "ranged_formation" else "close"
+                    rear = mode == "close" and any(
+                        in_rear_arc(tgt.position, tgt.facing, g.position, tgt.arc_half_angle)
+                        for g in _figs
+                    )
+                    atk = (prim.attack + 2 * (n - 1) if mode == "ranged"
+                           else prim.attack + (n - 1) + (1 if rear else 0))
+                    eff_def = ab.effective_defense(
+                        self.state, tgt, mode, self.terrain_defense_mod(prim, tgt, mode))
+                    hit = hit_probability(atk, eff_def)
+                    per_hit = ab.damage_after_defenses(tgt, prim.damage, mode, False)
+                    entry.update({"ok": True, "attack": atk, "hit_odds": round(hit, 3),
+                                  "expected_clicks": round(hit * per_hit, 2),
+                                  "rear": bool(rear)})
+                    if pushers:
+                        entry["pushes"] = True
+                        entry["pushing_members"] = pushers
+                out.append(entry)
+        return out
 
     # ------------------------------------------------------------------ #
     # Start-of-turn ability effects (Command)

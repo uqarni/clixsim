@@ -600,30 +600,28 @@ def _make_formation_move(engine: Engine, cluster: list[Figure]) -> Candidate | N
                       "size": len(cluster), "toward": tgt.uid})
 
 
-def _make_ranged_formation(engine: Engine, cluster: list[Figure]) -> Candidate | None:
-    enemies = engine.state.opponents_of(cluster[0])
-    target = next(
-        (t for t in enemies if all(engine.line_of_fire(f.uid, t.uid)[0] for f in cluster)),
-        None,
-    )
-    if target is None:
-        return None
+def _make_ranged_formations(engine: Engine, cluster: list[Figure], cands: list[Candidate]) -> None:
+    """One candidate per enemy the WHOLE cluster can see — the picker chooses
+    the target (first-visible-only starved the AI of its best volley)."""
     primary = max(cluster, key=lambda f: (f.damage, f.attack))
     n = len(cluster)
     atk = primary.attack + 2 * (n - 1)
-    # Score against the defense the engine actually resolves against (Battle Armor /
-    # Defend via effective_defense; Toughness via damage_after_defenses).
-    eff_def = ab.effective_defense(engine.state, target, "ranged")
-    hit = hit_probability(atk, eff_def)
-    per_hit = ab.damage_after_defenses(target, primary.damage, "ranged", False)
     uids = tuple(f.uid for f in cluster)
-    return Candidate(
-        RangedIntent(primary.uid, (target.uid,), formation_uids=uids), "ranged_formation",
-        f"Ranged formation ({n}) fires at {target.short_name}",
-        {"primary": primary.uid, "members": list(uids), "target": target.uid,
-         "hit_odds": round(hit, 3), "expected_clicks": round(hit * per_hit, 2),
-         "attack": atk},
-    )
+    for target in engine.state.opponents_of(cluster[0]):
+        if not all(engine.line_of_fire(f.uid, target.uid)[0] for f in cluster):
+            continue
+        # Score against the defense the engine actually resolves against (Battle
+        # Armor / Defend via effective_defense; Toughness via damage_after_defenses).
+        eff_def = ab.effective_defense(engine.state, target, "ranged")
+        hit = hit_probability(atk, eff_def)
+        per_hit = ab.damage_after_defenses(target, primary.damage, "ranged", False)
+        cands.append(Candidate(
+            RangedIntent(primary.uid, (target.uid,), formation_uids=uids), "ranged_formation",
+            f"Ranged formation ({n}) fires at {target.short_name}",
+            {"primary": primary.uid, "members": list(uids), "target": target.uid,
+             "hit_odds": round(hit, 3), "expected_clicks": round(hit * per_hit, 2),
+             "attack": atk},
+        ))
 
 
 def _make_close_formations(engine: Engine, members: list[Figure], cands: list[Candidate]) -> None:
@@ -716,9 +714,7 @@ def generate_formation_candidates(
         ]
         for cluster in _cohesive_clusters(ranged_elig):
             if len(cluster) >= 3:
-                c = _make_ranged_formation(engine, cluster[:5])
-                if c:
-                    cands.append(c)
+                _make_ranged_formations(engine, cluster[:5], cands)
         # Close formation: 2-3 members ganging one enemy (need not touch each other).
         _make_close_formations(engine, [f for f in members if not f.is_demoralized], cands)
 

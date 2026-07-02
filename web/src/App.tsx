@@ -4,12 +4,14 @@ import {
   endTurn,
   explainAttack,
   getCandidates,
+  getFormationAttackOptions,
   getFormationCandidates,
   getState,
   opponentTurnStreamUrl,
   toggleAbility,
   validateMove,
   type ApplyResult,
+  type AssistOption,
   type OpponentStreamEvent,
   type AttackExplain,
   type Candidate,
@@ -740,6 +742,37 @@ export default function App() {
     return { uids: figs.map((f) => f.uid), names, ok: reason === null, reason };
   }, [view, selection, formationStage]);
 
+  // Assist attacks (P4-R29 combat formations): engine-computed options for the
+  // selected group — volley (3-5 ranged, +2/assist) or gang up (2-3 close,
+  // +1/assist). Refetches whenever the selection or the board changes.
+  const [assistOptions, setAssistOptions] = useState<AssistOption[]>([]);
+  useEffect(() => {
+    let stale = false;
+    const battle = !!view && view.meta.phase === "battle" && !view.meta.ended &&
+      view.meta.active_player === "human";
+    if (!battle || selection.length < 2 || selection.length > 5 || formationStage) {
+      setAssistOptions([]);
+      return;
+    }
+    getFormationAttackOptions(selection)
+      .then((opts) => { if (!stale) setAssistOptions(opts); })
+      .catch(() => { if (!stale) setAssistOptions([]); });
+    return () => { stale = true; };
+  }, [view, selection, formationStage]);
+
+  const onAssistAttack = useCallback(
+    (o: AssistOption) => {
+      runIntent(
+        o.kind === "ranged_formation"
+          ? { kind: "ranged", attacker_uid: o.primary, target_uids: [o.target],
+              formation_uids: o.members }
+          : { kind: "close", attacker_uid: o.primary, target_uid: o.target,
+              formation_uids: o.members },
+      );
+    },
+    [runIntent],
+  );
+
   // Defer the member being placed to the end of the queue, so arrangements that
   // aren't reachable in the default order (e.g. A—C—B chains) can be staged.
   const formationDefer = useCallback(() => {
@@ -1043,6 +1076,8 @@ export default function App() {
                   : null
               }
               group={groupInfo}
+              assist={assistOptions}
+              onAssist={onAssistAttack}
               onGroupMove={() => groupInfo?.ok && startFormationStaging(groupInfo.uids)}
               onGroupClear={() => {
                 setSelection([]);

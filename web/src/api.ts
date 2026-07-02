@@ -226,6 +226,34 @@ export async function getFormationCandidates(): Promise<Candidate[]> {
   return req<Candidate[]>("/api/formation_candidates");
 }
 
+// GET /api/formation_attack_options — assist attacks for a player-chosen group.
+// Engine-computed: a legal option here is exactly an intent the engine accepts;
+// an illegal one carries the applier's own rejection reason for display.
+export interface AssistOption {
+  kind: "ranged_formation" | "close_formation";
+  target: number;
+  target_name: string;
+  primary: number;
+  primary_name: string;
+  members: number[];
+  ok: boolean;
+  reason?: string;
+  attack?: number;
+  hit_odds?: number;
+  expected_clicks?: number;
+  rear?: boolean;
+  pushes?: boolean;
+  pushing_members?: string[];
+}
+
+export async function getFormationAttackOptions(uids: number[]): Promise<AssistOption[]> {
+  if (USE_MOCK) return [];
+  const r = await req<{ options: AssistOption[] }>(
+    `/api/formation_attack_options?uids=${uids.join(",")}`,
+  );
+  return r.options;
+}
+
 // POST /api/explain — modifier breakdown for a prospective attack.
 export async function explainAttack(
   attackerUid: number,
