@@ -124,6 +124,23 @@ class LLMOpponent:
         }
         return json.dumps(payload, indent=2)
 
+    def _battle_system(self, engine: Engine) -> str:
+        """Strategy principles + the rules digest + the OFFICIAL card text for
+        every ability present in this battle — the opponent plays with the same
+        references a human has (dials and geometry stay engine-computed, DP2)."""
+        from ..chat import rules_digest
+
+        ids = sorted({aid for f in engine.state.living()
+                      for aid in f.definition.all_ability_ids()})
+        lines = []
+        for aid in ids:
+            a = engine.db.ability(aid)
+            if a and a.description:
+                lines.append(f"- {a.name}: {a.description.strip()}")
+        card = ("Official ability card text for the abilities in this battle:\n"
+                + "\n".join(lines))
+        return f"{_SYSTEM}\n\n{rules_digest()}\n\n{card}"
+
     def _ask(self, engine: Engine, ranked) -> tuple[int | None, str]:
         prompt = self._prompt(engine, ranked)
         try:
@@ -131,7 +148,7 @@ class LLMOpponent:
             resp = self._client.messages.create(
                 model=self.model,
                 max_tokens=self.max_tokens,
-                system=_SYSTEM,
+                system=self._battle_system(engine),
                 output_config={
                     "effort": self.effort,
                     "format": {"type": "json_schema", "schema": _SCHEMA},

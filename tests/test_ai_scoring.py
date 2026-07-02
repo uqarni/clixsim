@@ -143,3 +143,26 @@ def test_push_facts_stamped_on_candidates(db):
     kill_flags = [c.annotation.get("push_would_eliminate")
                   for c in generate_candidates(e, f) if c.kind != "pass"]
     assert kill_flags and all(kill_flags)
+
+
+def test_opponent_brain_gets_terrain_and_ability_card(db):
+    """The battle LLM's context must include the terrain map and the official
+    card text for the abilities actually in play."""
+    import math
+    from .conftest import build_engine
+    from clixengine.snapshot import board_snapshot
+    from clixengine.ai.llm import LLMOpponent
+    from clixengine.geometry import Vec
+    from clixengine.terrain import TerrainPiece
+
+    e = build_engine(db, [
+        ("human", "Werebear", (10, 10), math.pi / 2, 0),
+        ("llm", "Magus", (25, 25), -math.pi / 2, 0),  # Magic Blast on the dial
+    ], active="llm")
+    e.state.terrain.append(TerrainPiece(
+        0, "clear", (Vec(15, 15), Vec(20, 15), Vec(20, 20), Vec(15, 20)), elevated=True))
+    snap = board_snapshot(e)
+    assert snap["terrain"] and snap["terrain"][0]["type"] == "elevated"
+    sysprompt = LLMOpponent()._battle_system(e)
+    assert "Magic Blast" in sysprompt and "line of fire" in sysprompt.lower()
+    assert "Formations" in sysprompt or "formation" in sysprompt  # rules digest present

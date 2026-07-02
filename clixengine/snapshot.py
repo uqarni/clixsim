@@ -42,6 +42,17 @@ def _figure_view(engine: Engine, f: Figure) -> dict:
     }
 
 
+def _terrain_brief(t) -> dict:
+    """Compact terrain fact for the LLM: type + where + rough size (the engine
+    already folds exact terrain geometry into every candidate's odds)."""
+    cx = sum(v.x for v in t.polygon) / len(t.polygon)
+    cy = sum(v.y for v in t.polygon) / len(t.polygon)
+    radius = max(math.hypot(v.x - cx, v.y - cy) for v in t.polygon)
+    kind = ("deep water" if t.water == "deep" else "shallow water" if t.water == "shallow"
+            else "low wall" if t.low_wall else "elevated" if t.elevated else t.kind)
+    return {"type": kind, "center": [round(cx, 1), round(cy, 1)], "radius": round(radius, 1)}
+
+
 def board_snapshot(engine: Engine) -> dict:
     state = engine.state
     return {
@@ -51,5 +62,6 @@ def board_snapshot(engine: Engine) -> dict:
         "actions_remaining": state.actions_per_turn() - len(engine._acted_uids),
         "board": {"width": state.board.width, "height": state.board.height},
         "figures": [_figure_view(engine, f) for f in state.living()],
+        "terrain": [_terrain_brief(t) for t in state.terrain],
         "ability_coverage": engine.ability_coverage(),
     }
