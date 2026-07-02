@@ -409,11 +409,15 @@ def _construct_stream(mode: str, points: int, opponent: str, seed: int,
             pool_counts = {}
             for fid in llm_pool:
                 pool_counts[fid] = pool_counts.get(fid, 0) + 1
-        for step in range(12):
+        # Pick cap scales with the budget — a flat 12 stranded ~140 pts of a
+        # 400-pt draft built from cheap figures (it's a runaway guard, not a
+        # design constraint).
+        for step in range(max(12, budget // 10)):
             cands = _affordable(db, llm_pool, remaining, used_uniques, pool_counts)
             if not cands:
                 break
             army_brief = [{"name": db.get(i).short_name, "points": db.get(i).points,
+                           "faction": db.get(i).faction,  # the fallback's faction filter reads this
                            "role": _role(db.get(i))} for i in llm_ids]
             pick, reason, used_llm = builder.pick(db, cands, army_brief, remaining, budget, seed * 100 + step)
             if pick is None:
@@ -441,7 +445,7 @@ def _construct_stream(mode: str, points: int, opponent: str, seed: int,
         # all inherit the drafter's doctrine + pick reasoning (stored on the
         # engine so it survives restarts with the game).
         SESSION.engine.doctrine = builder.doctrine
-        SESSION.engine.draft_notes = draft_notes[:12]
+        SESSION.engine.draft_notes = draft_notes[:20]
         yield sse({"type": "ready", "view": game_view(SESSION.engine)})
     except Exception as e:  # never leave the client hanging
         yield sse({"type": "error", "message": str(e)})

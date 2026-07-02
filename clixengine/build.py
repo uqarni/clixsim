@@ -197,7 +197,18 @@ formation of same-faction shooters adds +2 to the roll per extra member. A \
 faction-salad army can never form one. Concentrate most of your points in ONE \
 faction (two at most), aiming for at least 3-4 figures of it. Caveats: figures \
 with Flight/Aquatic/Quickness cannot join MOVEMENT formations (fine as loners), \
-and Mage Spawn can never join any formation."""
+and Mage Spawn can never join any formation.
+
+BUT a formation is 3-5 figures, NOT the whole army — buying the same cheap \
+figure six or more times wastes the bonus (only 5 can act together) and makes \
+you predictable and fragile. Army shape that wins: ONE cohesive 3-5 figure \
+same-faction block + one or two expensive heavy hitters + support (a healer, \
+melee to screen shooters). Prefer at most ~3 copies of any single figure \
+unless you are deliberately drafting a horde.
+
+SPEND THE BUDGET. An army that leaves points on the table is strictly weaker — \
+keep picking until fewer than ~10 points remain. In big-points games, that \
+means BIG pieces, not more copies of the cheapest figure."""
 
 # A per-game drafting doctrine keeps armies varied across games (the model
 # otherwise converges on the same "best" picks every time).
