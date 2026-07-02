@@ -112,3 +112,59 @@ def test_drafter_and_battle_prompts_teach_formations(db):
     assert "SAME-FACTION" in draft_system          # draft for formations
     assert "formation_move" in battle_system       # value the candidate in play
     assert "ranged_formation" in battle_system
+
+
+def test_pick_fallback_concentrates_factions_too(db):
+    """ArmyBuilder.pick's heuristic fallback (heuristic opponent / no API key)
+    applies the same formation-aware narrowing as heuristic_army — this is the
+    draft path the server actually uses for the AI army."""
+    from collections import Counter
+
+    from clixengine.build import ArmyBuilder, _affordable, _fig_brief, _formation_capable
+
+    for seed in (1, 4, 7, 12):
+        b = ArmyBuilder.__new__(ArmyBuilder)
+        b.available = False
+        ids, used_uniques, remaining, brief = [], set(), 200, []
+        for step in range(12):
+            cands = _affordable(db, None, remaining, used_uniques, None)
+            if not cands:
+                break
+            fig, _, used_llm = ArmyBuilder.pick(b, db, cands, brief, remaining, 200,
+                                                seed=seed * 100 + step)
+            assert not used_llm
+            if fig is None:
+                break
+            ids.append(fig.id)
+            remaining -= fig.points
+            if fig.is_unique:
+                used_uniques.add(fig.id)
+            brief.append(_fig_brief(db, fig))
+        capable = Counter(db.get(i).faction for i in ids if _formation_capable(db.get(i)))
+        assert capable and max(capable.values()) >= 3, (
+            f"seed {seed}: fallback draft lacks a formation block: "
+            f"{[db.get(i).short_name for i in ids]}"
+        )
+
+
+def test_sealed_heuristic_army_spends_its_budget(db):
+    """The faction lock must not strand sealed-pool budget: the top-up pass
+    relaxes it and keeps buying (regression: avg spend fell 160 -> 131)."""
+    from clixengine.build import heuristic_army, sample_sealed_pool
+
+    spends = []
+    for seed in range(8):
+        pool = sample_sealed_pool(db, seed)
+        a = heuristic_army(db, "human", 200, seed, candidate_ids=pool)
+        spent = sum(db.get(i).points for i in a.figure_ids)
+        assert spent <= 200
+        spends.append(spent)
+    assert min(spends) >= 160, f"sealed army badly under budget: {spends}"
+
+
+def test_battle_prompt_close_formation_cohesion_is_correct(db):
+    """P4-R29: close-formation members need not touch each other (only the
+    target); the prompt must not teach a member-cohesion prerequisite."""
+    from clixengine.ai.llm import _SYSTEM
+
+    assert "not each other" in _SYSTEM

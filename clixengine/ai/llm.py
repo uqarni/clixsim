@@ -51,9 +51,10 @@ actions across fresh figures beats hammering one figure two turns in a row.
 3-5 same-faction figures for ONE action (vs one figure per action normally) — \
 strongly prefer it over single moves when advancing a group. A \
 "ranged_formation" pools shooters for +2 to the roll per extra member; a \
-"close_formation" pools melee for +1 per extra member. Keep same-faction \
-figures touching so these options keep appearing; scattering them throws the \
-advantage away.
+"close_formation" pools melee for +1 per extra member (members need only \
+touch the TARGET, not each other — flank freely). Movement and ranged \
+formations DO need members touching each other, so keep same-faction figures \
+cohesive when advancing; scattering them throws the advantage away.
 
 Respond with ONLY the chosen candidate id and a one-line rationale."""
 

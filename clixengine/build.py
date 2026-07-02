@@ -160,6 +160,20 @@ def heuristic_army(
         if pool_counts is not None:
             pool_counts[pick.id] -= 1
         want_ranged = not want_ranged
+    # Top-up: the faction lock can strand budget when faction-mates run out
+    # (common in sealed pools, where the pulled copies of a faction are few).
+    # Relax it and spend the remainder on the priciest affordable figures.
+    while len(ids) < max(3, budget // 25):
+        cands = _affordable(db, candidate_ids, remaining, used_uniques, pool_counts)
+        if not cands:
+            break
+        pick = rng.choice(cands[: min(3, len(cands))])
+        ids.append(pick.id)
+        remaining -= pick.points
+        if pick.is_unique:
+            used_uniques.add(pick.id)
+        if pool_counts is not None:
+            pool_counts[pick.id] -= 1
     if not ids:  # guarantee non-empty
         cheapest = min(db.all_figures(), key=lambda f: f.points)
         ids = [cheapest.id]
@@ -293,10 +307,21 @@ class ArmyBuilder:
                 if match is not None:
                     return match, reason or f"Adds {match.short_name}.", True
                 # invalid id -> fall through to heuristic
-        # Heuristic fallback: priciest affordable, roughly alternating role.
+        # Heuristic fallback: formation-aware, like heuristic_army — stick to
+        # factions already drafted and prefer formation-capable figures, so
+        # key-less/heuristic games also field armies that can form up.
         rng = random.Random(seed)
         if not cands:
             return None, "No affordable figures left.", False
-        top = cands[: min(3, len(cands))]
+        pool = cands
+        used_factions = {b.get("faction") for b in army_brief} - {"Mage Spawn", None}
+        if used_factions:
+            same = [f for f in pool if f.faction in used_factions]
+            if same:
+                pool = same
+        grounded = [f for f in pool if _formation_capable(f)]
+        if grounded:
+            pool = grounded
+        top = pool[: min(3, len(pool))]
         pick = rng.choice(top)
         return pick, f"Solid {_role(pick)} pick at {pick.points} pts.", False
