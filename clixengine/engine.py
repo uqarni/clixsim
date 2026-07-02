@@ -1258,8 +1258,14 @@ class Engine:
             self._crit_miss_self(f, events)  # roll of "2": weapon backfire on the healer (rulebook §Rolling 2 and 12)
         events.append(self.log.emit("magic_healing", healer=f.uid, target=t.uid,
                       dice=[d1, d2], result=res, healed=healed))
-        return self._finish_action(f, events, pushing, "ranged",
-                                   f"{f.short_name} magically heals {t.short_name} ({healed} clicks)")
+        if res == "crit_miss":
+            summary = (f"{f.short_name}'s Magic Healing backfires (natural 2) — "
+                       f"{f.short_name} takes 1 click; {t.short_name} is unhurt")
+        elif healed > 0:
+            summary = f"{f.short_name} magically heals {t.short_name} ({healed} clicks)"
+        else:
+            summary = f"{f.short_name} fails to heal {t.short_name} (missed — no effect)"
+        return self._finish_action(f, events, pushing, "ranged", summary)
 
     def _resolve_healing(self, f: Figure, intent) -> Result | Rejection:
         t = self.state.figures.get(intent.target_uid)
@@ -1281,8 +1287,16 @@ class Engine:
             self._crit_miss_self(f, events)  # roll of "2": weapon backfire on the healer (rulebook §Rolling 2 and 12)
         events.append(self.log.emit("healing", healer=f.uid, target=t.uid,
                       dice=[d1, d2], result=res, healed=healed))
-        return self._finish_action(f, events, pushing, "close",
-                                   f"{f.short_name} heals {t.short_name} ({healed} clicks)")
+        # Summaries must say what actually happened — "heals (0 clicks)" on a
+        # backfire reads like the TARGET was hurt.
+        if res == "crit_miss":
+            summary = (f"{f.short_name}'s healing backfires (natural 2) — "
+                       f"{f.short_name} takes 1 click; {t.short_name} is unhurt")
+        elif healed > 0:
+            summary = f"{f.short_name} heals {t.short_name} ({healed} clicks)"
+        else:
+            summary = f"{f.short_name} fails to heal {t.short_name} (missed — no effect)"
+        return self._finish_action(f, events, pushing, "close", summary)
 
     # ------------------------------------------------------------------ #
     # Ability special *move* actions (move-but-don't-move)

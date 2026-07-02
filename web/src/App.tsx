@@ -98,7 +98,11 @@ function deriveFx(events: GameEvent[], view: GameView): Fx[] {
       const p = pos(u);
       const clk = num(e.clicks);
       if (p && clk > 0) {
-        out.push({ kind: "float", x: p[0], y: p[1], text: `-${clk}`, color: RED, dur: 900 });
+        // Name the self-damage sources: a bare "-1" next to two touching figures
+        // (e.g. a healer and its patient) reads as damage to the wrong one.
+        const label =
+          t === "crit_miss_self" ? `backfire -${clk}` : t === "push_damage" ? `push -${clk}` : `-${clk}`;
+        out.push({ kind: "float", x: p[0], y: p[1], text: label, color: RED, dur: 900 });
         out.push({ kind: "flash", x: p[0], y: p[1], color: RED, dur: 400 });
       }
     } else if (t === "eliminated") {
