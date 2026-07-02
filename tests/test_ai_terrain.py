@@ -248,3 +248,31 @@ def test_polygon_terrain_accepts_reasonable_shape(db):
     ok_shape = [(16, 16), (20, 16), (21, 19), (18, 21), (15, 19)]  # ~19 in², ~6" across
     r = e.place_terrain_polygon("human", "hindering", ok_shape)
     assert r.ok, f"{getattr(r, 'reason', '')}: {getattr(r, 'detail', '')}"
+
+
+def test_manual_formation_candidate_when_auto_move_is_blocked(db):
+    """Review fix: the interactive place-each-member flow must exist even when the
+    rigid auto-translation is infeasible (here: a wall dead ahead)."""
+    from clixengine.candidates import generate_formation_candidates
+
+    e = build_engine(db, [
+        ("human", "Brass Golem", (16.9, 10), math.pi / 2, 0),
+        ("human", "Brass Golem", (18.0, 10), math.pi / 2, 0),
+        ("human", "Brass Golem", (19.1, 10), math.pi / 2, 0),
+        ("llm", "Werebear", (18, 30), -math.pi / 2, 0),
+    ], active="human")
+    e.state.terrain.append(TerrainPiece(
+        0, "blocking", (Vec(14, 12), Vec(22, 12), Vec(22, 14), Vec(14, 14))))
+    ai_cands = [c for c in generate_formation_candidates(e, "human")
+                if c.kind == "formation_move"]
+    ui_cands = [c for c in generate_formation_candidates(e, "human", include_manual=True)
+                if c.kind == "formation_move"]
+    assert not ai_cands, "auto move should be infeasible into the wall"
+    assert ui_cands and ui_cands[0].annotation.get("manual_only") is True
+    # And the engine accepts a hand-staged lateral arrangement for that cluster.
+    from clixengine.intents import MoveIntent
+    uids = tuple(ui_cands[0].annotation["members"])
+    dests = tuple((e.state.figure(u).position.x - 3.0, e.state.figure(u).position.y) for u in uids)
+    r = e.apply(MoveIntent(uids[0], dests[0], math.pi / 2, formation_uids=uids,
+                           member_dests=dests, member_facings=(math.pi / 2,) * 3))
+    assert r.ok, f"{getattr(r, 'reason', '')}: {getattr(r, 'detail', '')}"

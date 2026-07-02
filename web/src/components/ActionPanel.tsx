@@ -21,10 +21,17 @@ interface Props {
   onConfirmMove: () => void;
   onCancelMove: () => void;
   // Interactive formation move (place members one at a time).
-  formation: { total: number; placedCount: number; currentName: string | null; speed: number } | null;
+  formation: {
+    total: number;
+    placedCount: number;
+    currentName: string | null;
+    speed: number;
+    canDefer: boolean;
+  } | null;
   onFormationStart: (c: Candidate) => void;
   onFormationBack: () => void;
   onFormationLeave: () => void;
+  onFormationDefer: () => void;
   onFormationCancel: () => void;
   onFormationSubmit: () => void;
 }
@@ -142,6 +149,7 @@ export default function ActionPanel({
   onFormationStart,
   onFormationBack,
   onFormationLeave,
+  onFormationDefer,
   onFormationCancel,
   onFormationSubmit,
 }: Props) {
@@ -215,7 +223,14 @@ export default function ActionPanel({
                     <button className="btn" onClick={onCancelMove} disabled={busy}>Re-place</button>
                   </>
                 ) : (
-                  <button className="btn" onClick={onFormationLeave} disabled={busy}>Leave in place</button>
+                  <>
+                    <button className="btn" onClick={onFormationLeave} disabled={busy}>Leave in place</button>
+                    {formation.canDefer && (
+                      <button className="btn" onClick={onFormationDefer} disabled={busy} title="Place this member after the others">
+                        Place later
+                      </button>
+                    )}
+                  </>
                 )}
                 <button className="btn" onClick={onFormationBack} disabled={busy || (formation.placedCount === 0 && !pendingMove)}>
                   Back
@@ -338,14 +353,16 @@ export default function ActionPanel({
                       <span className="action-label">{c.label}</span>
                       <span className="action-stats">place each member · one action</span>
                     </button>
-                    <button
-                      className="btn action-auto"
-                      onClick={() => onArm(c)}
-                      disabled={busy}
-                      title="Move the whole formation straight toward the enemy in one click"
-                    >
-                      auto
-                    </button>
+                    {!c.annotation.manual_only && (
+                      <button
+                        className="btn action-auto"
+                        onClick={() => onArm(c)}
+                        disabled={busy}
+                        title="Move the whole formation straight toward the enemy in one click"
+                      >
+                        auto
+                      </button>
+                    )}
                   </div>
                 ) : (
                   <button className="action-btn" key={i} onClick={() => onArm(c)} disabled={busy} title={c.label}>

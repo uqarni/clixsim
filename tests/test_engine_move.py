@@ -88,3 +88,23 @@ def test_reface_in_place_allowed_even_when_adjacent(db):
     res = e.apply(MoveIntent(0, (18, 18), 1.0))
     assert res.ok
     assert e.state.figure(0).facing == pytest.approx(1.0)
+
+
+def test_move_may_not_end_overlapping_a_base(db):
+    """Regression: the path check treats the mover as a point, so a walker could
+    END half-on-top of a neighbour (live bug: 'medic on top of my Magus')."""
+    from clixengine.intents import MoveIntent
+
+    def fresh():
+        return build_engine(db, [
+            ("human", "Leech Medic", (10, 10), 0.0, 0),
+            ("human", "Magus", (13, 10), 0.0, 0),
+            ("llm", "Werebear", (30, 30), 0.0, 0),
+        ], active="human")
+
+    for off in (0.6, 0.9, 1.05):  # inside the overlap band, path-line clear
+        r = fresh().apply(MoveIntent(0, (13 - off, 10), 0.0))
+        assert not r.ok and r.reason in ("end_on_base", "path_blocked"), (off, r)
+    # Exact base contact remains the closest legal stop.
+    ok = fresh().apply(MoveIntent(0, (13 - 1.1, 10), 0.0))
+    assert ok.ok

@@ -589,7 +589,8 @@ def candidates(uid: int):
 def formation_candidates():
     eng = SESSION.require()
     return [_candidate_view(c)
-            for c in generate_formation_candidates(eng, eng.state.active_player)]
+            for c in generate_formation_candidates(eng, eng.state.active_player,
+                                                   include_manual=True)]
 
 
 @app.post("/api/validate_move")

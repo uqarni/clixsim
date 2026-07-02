@@ -326,7 +326,8 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
                 figure.position, dest, other.position, other.base_radius
             ):
                 return True
-            if flies and distance(dest, other.position) < figure.base_radius + other.base_radius - 1e-6:
+            # Nobody may END overlapping another base (engine end_on_base rule).
+            if distance(dest, other.position) < figure.base_radius + other.base_radius - 1e-6:
                 return True
         if pieces:
             if terr.base_in_blocking(pieces, dest, figure.base_radius):
@@ -595,8 +596,28 @@ def _make_close_formations(engine: Engine, members: list[Figure], cands: list[Ca
         ))
 
 
-def generate_formation_candidates(engine: Engine, player: str) -> list[Candidate]:
-    """Movement / ranged / close formation candidates for the active player."""
+def _manual_formation_candidate(cluster: list[Figure]) -> Candidate:
+    """A formation-move candidate carrying NO precomputed destinations — offered
+    to the human client (``include_manual``) so the interactive place-each-member
+    flow exists even when the rigid auto-translation is infeasible (wall ahead,
+    enemy too close). Never offered to the AI: its intent is a stay-put no-op."""
+    uids = tuple(f.uid for f in cluster)
+    dests = tuple((f.position.x, f.position.y) for f in cluster)
+    facings = tuple(f.facing for f in cluster)
+    intent = MoveIntent(cluster[0].uid, dests[0], facings[0], formation_uids=uids,
+                        member_dests=dests, member_facings=facings)
+    return Candidate(intent, "formation_move",
+                     f"Formation move ({len(cluster)} {cluster[0].definition.faction})",
+                     {"primary": cluster[0].uid, "members": list(uids),
+                      "size": len(cluster), "manual_only": True})
+
+
+def generate_formation_candidates(
+    engine: Engine, player: str, include_manual: bool = False
+) -> list[Candidate]:
+    """Movement / ranged / close formation candidates for the active player.
+    ``include_manual`` adds destination-less movement-formation entries for
+    clusters whose auto-move is infeasible (client interactive staging only)."""
     if engine._actions_remaining() <= 0:
         return []
     state = engine.state
@@ -622,6 +643,10 @@ def generate_formation_candidates(engine: Engine, player: str) -> list[Candidate
                 c = _make_formation_move(engine, cluster[:5])
                 if c:
                     cands.append(c)
+                elif include_manual:
+                    # The auto translation is infeasible, but the formation is
+                    # legal — the human can still place members one at a time.
+                    cands.append(_manual_formation_candidate(cluster[:5]))
         # Ranged formation: cohesive clusters of 3-5, all ranged with a common LoF.
         ranged_elig = [
             f for f in members

@@ -472,6 +472,17 @@ export default function App() {
       } else {
         reason = moveBlockReason(fig.pos, dest, fig.base_radius, terrain, flies && !formationStage) ?? undefined;
       }
+      // Nobody may end overlapping another base (mirror of end_on_base).
+      if (!reason && view) {
+        for (const o of view.figures) {
+          if (o.eliminated || o.uid === fig.uid) continue;
+          if (formationStage?.placed.some((p) => p.uid === o.uid)) continue; // staged elsewhere
+          if (Math.hypot(dest[0] - o.pos[0], dest[1] - o.pos[1]) < fig.base_radius + o.base_radius - 1e-3) {
+            reason = `overlaps ${o.short_name}'s base`;
+            break;
+          }
+        }
+      }
       // Formation cohesion, live: from the 2nd member on, each placement must end
       // in base contact with an already-placed member (P4-R14) and not on top of one.
       if (!reason && formationStage && formationStage.placed.length > 0) {
@@ -597,19 +608,40 @@ export default function App() {
       if (!view) return;
       const members = (c.annotation.members as number[] | undefined) ?? [];
       if (members.length < 3) return;
-      const speeds = members.map((u) => {
-        const f = view.figures.find((x) => x.uid === u);
-        if (!f) return 1;
-        return effectiveSpeed(f.speed, f.pos, f.base_radius, view.terrain);
-      });
+      // Re-validate against the CURRENT view — the candidate list refreshes
+      // asynchronously, so a stale button could stage an already-acted member
+      // and dead-end at submit.
+      const figs = members.map((u) => view.figures.find((x) => x.uid === u));
+      const bad = figs.find((f) => !f || f.eliminated || !f.can_act);
+      if (bad !== undefined || view.meta.active_player !== "human") {
+        log([{ type: "rejected", summary: "That formation is no longer available — a member has already acted." }]);
+        return;
+      }
+      const speeds = figs.map((f) => effectiveSpeed(f!.speed, f!.pos, f!.base_radius, view.terrain));
       setArmed(null);
       setMoveGhost(null);
       setPendingMove(null);
       setFormationStage({ uids: members, placed: [], speed: Math.max(1, Math.min(...speeds)) });
       setSelectedUid(members[0]);
     },
-    [view],
+    [view, log],
   );
+
+  // Defer the member being placed to the end of the queue, so arrangements that
+  // aren't reachable in the default order (e.g. A—C—B chains) can be staged.
+  const formationDefer = useCallback(() => {
+    setPendingMove(null);
+    setMoveGhost(null);
+    setFormationStage((fs) => {
+      if (!fs) return fs;
+      const i = fs.placed.length;
+      if (i >= fs.uids.length - 1) return fs; // already the last unplaced member
+      const uids = [...fs.uids];
+      const [cur] = uids.splice(i, 1);
+      uids.push(cur);
+      return { ...fs, uids };
+    });
+  }, []);
 
   const cancelFormation = useCallback(() => {
     setFormationStage(null);
@@ -650,18 +682,26 @@ export default function App() {
     setBusy(true);
     try {
       const placed = formationStage.placed;
+      // uids/dests/facings all derive from the PLACED order, so deferring
+      // members mid-staging can never desynchronize the arrays.
       const res = await applyIntent({
         kind: "move",
-        figure_uid: formationStage.uids[0],
+        figure_uid: placed[0].uid,
         dest: placed[0].dest,
         facing: placed[0].facing,
         free: false,
-        formation_uids: formationStage.uids,
+        formation_uids: placed.map((p) => p.uid),
         member_dests: placed.map((p) => p.dest),
         member_facings: placed.map((p) => p.facing),
       });
       handleApply(res);
-      if (res.ok) setFormationStage(null); // on rejection keep the staging to adjust
+      if (res.ok) {
+        setFormationStage(null);
+      } else {
+        // Keep the staging only when repositioning can cure the rejection.
+        const incurable = ["already_acted", "no_actions", "pushed_out", "bad_formation", "game_over"];
+        if (incurable.includes(res.reason ?? "")) setFormationStage(null);
+      }
     } catch (err) {
       log([{ type: "error", summary: `Formation move failed: ${String(err)}` }]);
     } finally {
@@ -855,12 +895,14 @@ export default function App() {
                       currentName:
                         view.figures.find((f) => f.uid === stagingUid)?.short_name ?? null,
                       speed: formationStage.speed,
+                      canDefer: formationStage.placed.length < formationStage.uids.length - 1,
                     }
                   : null
               }
               onFormationStart={startFormationMove}
               onFormationBack={formationBack}
               onFormationLeave={formationLeaveInPlace}
+              onFormationDefer={formationDefer}
               onFormationCancel={cancelFormation}
               onFormationSubmit={submitFormation}
             />

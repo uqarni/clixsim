@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type PointerEvent as RPE, type WheelEvent as RWE } from "react";
 import type { FigureView, GameView } from "../api";
-import { effectiveSpeed } from "../terrainGeom";
+import { effectiveSpeed, lofBlocker } from "../terrainGeom";
 
 // A terrain shape being dragged during the placement phase (world coords).
 export interface PlacingGhost {
@@ -601,10 +601,14 @@ export default function BoardCanvas({
       }
     }
 
-    // Line of fire on hover (friendly selected -> hovered enemy).
+    // Line of fire on hover (friendly selected -> hovered enemy): GREEN when the
+    // shot is clear, RED with the reason where it's blocked, and the blocking
+    // terrain piece / figure highlighted — so "why can't I shoot" answers itself.
     if (selected && hoverUid != null && hoverUid !== selected.uid) {
       const hv = live.find((f) => f.uid === hoverUid);
       if (hv && hv.owner !== selected.owner) {
+        const verdict = lofBlocker(selected, hv, view.figures, view.terrain);
+        const col = verdict.clear ? "rgba(91,214,138,0.9)" : "rgba(224,90,90,0.9)";
         const [ax, ay] = worldToScreen(t, selected.pos[0], selected.pos[1]);
         const [bx, by] = worldToScreen(t, hv.pos[0], hv.pos[1]);
         ctx.save();
@@ -612,9 +616,42 @@ export default function BoardCanvas({
         ctx.beginPath();
         ctx.moveTo(ax, ay);
         ctx.lineTo(bx, by);
-        ctx.strokeStyle = "rgba(224,90,90,0.9)";
+        ctx.strokeStyle = col;
         ctx.lineWidth = 1.5;
         ctx.stroke();
+        ctx.setLineDash([]);
+        if (verdict.terrainId != null) {
+          const piece = view.terrain.find((p) => p.id === verdict.terrainId);
+          if (piece) {
+            polyPath(ctx, piece.polygon.map(([x, y]) => worldToScreen(t, x, y)));
+            ctx.strokeStyle = "rgba(224,90,90,0.95)";
+            ctx.lineWidth = 2.5;
+            ctx.stroke();
+          }
+        }
+        if (verdict.figUid != null) {
+          const bf = live.find((f) => f.uid === verdict.figUid);
+          if (bf) {
+            const [fx2, fy2] = worldToScreen(t, bf.pos[0], bf.pos[1]);
+            ctx.beginPath();
+            ctx.arc(fx2, fy2, Math.max(6, bf.base_radius * t.scale) + 5, 0, Math.PI * 2);
+            ctx.strokeStyle = "rgba(224,90,90,0.95)";
+            ctx.lineWidth = 2.5;
+            ctx.stroke();
+          }
+        }
+        if (verdict.reason) {
+          const mx = (ax + bx) / 2;
+          const my = (ay + by) / 2;
+          ctx.font = "500 11px system-ui, sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "bottom";
+          const tw = ctx.measureText(verdict.reason).width;
+          ctx.fillStyle = "rgba(10,16,14,0.8)";
+          ctx.fillRect(mx - tw / 2 - 4, my - 15, tw + 8, 16);
+          ctx.fillStyle = col;
+          ctx.fillText(verdict.reason, mx, my - 1);
+        }
         ctx.restore();
       }
     }

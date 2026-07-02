@@ -587,11 +587,20 @@ class Engine:
         # --- healing (Healing / Magic Healing) -------------------------------
         heal_touch = ab.HEALING in aids
         heal_ranged = ab.MAGIC_HEALING in aids
-        if heal_touch or heal_ranged:
+        if (heal_touch or heal_ranged) and in_contact:
+            # §Healing / §Magic Healing: the healer may not be in base contact
+            # with an opposing figure — the most common invisible blocker.
+            hints.append("Can't heal while in base contact with an enemy — "
+                         "break away first (§Healing).")
+        elif heal_touch or heal_ranged:
             for fr in friends:
                 wounded = fr.current_click > fr.definition.starting_click and fr.is_alive
                 if not wounded:
                     continue
+                if self.state.opposing_contacts(fr):
+                    hints.append(f"Can't heal {fr.short_name}: it's in base contact with an "
+                                 f"enemy (§Healing) — it must break away first.")
+                    break
                 near = distance(figure.position, fr.position)
                 if heal_ranged:
                     if near > figure.range + 1e-9:
@@ -603,10 +612,11 @@ class Engine:
                                      f"Re-face toward it.")
                         break
                 elif heal_touch:
-                    if not in_base_contact(figure.position, figure.base_radius,
-                                           fr.position, fr.base_radius):
+                    gap = near - (figure.base_radius + fr.base_radius)
+                    if gap > 1e-6:
                         hints.append(f"Can't heal {fr.short_name}: Healing needs base contact "
-                                     f"— move adjacent first.")
+                                     f"— you're {gap:.1f}″ short of touching. Drag close and "
+                                     f"let the snap grab it.")
                         break
 
         # --- formation short of the minimum / blocked by an ability ----------
@@ -850,9 +860,12 @@ class Engine:
                 f.position, dest, other.position, other.base_radius
             ):
                 return Rejection("path_blocked", f"path crosses {other.short_name}'s base")
-            # A flier still may not END on another base (overlap); touching is ok.
-            if flies and distance(dest, other.position) < f.base_radius + other.base_radius - 1e-6:
-                return Rejection("end_on_base", "flier may not end on a figure's base")
+            # NOBODY may END overlapping another base — touching is the closest
+            # legal stop. (The path check treats the mover as a point, so without
+            # this a walker could legally land half-on-top of a neighbour.)
+            if distance(dest, other.position) < f.base_radius + other.base_radius - 1e-6:
+                return Rejection("end_on_base",
+                                 f"would end overlapping {other.short_name}'s base")
         return None
 
     def _apply_move(self, intent: MoveIntent) -> Result | Rejection:

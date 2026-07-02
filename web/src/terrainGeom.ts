@@ -176,6 +176,88 @@ export function moveBlockReason(
   return null;
 }
 
+// --- line-of-fire mirror (clixengine/engine.line_of_fire) --------------------
+// Display-only: lets the board show WHERE and WHY a shot is blocked while
+// hovering. The engine stays authoritative for what's actually legal.
+function segmentCrossesPoly(p0: Pt, p1: Pt, poly: Pt[]): boolean {
+  if (pointInPoly(p0, poly) || pointInPoly(p1, poly)) return true;
+  for (let i = 0; i < poly.length; i++) {
+    if (segsIntersect(p0, p1, poly[i], poly[(i + 1) % poly.length])) return true;
+  }
+  return false;
+}
+
+export interface LofFigure {
+  uid: number;
+  pos: Pt | [number, number];
+  base_radius: number;
+  owner: string;
+  elevation: number;
+  eliminated: boolean;
+  short_name: string;
+}
+
+export interface LofVerdict {
+  clear: boolean;
+  reason?: string;
+  terrainId?: number; // blocking terrain piece to highlight
+  figUid?: number; // blocking/screening figure to highlight
+}
+
+export function lofBlocker(
+  a: LofFigure & { facing_deg: number; arc_deg: number; range: number },
+  t: LofFigure,
+  figures: LofFigure[],
+  terrain: TerrainPiece[],
+): LofVerdict {
+  const ap = a.pos as Pt;
+  const tp = t.pos as Pt;
+  const dist = Math.hypot(tp[0] - ap[0], tp[1] - ap[1]);
+  // Front arc (facing_deg is a world +y-up angle; arc_deg is the HALF-angle).
+  const bearing = Math.atan2(tp[1] - ap[1], tp[0] - ap[0]);
+  const facing = (a.facing_deg * Math.PI) / 180;
+  let delta = Math.abs(bearing - facing) % (2 * Math.PI);
+  if (delta > Math.PI) delta = 2 * Math.PI - delta;
+  if (delta > (a.arc_deg * Math.PI) / 180 + 1e-9) {
+    return { clear: false, reason: "not in your front arc — re-face" };
+  }
+  if (a.range > 0 && dist > a.range + 1e-9) {
+    return { clear: false, reason: `beyond range (${dist.toFixed(1)}″ of ${a.range}″)` };
+  }
+  const bothElev = a.elevation === 1 && t.elevation === 1;
+  for (const piece of terrain) {
+    const poly = piece.polygon as Pt[];
+    if (!segmentCrossesPoly(ap, tp, poly)) continue;
+    if (piece.kind === "blocking" && piece.water === null) {
+      return { clear: false, reason: "blocked by blocking terrain", terrainId: piece.id };
+    }
+    if (piece.elevated) {
+      if (bothElev) continue; // both up high — see over the feature
+      const standsOn =
+        (a.elevation === 1 && pointInPoly(ap, poly)) || (t.elevation === 1 && pointInPoly(tp, poly));
+      if (standsOn) continue; // your own hill never blocks your shot
+      return { clear: false, reason: "blocked by elevated terrain", terrainId: piece.id };
+    }
+  }
+  for (const o of figures) {
+    if (o.eliminated || o.uid === a.uid || o.uid === t.uid) continue;
+    const op = o.pos as Pt;
+    if (bothElev && o.elevation === 0) continue; // shot passes over ground bases
+    if (segDist(ap, tp, op, op) <= o.base_radius + 1e-6) {
+      return { clear: false, reason: `blocked by ${o.short_name}'s base`, figUid: o.uid };
+    }
+  }
+  for (const o of figures) {
+    if (o.eliminated || o.owner !== a.owner || o.uid === a.uid) continue;
+    const op = o.pos as Pt;
+    const gap = Math.hypot(tp[0] - op[0], tp[1] - op[1]) - (t.base_radius + o.base_radius);
+    if (gap <= 1e-6) {
+      return { clear: false, reason: `${o.short_name} screens the target (P4-R25)`, figUid: o.uid };
+    }
+  }
+  return { clear: true, reason: `clear · ${dist.toFixed(1)}″` };
+}
+
 // Drawn-terrain size caps — mirrors clixengine/terrain.py MAX_POLYGON_* so the
 // drawing UI can show live legality before the server confirms.
 export const MAX_POLYGON_AREA = 24; // in²
