@@ -582,19 +582,28 @@ class Engine:
                     clear, reason = self.line_of_fire(figure.uid, e.uid)
                     if not clear:
                         # A blocked PLAIN shot isn't the end: Magic Blast's line of
-                        # fire cannot be blocked (§Magic Blast) — point at it when
-                        # the blast is actually available against this target.
-                        blast_ok = (
-                            ab.MAGIC_BLAST in aids
-                            and ab.MAGIC_IMMUNITY not in e.active_ability_ids()
-                            and not any(
-                                in_base_contact(e.position, e.base_radius,
-                                                fr.position, fr.base_radius)
-                                for fr in friends
+                        # fire cannot be blocked (§Magic Blast). Point at it when
+                        # available — and when it ISN'T, say exactly why, or the
+                        # missing pointer reads as a bug.
+                        extra = ""
+                        if ab.MAGIC_BLAST in aids:
+                            immune = ab.MAGIC_IMMUNITY in e.active_ability_ids()
+                            screen = next(
+                                (fr for fr in friends if in_base_contact(
+                                    e.position, e.base_radius,
+                                    fr.position, fr.base_radius)),
+                                None,
                             )
-                        )
-                        extra = (" Your Magic Blast can still hit it — its line of "
-                                 "fire can't be blocked." if blast_ok else "")
+                            if immune:
+                                extra = (f" Magic Blast won't work either — "
+                                         f"{e.short_name} is Magic Immune; find a "
+                                         f"clear line or engage it in close combat.")
+                            elif screen is not None:
+                                extra = (f" Magic Blast won't work either — your "
+                                         f"{screen.short_name} is touching it (P4-R25).")
+                            else:
+                                extra = (" Your Magic Blast can still hit it — its "
+                                         "line of fire can't be blocked.")
                         hints.append(f"Can't shoot {e.short_name}: {reason} (P4-R24).{extra}")
             if len(hints) >= 3:
                 break

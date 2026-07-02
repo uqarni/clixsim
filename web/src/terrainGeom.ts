@@ -269,19 +269,25 @@ export function lofBlocker(
     return { clear: false, reason: `beyond range (${dist.toFixed(1)}″ of ${a.range}″)` };
   }
   // Magic Blast ignores blocked lines of fire (§Magic Blast) — when the plain
-  // shot is blocked but the blast is available, the verdict should say so.
-  const blastOk =
-    (a.active_abilities?.some((x) => x.name === "Magic Blast") ?? false) &&
-    !(t.active_abilities?.some((x) => x.name === "Magic Immunity") ?? false) &&
-    !figures.some(
-      (o) =>
-        !o.eliminated &&
-        o.owner === a.owner &&
-        o.uid !== a.uid &&
-        Math.hypot(tp[0] - (o.pos as Pt)[0], tp[1] - (o.pos as Pt)[1]) <=
-          t.base_radius + o.base_radius + 0.02,
-    );
-  const blastNote = blastOk ? " — Magic Blast still hits (unblockable)" : "";
+  // shot is blocked, the verdict says whether the blast is the answer, and if
+  // not, exactly why (a silently-missing pointer reads as a bug).
+  const hasBlast = a.active_abilities?.some((x) => x.name === "Magic Blast") ?? false;
+  const blastImmune = t.active_abilities?.some((x) => x.name === "Magic Immunity") ?? false;
+  const blastScreened = figures.some(
+    (o) =>
+      !o.eliminated &&
+      o.owner === a.owner &&
+      o.uid !== a.uid &&
+      Math.hypot(tp[0] - (o.pos as Pt)[0], tp[1] - (o.pos as Pt)[1]) <=
+        t.base_radius + o.base_radius + 0.02,
+  );
+  const blastNote = !hasBlast
+    ? ""
+    : blastImmune
+      ? " — no Magic Blast: target is Magic Immune"
+      : blastScreened
+        ? " — no Magic Blast: your own figure screens it (P4-R25)"
+        : " — Magic Blast still hits (unblockable)";
   const bothElev = a.elevation === 1 && t.elevation === 1;
   for (const piece of terrain) {
     const poly = piece.polygon as Pt[];
