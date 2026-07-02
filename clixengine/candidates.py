@@ -420,8 +420,19 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
         add_move(_point_toward(figure.position, away, eff_speed),
                  _facing_toward(figure.position, nearest.position),
                  f"Retreat from {nearest.short_name}", {"intent_hint": "retreat"})
+        # Say WHY a re-face matters when the enemy is already touching but out of
+        # the front arc — it's the prerequisite for the close attack (P4-R27).
+        engaged_behind = in_base_contact(
+            figure.position, figure.base_radius, nearest.position, nearest.base_radius
+        ) and not in_front_arc(
+            figure.position, figure.facing, nearest.position, figure.arc_half_angle
+        )
+        reface_label = (
+            f"Re-face toward {nearest.short_name} — needed before a close attack"
+            if engaged_behind else f"Turn to face {nearest.short_name}"
+        )
         add_move(figure.position, _facing_toward(figure.position, nearest.position),
-                 f"Turn to face {nearest.short_name}", {"intent_hint": "reface"})
+                 reface_label, {"intent_hint": "reface"})
 
     # Rally: a *singleton* joins the nearest same-faction ally to build a
     # movement/ranged formation. Only singletons rally (figures already touching

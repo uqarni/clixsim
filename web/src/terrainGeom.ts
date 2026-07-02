@@ -249,10 +249,22 @@ export function lofBlocker(
   const facing = (a.facing_deg * Math.PI) / 180;
   let delta = Math.abs(bearing - facing) % (2 * Math.PI);
   if (delta > Math.PI) delta = 2 * Math.PI - delta;
-  if (delta > (a.arc_deg * Math.PI) / 180 + 1e-9) {
+  const inArc = delta <= (a.arc_deg * Math.PI) / 180 + 1e-9;
+  // MELEE figures get melee verdicts — ranged-LoF reasons (screening, range)
+  // are meaningless for a range-0 attacker.
+  if (a.range <= 0) {
+    const gap = dist - (a.base_radius + t.base_radius);
+    if (gap > 0.02) {
+      return { clear: false, reason: `melee — not in base contact (${gap.toFixed(1)}″ away)` };
+    }
+    return inArc
+      ? { clear: true, reason: "in contact — close attack ⚔" }
+      : { clear: false, reason: "in contact but BEHIND you — re-face to attack" };
+  }
+  if (!inArc) {
     return { clear: false, reason: "not in your front arc — re-face" };
   }
-  if (a.range > 0 && dist > a.range + 1e-9) {
+  if (dist > a.range + 1e-9) {
     return { clear: false, reason: `beyond range (${dist.toFixed(1)}″ of ${a.range}″)` };
   }
   const bothElev = a.elevation === 1 && t.elevation === 1;
