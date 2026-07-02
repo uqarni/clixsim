@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 import { deployFigure, finishDeploy, type FigureView, type GameView } from "../api";
+import { snapToContactRing } from "../terrainGeom";
 import BoardCanvas from "./BoardCanvas";
 
 interface Props {
@@ -36,17 +37,24 @@ export default function Deploy({ initialView, onDone, onCancel }: Props) {
     [selectedUid, view],
   );
 
-  // Clamp a drop point into the human's starting band; report overlap for red/green.
+  // Clamp a drop point into the human's starting band, SNAP it onto exact base
+  // contact with a nearby figure (formations need legal touching, and the engine's
+  // contact tolerance is far tighter than the eye), then report overlap.
   const constrain = useCallback(
     (fig: FigureView, dest: [number, number]): Ghost => {
       const r = fig.base_radius;
-      const x = Math.max(r, Math.min(W - r, dest[0]));
-      const y = Math.max(r, Math.min(BAND - r, dest[1]));
-      const overlaps = view.figures.some(
-        (o) =>
-          !o.eliminated &&
-          o.uid !== fig.uid &&
-          Math.hypot(x - o.pos[0], y - o.pos[1]) < r + o.base_radius - 1e-3,
+      let x = Math.max(r, Math.min(W - r, dest[0]));
+      let y = Math.max(r, Math.min(BAND - r, dest[1]));
+      const targets = view.figures
+        .filter((o) => !o.eliminated && o.uid !== fig.uid)
+        .map((o) => ({ pos: o.pos, radius: o.base_radius, uid: o.uid }));
+      const snapped = snapToContactRing(r, [x, y], targets);
+      // Keep the snap only if it stays inside the deploy band.
+      if (snapped && snapped[0] >= r && snapped[0] <= W - r && snapped[1] >= r && snapped[1] <= BAND - r) {
+        [x, y] = snapped;
+      }
+      const overlaps = targets.some(
+        (o) => Math.hypot(x - o.pos[0], y - o.pos[1]) < r + o.radius - 0.02,
       );
       const facing = (fig.facing_deg * Math.PI) / 180;
       return { dest: [x, y], facing, ok: !overlaps, breakAway: false };

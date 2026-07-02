@@ -802,6 +802,39 @@ export default function BoardCanvas({
       }
     }
 
+    // Contact links: a dot where two bases LEGALLY touch (engine truth via
+    // in_base_contact_with) — so "touching" is visible fact, not a guess. Amber
+    // for enemy contact (engagement), white for friendly contact (formations).
+    {
+      const drawnPairs = new Set<string>();
+      for (const f of live) {
+        for (const u of f.in_base_contact_with) {
+          const key = f.uid < u ? `${f.uid}:${u}` : `${u}:${f.uid}`;
+          if (drawnPairs.has(key)) continue;
+          drawnPairs.add(key);
+          const o = live.find((x) => x.uid === u);
+          if (!o) continue;
+          const dx = o.pos[0] - f.pos[0];
+          const dy = o.pos[1] - f.pos[1];
+          const L = Math.hypot(dx, dy) || 1e-9;
+          const [sx, sy] = worldToScreen(
+            t,
+            f.pos[0] + (dx / L) * f.base_radius,
+            f.pos[1] + (dy / L) * f.base_radius,
+          );
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(sx, sy, 3, 0, Math.PI * 2);
+          ctx.fillStyle = o.owner !== f.owner ? "rgba(224,192,74,0.95)" : "rgba(255,255,255,0.85)";
+          ctx.fill();
+          ctx.strokeStyle = "rgba(0,0,0,0.55)";
+          ctx.lineWidth = 1;
+          ctx.stroke();
+          ctx.restore();
+        }
+      }
+    }
+
     // Marquee selection box.
     if (marquee) {
       const [mx0, my0] = worldToScreen(t, marquee.a[0], marquee.a[1]);

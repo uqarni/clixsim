@@ -176,6 +176,37 @@ export function moveBlockReason(
   return null;
 }
 
+// --- base-contact snapping ---------------------------------------------------
+// Shared by the battle drag and the deployment drag: pull a point onto the EXACT
+// contact ring of the nearest base when within `window` inches of it. Exactness
+// matters — engine contact tolerance is 0.02", so eyeballed gaps don't count.
+export function snapToContactRing(
+  moverRadius: number,
+  dest: Pt,
+  targets: { pos: Pt; radius: number; uid: number }[],
+  window = 0.9,
+): Pt | null {
+  let best: Pt | null = null;
+  let bestErr = Infinity;
+  for (const t of targets) {
+    const dx = dest[0] - t.pos[0];
+    const dy = dest[1] - t.pos[1];
+    const dlen = Math.hypot(dx, dy) || 1e-9;
+    const gap = moverRadius + t.radius;
+    const err = Math.abs(dlen - gap);
+    if (err > window || err >= bestErr) continue;
+    const cp: Pt = [t.pos[0] + (dx / dlen) * gap, t.pos[1] + (dy / dlen) * gap];
+    const overlaps = targets.some(
+      (o) => o.uid !== t.uid && Math.hypot(cp[0] - o.pos[0], cp[1] - o.pos[1]) < moverRadius + o.radius - 0.02,
+    );
+    if (!overlaps) {
+      best = cp;
+      bestErr = err;
+    }
+  }
+  return best;
+}
+
 // --- line-of-fire mirror (clixengine/engine.line_of_fire) --------------------
 // Display-only: lets the board show WHERE and WHY a shot is blocked while
 // hovering. The engine stays authoritative for what's actually legal.

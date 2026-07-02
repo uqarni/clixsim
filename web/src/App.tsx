@@ -29,7 +29,7 @@ import NewGame, { type GameConfig } from "./components/NewGame";
 import OpponentPanel from "./components/OpponentPanel";
 import TerrainPlacement from "./components/TerrainPlacement";
 import TurnHud from "./components/TurnHud";
-import { effectiveSpeed, moveBlockReason } from "./terrainGeom";
+import { effectiveSpeed, moveBlockReason, snapToContactRing } from "./terrainGeom";
 
 interface MoveGhost {
   dest: [number, number];
@@ -515,32 +515,11 @@ export default function App() {
   const snapToBase = useCallback(
     (fig: FigureView, dest: [number, number]): [number, number] | null => {
       if (!view) return null;
-      const SNAP = 0.9; // inches of slack around the base-contact ring
       const stagedByUid = new Map((formationStage?.placed ?? []).map((p) => [p.uid, p.dest]));
-      const targets: { pos: [number, number]; radius: number; uid: number }[] = [];
-      for (const nf of view.figures) {
-        if (nf.eliminated || nf.uid === fig.uid) continue;
-        targets.push({ pos: stagedByUid.get(nf.uid) ?? nf.pos, radius: nf.base_radius, uid: nf.uid });
-      }
-      let best: [number, number] | null = null;
-      let bestErr = Infinity;
-      for (const t of targets) {
-        const dx = dest[0] - t.pos[0];
-        const dy = dest[1] - t.pos[1];
-        const dlen = Math.hypot(dx, dy) || 1e-9;
-        const gap = fig.base_radius + t.radius;
-        const err = Math.abs(dlen - gap);
-        if (err > SNAP || err >= bestErr) continue;
-        const cp: [number, number] = [t.pos[0] + (dx / dlen) * gap, t.pos[1] + (dy / dlen) * gap];
-        const overlaps = targets.some(
-          (o) => o.uid !== t.uid && Math.hypot(cp[0] - o.pos[0], cp[1] - o.pos[1]) < fig.base_radius + o.radius - 0.02,
-        );
-        if (!overlaps) {
-          best = cp;
-          bestErr = err;
-        }
-      }
-      return best;
+      const targets = view.figures
+        .filter((nf) => !nf.eliminated && nf.uid !== fig.uid)
+        .map((nf) => ({ pos: stagedByUid.get(nf.uid) ?? nf.pos, radius: nf.base_radius, uid: nf.uid }));
+      return snapToContactRing(fig.base_radius, dest, targets);
     },
     [view, formationStage],
   );
@@ -707,7 +686,18 @@ export default function App() {
         const ids = new Set(selection);
         const adj = new Map(figs.map((f) => [f.uid, f.in_base_contact_with.filter((u) => ids.has(u))]));
         const loner = figs.find((f) => (adj.get(f.uid) ?? []).length === 0);
-        if (loner) reason = `${loner.short_name} isn't touching the group — every member must touch another`;
+        if (loner) {
+          const gap = Math.min(
+            ...figs
+              .filter((o) => o.uid !== loner.uid)
+              .map(
+                (o) =>
+                  Math.hypot(loner.pos[0] - o.pos[0], loner.pos[1] - o.pos[1]) -
+                  (loner.base_radius + o.base_radius),
+              ),
+          );
+          reason = `${loner.short_name} isn't touching the group — it's ${Math.max(0, gap).toFixed(2)}″ short. Drag it next to a member (it snaps).`;
+        }
         else {
           const seen = new Set<number>([figs[0].uid]);
           const stack = [figs[0].uid];
