@@ -20,15 +20,6 @@
         "VITE_PORT=5174 VITE_API_PORT=8001 exec npm --prefix web run dev"
       ],
       "port": 5174
-    },
-    {
-      "name": "clix-web-verify",
-      "runtimeExecutable": "sh",
-      "runtimeArgs": [
-        "-c",
-        "VITE_PORT=5199 VITE_API_PORT=8002 exec npm --prefix web run dev"
-      ],
-      "port": 5199
     }
   ]
 }
