@@ -20,6 +20,13 @@ interface Props {
   onCancel: () => void;
   onConfirmMove: () => void;
   onCancelMove: () => void;
+  // Interactive formation move (place members one at a time).
+  formation: { total: number; placedCount: number; currentName: string | null; speed: number } | null;
+  onFormationStart: (c: Candidate) => void;
+  onFormationBack: () => void;
+  onFormationLeave: () => void;
+  onFormationCancel: () => void;
+  onFormationSubmit: () => void;
 }
 
 const ATTACK_KINDS = new Set([
@@ -131,6 +138,12 @@ export default function ActionPanel({
   onCancel,
   onConfirmMove,
   onCancelMove,
+  formation,
+  onFormationStart,
+  onFormationBack,
+  onFormationLeave,
+  onFormationCancel,
+  onFormationSubmit,
 }: Props) {
   const isHumanTurn = view.meta.active_player === "human" && !view.meta.ended;
 
@@ -179,8 +192,54 @@ export default function ActionPanel({
         {selectedFig && <span className="fig-sub">{selectedFig.short_name}</span>}
       </div>
 
+      {/* Interactive formation move: place each member, then submit as one action */}
+      {formation && (
+        <div className="armed formation-stage">
+          <div className="armed-title">
+            Formation move · speed {formation.speed}″
+          </div>
+          {formation.placedCount < formation.total ? (
+            <>
+              <div className="armed-stats">
+                Placing <strong>{formation.currentName ?? "member"}</strong> ({formation.placedCount + 1} of{" "}
+                {formation.total}) — drag it on the board
+                {pendingMove ? ", aim the handle, then confirm" : ". It snaps to nearby bases"}
+                {formation.placedCount > 0 ? "; it must end touching a placed member." : "."}
+              </div>
+              <div className="armed-btns">
+                {pendingMove ? (
+                  <>
+                    <button className="btn primary" onClick={onConfirmMove} disabled={busy}>
+                      Confirm member
+                    </button>
+                    <button className="btn" onClick={onCancelMove} disabled={busy}>Re-place</button>
+                  </>
+                ) : (
+                  <button className="btn" onClick={onFormationLeave} disabled={busy}>Leave in place</button>
+                )}
+                <button className="btn" onClick={onFormationBack} disabled={busy || (formation.placedCount === 0 && !pendingMove)}>
+                  Back
+                </button>
+                <button className="btn" onClick={onFormationCancel} disabled={busy}>Cancel</button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="armed-stats">All {formation.total} members placed — one action moves them all.</div>
+              <div className="armed-btns">
+                <button className="btn primary" onClick={onFormationSubmit} disabled={busy}>
+                  Confirm formation move
+                </button>
+                <button className="btn" onClick={onFormationBack} disabled={busy}>Back</button>
+                <button className="btn" onClick={onFormationCancel} disabled={busy}>Cancel</button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       {/* Pending free move: place -> aim -> confirm */}
-      {pendingMove && (
+      {!formation && pendingMove && (
         <div className="armed">
           <div className="armed-title">
             Move to ({pendingMove.dest[0].toFixed(1)}, {pendingMove.dest[1].toFixed(1)})
@@ -194,7 +253,7 @@ export default function ActionPanel({
       )}
 
       {/* Armed candidate (attack / support / etc.) */}
-      {!pendingMove && armed && (
+      {!formation && !pendingMove && armed && (
         <div className="armed">
           <div className="armed-title">{armed.label}</div>
           {armedIsAttack && explain ? <Breakdown x={explain} /> : annLine(armed) && <div className="armed-stats">{annLine(armed)}</div>}
@@ -206,7 +265,7 @@ export default function ActionPanel({
       )}
 
       {/* Candidate menu */}
-      {!pendingMove && !armed && (
+      {!formation && !pendingMove && !armed && (
         <div className="action-groups">
           {!selectedFig && formations.length === 0 && (
             <div className="empty">Select one of your figures, or drag it on the board to move.</div>
@@ -267,12 +326,34 @@ export default function ActionPanel({
           {formations.length > 0 && (
             <div className="action-group">
               <div className="action-group-label">Formations</div>
-              {formations.map((c, i) => (
-                <button className="action-btn" key={i} onClick={() => onArm(c)} disabled={busy} title={c.label}>
-                  <span className="action-label">{c.label}</span>
-                  <span className="action-stats">{annLine(c)}</span>
-                </button>
-              ))}
+              {formations.map((c, i) =>
+                c.kind === "formation_move" ? (
+                  <div className="action-btn-row" key={i}>
+                    <button
+                      className="action-btn"
+                      onClick={() => onFormationStart(c)}
+                      disabled={busy}
+                      title={`${c.label} — place each member yourself`}
+                    >
+                      <span className="action-label">{c.label}</span>
+                      <span className="action-stats">place each member · one action</span>
+                    </button>
+                    <button
+                      className="btn action-auto"
+                      onClick={() => onArm(c)}
+                      disabled={busy}
+                      title="Move the whole formation straight toward the enemy in one click"
+                    >
+                      auto
+                    </button>
+                  </div>
+                ) : (
+                  <button className="action-btn" key={i} onClick={() => onArm(c)} disabled={busy} title={c.label}>
+                    <span className="action-label">{c.label}</span>
+                    <span className="action-stats">{annLine(c)}</span>
+                  </button>
+                ),
+              )}
             </div>
           )}
 

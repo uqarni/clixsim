@@ -131,6 +131,13 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [oppThoughts, setOppThoughts] = useState<{ summary: string; reasoning: string; fallback: boolean }[]>([]);
   const [freeSpin, setFreeSpin] = useState<{ spinners: number[]; idx: number; by: number | null; facing: number } | null>(null);
+  // Interactive formation move (P4-R14): members are placed ONE AT A TIME with the
+  // normal drag/facing UX; the whole arrangement submits as a single MoveIntent.
+  const [formationStage, setFormationStage] = useState<{
+    uids: number[];
+    placed: { uid: number; dest: [number, number]; facing: number }[];
+    speed: number; // slowest member's hindering-halved speed (P4-R13)
+  } | null>(null);
   const viewRef = useRef<GameView | null>(null);
   const oppStreamRef = useRef<EventSource | null>(null);
 
@@ -145,8 +152,12 @@ export default function App() {
   );
 
   const isHumanTurn = !!view && view.meta.active_player === "human" && !view.meta.ended;
-  const activeUid =
-    selectedFig && selectedFig.owner === "human" && selectedFig.can_act && isHumanTurn
+  // While a formation move is being staged, the member being placed is the one
+  // that drags — regardless of what's selected for inspection.
+  const stagingUid = formationStage ? (formationStage.uids[formationStage.placed.length] ?? null) : null;
+  const activeUid = formationStage
+    ? stagingUid
+    : selectedFig && selectedFig.owner === "human" && selectedFig.can_act && isHumanTurn
       ? selectedFig.uid
       : null;
   const canToggle = !!selectedFig && selectedFig.owner === "human" && isHumanTurn;
@@ -154,7 +165,9 @@ export default function App() {
   useEffect(() => {
     setArmed(null);
     setMoveGhost(null);
-    setPendingMove(null);
+    // Selecting another figure mid-staging must not wipe the member being aimed.
+    setPendingMove((pm) => (formationStage ? pm : null));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedUid]);
 
   useEffect(() => {
@@ -348,9 +361,10 @@ export default function App() {
   }, [armed]);
 
   const armedMembers = useMemo<number[]>(() => {
+    if (formationStage) return formationStage.uids;
     const m = armed?.annotation.members;
     return Array.isArray(m) ? m.filter((x): x is number => typeof x === "number") : [];
-  }, [armed]);
+  }, [armed, formationStage]);
 
   const handleApply = useCallback(
     (res: ApplyResult) => {
@@ -443,44 +457,64 @@ export default function App() {
       // hindering-halved speed, blocking endpoints/paths, the entry-stop rule.
       const terrain = view?.terrain ?? [];
       const flies = fig.active_abilities.some((a) => a.name === "Flight" || a.name === "Aquatic");
-      const eff = flies ? fig.speed : effectiveSpeed(fig.speed, fig.pos, fig.base_radius, terrain);
+      const eff = formationStage
+        ? formationStage.speed // whole formation paces to the slowest member (P4-R13)
+        : flies
+          ? fig.speed
+          : effectiveSpeed(fig.speed, fig.pos, fig.base_radius, terrain);
       let reason: string | undefined;
       if (dist > eff + 1e-6) {
-        reason = eff < fig.speed ? `too far — speed halved to ${eff}″ by hindering` : `too far — speed ${eff}″`;
+        reason = eff < fig.speed ? `too far — formation/hindering speed ${eff}″` : `too far — speed ${eff}″`;
       } else {
-        reason = moveBlockReason(fig.pos, dest, fig.base_radius, terrain, flies) ?? undefined;
+        reason = moveBlockReason(fig.pos, dest, fig.base_radius, terrain, flies && !formationStage) ?? undefined;
+      }
+      // Formation cohesion, live: from the 2nd member on, each placement must end
+      // in base contact with an already-placed member (P4-R14) and not on top of one.
+      if (!reason && formationStage && formationStage.placed.length > 0) {
+        const touching = formationStage.placed.some((p) => {
+          const pf = view?.figures.find((f) => f.uid === p.uid);
+          if (!pf) return false;
+          const d = Math.hypot(dest[0] - p.dest[0], dest[1] - p.dest[1]);
+          return d <= fig.base_radius + pf.base_radius + 1e-4;
+        });
+        const overlapping = formationStage.placed.some((p) => {
+          const pf = view?.figures.find((f) => f.uid === p.uid);
+          return pf && Math.hypot(dest[0] - p.dest[0], dest[1] - p.dest[1]) < fig.base_radius + pf.base_radius - 1e-3;
+        });
+        if (overlapping) reason = "overlaps a placed member";
+        else if (!touching) reason = "must end touching the formation";
       }
       return { dest, facing, ok: !reason, breakAway: dist > 1e-6 && inEnemyContact, reason };
     },
-    [nearestEnemy, view],
+    [nearestEnemy, view, formationStage],
   );
 
-  // Snap a drop point onto exact base contact with the nearest same-faction ally,
-  // so two figures can line up for a future 3+ movement formation. Only snaps to
-  // friendlies of the same faction, never into enemy contact, and never onto a spot
-  // that would overlap another base (returns null when no snap applies).
-  const snapToFriendly = useCallback(
+  // Snap a dragged/dropped point onto EXACT base contact with the nearest base —
+  // any figure, friend or foe (the engine's contact epsilon is 1e-6, so eyeballing
+  // it never counts as touching). While staging a formation move, already-placed
+  // members snap at their STAGED destinations, not their old spots.
+  const snapToBase = useCallback(
     (fig: FigureView, dest: [number, number]): [number, number] | null => {
       if (!view) return null;
-      const SNAP = 1.0; // inches of slack around the base-contact ring
-      let best: [number, number] | null = null;
-      let bestErr = Infinity;
+      const SNAP = 0.9; // inches of slack around the base-contact ring
+      const stagedByUid = new Map((formationStage?.placed ?? []).map((p) => [p.uid, p.dest]));
+      const targets: { pos: [number, number]; radius: number; uid: number }[] = [];
       for (const nf of view.figures) {
         if (nf.eliminated || nf.uid === fig.uid) continue;
-        if (nf.owner !== fig.owner || nf.faction !== fig.faction) continue;
-        const dx = dest[0] - nf.pos[0];
-        const dy = dest[1] - nf.pos[1];
+        targets.push({ pos: stagedByUid.get(nf.uid) ?? nf.pos, radius: nf.base_radius, uid: nf.uid });
+      }
+      let best: [number, number] | null = null;
+      let bestErr = Infinity;
+      for (const t of targets) {
+        const dx = dest[0] - t.pos[0];
+        const dy = dest[1] - t.pos[1];
         const dlen = Math.hypot(dx, dy) || 1e-9;
-        const gap = fig.base_radius + nf.base_radius;
+        const gap = fig.base_radius + t.radius;
         const err = Math.abs(dlen - gap);
         if (err > SNAP || err >= bestErr) continue;
-        const cp: [number, number] = [nf.pos[0] + (dx / dlen) * gap, nf.pos[1] + (dy / dlen) * gap];
-        const overlaps = view.figures.some(
-          (o) =>
-            !o.eliminated &&
-            o.uid !== fig.uid &&
-            o.uid !== nf.uid &&
-            Math.hypot(cp[0] - o.pos[0], cp[1] - o.pos[1]) < fig.base_radius + o.base_radius - 1e-3,
+        const cp: [number, number] = [t.pos[0] + (dx / dlen) * gap, t.pos[1] + (dy / dlen) * gap];
+        const overlaps = targets.some(
+          (o) => o.uid !== t.uid && Math.hypot(cp[0] - o.pos[0], cp[1] - o.pos[1]) < fig.base_radius + o.radius - 1e-3,
         );
         if (!overlaps) {
           best = cp;
@@ -489,15 +523,19 @@ export default function App() {
       }
       return best;
     },
-    [view],
+    [view, formationStage],
   );
 
   const onMoveDrag = useCallback(
     (dest: [number, number]) => {
       const fig = view?.figures.find((f) => f.uid === activeUid);
-      if (fig) setMoveGhost(ghostFor(fig, snapToFriendly(fig, dest) ?? dest));
+      if (!fig) return;
+      // Snap DURING the drag so the ghost visibly sticks to nearby bases.
+      const snapped = snapToBase(fig, dest);
+      const use = snapped && ghostFor(fig, snapped).ok ? snapped : dest;
+      setMoveGhost(ghostFor(fig, use));
     },
-    [view, activeUid, ghostFor, snapToFriendly],
+    [view, activeUid, ghostFor, snapToBase],
   );
 
   const onMoveDrop = useCallback(
@@ -506,7 +544,7 @@ export default function App() {
       setMoveGhost(null);
       if (!fig) return;
       // Prefer a snapped-to-contact destination when it's legal; otherwise the raw drop.
-      const snapped = snapToFriendly(fig, dest);
+      const snapped = snapToBase(fig, dest);
       const candidate = snapped && ghostFor(fig, snapped).ok ? snapped : dest;
       const g = ghostFor(fig, candidate);
       if (!g.ok) {
@@ -515,12 +553,22 @@ export default function App() {
       }
       setPendingMove({ dest: candidate, facing: g.facing });
     },
-    [view, activeUid, ghostFor, snapToFriendly, log],
+    [view, activeUid, ghostFor, snapToBase, log],
   );
 
   const confirmMove = useCallback(async () => {
     const fig = view?.figures.find((f) => f.uid === activeUid);
     if (!fig || !pendingMove || busy) return;
+    if (formationStage) {
+      // Stage this member locally; the engine validates the whole formation at submit.
+      const { dest, facing } = pendingMove;
+      setPendingMove(null);
+      setMoveGhost(null);
+      setFormationStage((fs) =>
+        fs ? { ...fs, placed: [...fs.placed, { uid: fig.uid, dest, facing }] } : fs,
+      );
+      return;
+    }
     setBusy(true);
     try {
       const check = await validateMove(fig.uid, pendingMove.dest, pendingMove.facing);
@@ -537,13 +585,92 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  }, [view, activeUid, pendingMove, busy, handleApply, log]);
+  }, [view, activeUid, pendingMove, busy, formationStage, handleApply, log]);
+
+  // --- interactive formation move (P4-R14: members placed one at a time) ----
+  const startFormationMove = useCallback(
+    (c: Candidate) => {
+      if (!view) return;
+      const members = (c.annotation.members as number[] | undefined) ?? [];
+      if (members.length < 3) return;
+      const speeds = members.map((u) => {
+        const f = view.figures.find((x) => x.uid === u);
+        if (!f) return 1;
+        return effectiveSpeed(f.speed, f.pos, f.base_radius, view.terrain);
+      });
+      setArmed(null);
+      setMoveGhost(null);
+      setPendingMove(null);
+      setFormationStage({ uids: members, placed: [], speed: Math.max(1, Math.min(...speeds)) });
+      setSelectedUid(members[0]);
+    },
+    [view],
+  );
+
+  const cancelFormation = useCallback(() => {
+    setFormationStage(null);
+    setMoveGhost(null);
+    setPendingMove(null);
+  }, []);
+
+  const formationBack = useCallback(() => {
+    if (pendingMove) {
+      setPendingMove(null);
+      return;
+    }
+    setFormationStage((fs) =>
+      fs && fs.placed.length > 0 ? { ...fs, placed: fs.placed.slice(0, -1) } : fs,
+    );
+  }, [pendingMove]);
+
+  const formationLeaveInPlace = useCallback(() => {
+    if (!view || !formationStage) return;
+    const uid = formationStage.uids[formationStage.placed.length];
+    const f = view.figures.find((x) => x.uid === uid);
+    if (!f) return;
+    const g = ghostFor(f, f.pos); // staying put must still satisfy cohesion
+    if (!g.ok) {
+      log([{ type: "rejected", summary: `Can't leave ${f.short_name} here — ${g.reason ?? "breaks the formation"}.` }]);
+      return;
+    }
+    setPendingMove(null);
+    setFormationStage((fs) =>
+      fs
+        ? { ...fs, placed: [...fs.placed, { uid, dest: f.pos, facing: (f.facing_deg * Math.PI) / 180 }] }
+        : fs,
+    );
+  }, [view, formationStage, ghostFor, log]);
+
+  const submitFormation = useCallback(async () => {
+    if (!formationStage || formationStage.placed.length !== formationStage.uids.length || busy) return;
+    setBusy(true);
+    try {
+      const placed = formationStage.placed;
+      const res = await applyIntent({
+        kind: "move",
+        figure_uid: formationStage.uids[0],
+        dest: placed[0].dest,
+        facing: placed[0].facing,
+        free: false,
+        formation_uids: formationStage.uids,
+        member_dests: placed.map((p) => p.dest),
+        member_facings: placed.map((p) => p.facing),
+      });
+      handleApply(res);
+      if (res.ok) setFormationStage(null); // on rejection keep the staging to adjust
+    } catch (err) {
+      log([{ type: "error", summary: `Formation move failed: ${String(err)}` }]);
+    } finally {
+      setBusy(false);
+    }
+  }, [formationStage, busy, handleApply, log]);
 
   const handleEndTurn = useCallback(async () => {
     if (busy || !view || view.meta.ended || view.meta.active_player !== "human") return;
     setArmed(null);
     setMoveGhost(null);
     setPendingMove(null);
+    setFormationStage(null);
     setSelectedUid(null);
     setFreeSpin(null);
     setOppThoughts([]);
@@ -584,6 +711,7 @@ export default function App() {
     setArmed(null);
     setMoveGhost(null);
     setPendingMove(null);
+    setFormationStage(null);
     setFreeSpin(null);
     setOppThoughts([]);
     setEvents([{ type: "info", summary: "Battle begins." }]);
@@ -668,6 +796,17 @@ export default function App() {
               fxSeq={fxSeq}
               spin={spinGhost}
               onSpinFace={onSpinFace}
+              staged={
+                formationStage
+                  ? formationStage.placed.map((p) => ({
+                      dest: p.dest,
+                      facing: p.facing,
+                      radius: view.figures.find((f) => f.uid === p.uid)?.base_radius ?? 0.55,
+                    }))
+                  : null
+              }
+              dimUids={formationStage ? formationStage.placed.map((p) => p.uid) : []}
+              reachOverride={formationStage ? formationStage.speed : null}
             />
             {freeSpin && spinFig && (
               <div className="spin-banner">
@@ -704,6 +843,22 @@ export default function App() {
               onCancel={() => setArmed(null)}
               onConfirmMove={confirmMove}
               onCancelMove={() => setPendingMove(null)}
+              formation={
+                formationStage
+                  ? {
+                      total: formationStage.uids.length,
+                      placedCount: formationStage.placed.length,
+                      currentName:
+                        view.figures.find((f) => f.uid === stagingUid)?.short_name ?? null,
+                      speed: formationStage.speed,
+                    }
+                  : null
+              }
+              onFormationStart={startFormationMove}
+              onFormationBack={formationBack}
+              onFormationLeave={formationLeaveInPlace}
+              onFormationCancel={cancelFormation}
+              onFormationSubmit={submitFormation}
             />
           </div>
         </div>

@@ -1538,3 +1538,23 @@ kbd {
 .terrain-size.over {
   color: var(--bad);
 }
+
+/* --- interactive formation move ------------------------------------------ */
+.action-btn-row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+.action-btn-row .action-btn {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.action-auto {
+  flex: 0 0 auto;
+  font-size: 11px;
+  padding: 0 10px;
+  color: var(--text-dim);
+}
+.formation-stage {
+  border-left: 3px solid var(--accent);
+}

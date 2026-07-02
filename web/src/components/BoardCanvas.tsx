@@ -63,6 +63,12 @@ interface Props {
   // Free spin (P4-R9): a contacted figure being re-faced (drag the handle to aim).
   spin?: SpinGhost | null;
   onSpinFace?: (facing: number) => void;
+  // Interactive formation move: members already placed this staging (ghosts at
+  // their destinations), figures to dim (they've been staged away), and the
+  // formation speed that overrides the active figure's reach ring (P4-R13).
+  staged?: { dest: [number, number]; facing: number; radius: number }[] | null;
+  dimUids?: number[];
+  reachOverride?: number | null;
   // Deploy setup: shade the human's 3" starting band as the legal deploy zone.
   deployBand?: boolean;
   // Terrain draw tool: an in-progress hand-drawn polygon + click/move/undo hooks.
@@ -463,6 +469,9 @@ export default function BoardCanvas({
   onPlaceRotate,
   spin = null,
   onSpinFace,
+  staged = null,
+  dimUids = [],
+  reachOverride = null,
   deployBand = false,
   draw = null,
   onDrawPoint,
@@ -578,9 +587,9 @@ export default function BoardCanvas({
       const activeFlies = active.active_abilities.some(
         (a) => a.name === "Flight" || a.name === "Aquatic",
       );
-      const reach = activeFlies
+      const reach = reachOverride ?? (activeFlies
         ? active.speed
-        : effectiveSpeed(active.speed, active.pos, active.base_radius, view.terrain);
+        : effectiveSpeed(active.speed, active.pos, active.base_radius, view.terrain));
       dashedRing(ctx, cx, cy, reach * t.scale, "rgba(91,214,138,0.5)");
       if (reach < active.speed) {
         ctx.save();
@@ -724,8 +733,9 @@ export default function BoardCanvas({
     // Armed-action highlights: red reticle on targets, blue ring on formation members.
     const armedSet = new Set(armedTargets);
     const memberSet = new Set(armedMembers);
+    const dimSet = new Set(dimUids);
     for (const f of live) {
-      drawFigure(ctx, t, f, f.uid === selectedUid, f.uid === hoverUid, false);
+      drawFigure(ctx, t, f, f.uid === selectedUid, f.uid === hoverUid, dimSet.has(f.uid));
       const [cx, cy] = worldToScreen(t, f.pos[0], f.pos[1]);
       const rr = Math.max(6, f.base_radius * t.scale) + 7;
       if (armedSet.has(f.uid)) {
@@ -747,6 +757,36 @@ export default function BoardCanvas({
         ctx.stroke();
         ctx.restore();
       }
+    }
+
+    // Staged formation members: ghosts at their placed destinations, numbered
+    // in placement order, with facing ticks.
+    if (staged) {
+      staged.forEach((s, i) => {
+        const [sx, sy] = worldToScreen(t, s.dest[0], s.dest[1]);
+        const sr = Math.max(6, s.radius * t.scale);
+        const sf = -s.facing;
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(sx, sy, sr, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(124,156,255,0.45)";
+        ctx.fill();
+        ctx.setLineDash([4, 3]);
+        ctx.strokeStyle = COLORS.select;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(sx + Math.cos(sf) * sr, sy + Math.sin(sf) * sr);
+        ctx.stroke();
+        ctx.fillStyle = "#e7ebf2";
+        ctx.font = "600 10px system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(String(i + 1), sx, sy);
+        ctx.restore();
+      });
     }
 
     // Terrain draw tool: the in-progress hand-drawn polygon (committed vertices
@@ -817,7 +857,7 @@ export default function BoardCanvas({
         { ok: placingGhost.ok },
       );
     }
-  }, [view, size, selectedUid, hoverUid, activeUid, armedTargets, armedMembers, moveGhost, pendingMove, placementMode, placingGhost, spin, deployBand, draw]);
+  }, [view, size, selectedUid, hoverUid, activeUid, armedTargets, armedMembers, moveGhost, pendingMove, placementMode, placingGhost, spin, deployBand, draw, staged, dimUids, reachOverride]);
 
   // Combat-effect overlay: an independent rAF that draws fx on a top canvas,
   // reusing the transform the base render computed. Keyed on fxSeq.
