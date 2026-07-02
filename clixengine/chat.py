@@ -54,7 +54,8 @@ def build_system(db) -> str:
     return f"{_PERSONA}\n\n{_RULES}\n\n{abilities_card(db)}"
 
 
-def chat_reply(client, system: str, message: str, history: list[dict], engine) -> str:
+def chat_reply(client, system: str, message: str, history: list[dict], engine,
+               recent_moves: list[str] | None = None) -> str:
     msgs: list[dict] = []
     for h in history[-12:]:
         role = "assistant" if h.get("role") == "assistant" else "user"
@@ -64,6 +65,9 @@ def chat_reply(client, system: str, message: str, history: list[dict], engine) -
     content = message
     if engine is not None:
         content += "\n\n[Live board state]\n" + json.dumps(board_snapshot(engine))
+    if recent_moves:
+        content += ("\n\n[Your battle actions last turn, and why — stay consistent "
+                    "with what you actually did]\n" + "\n".join(recent_moves[-10:]))
     msgs.append({"role": "user", "content": content})
     # Snappy 1-3 sentence banter: disable thinking so the whole token budget goes to
     # visible text. (On Sonnet 5 thinking is adaptive-on when omitted, and with a small

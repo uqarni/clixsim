@@ -166,3 +166,22 @@ def test_opponent_brain_gets_terrain_and_ability_card(db):
     sysprompt = LLMOpponent()._battle_system(e)
     assert "Magic Blast" in sysprompt and "line of fire" in sysprompt.lower()
     assert "Formations" in sysprompt or "formation" in sysprompt  # rules digest present
+
+
+def test_table_talk_flows_into_the_picker_prompt(db):
+    """The chat and the mover share context: banter reaches the action prompt."""
+    import json, math
+    from .conftest import build_engine
+    from clixengine.ai.llm import LLMOpponent
+
+    e = build_engine(db, [
+        ("human", "Werebear", (10, 10), math.pi / 2, 0),
+        ("llm", "Werebear", (10, 20), -math.pi / 2, 0),
+    ], active="llm")
+    opp = LLMOpponent()
+    ranked = opp._ranked_candidates(e)
+    talk = [{"role": "opponent", "content": "I'll heal the Jarl this turn."}]
+    payload = json.loads(opp._prompt(e, ranked, talk))
+    assert payload["table_talk"] == talk
+    assert "consistent with your words" in payload["table_talk_note"]
+    assert "table_talk" not in json.loads(opp._prompt(e, ranked))  # absent when no chat

@@ -86,6 +86,11 @@ class Session:
         self._chat_client = None
         self._chat_system: str | None = None
         self._placer: TerrainPlacer | None = None
+        # Two-way context between the CHAT persona and the ACTION PICKER: the
+        # picker reads the recent table talk; the chat reads what the picker
+        # actually did last turn (and why), so promises and play stay coherent.
+        self.chat_log: list[dict] = []
+        self.last_turn_notes: list[str] = []
         # Serializes terrain-placement streams so a duplicate/overlapping connection
         # (e.g. React StrictMode's dev double-mount) can't double-place. NEVER wait
         # on this indefinitely: a stream holds it across LLM calls, and a blocking
@@ -112,9 +117,16 @@ class Session:
             self._chat_client = anthropic.Anthropic(api_key=key, timeout=30.0, max_retries=1)
             self._chat_system = build_system(self.db)
         try:
-            return chat_reply(self._chat_client, self._chat_system, message, history, self.engine)
+            reply = chat_reply(self._chat_client, self._chat_system, message, history,
+                               self.engine, recent_moves=self.last_turn_notes)
         except Exception as e:
             return f"(Sorry — I hit an error: {e})"
+        # Shared context loop: the action picker reads the recent table talk, so
+        # banter promises ("I'll heal the Jarl this turn") can actually be kept.
+        self.chat_log.append({"role": "human", "content": message})
+        self.chat_log.append({"role": "opponent", "content": reply})
+        del self.chat_log[:-16]
+        return reply
 
     def start_game(self, human_army: Army, llm_army: Army, build_total: int,
                    seed: int, opponent: str = "llm", board: float = 36.0,
@@ -697,7 +709,9 @@ def opponent_turn_stream():
             yield sse({"type": "error", "message": "it is the human's turn"})
             return
         try:
-            for step in SESSION.opponent.stream_turn(eng):
+            SESSION.last_turn_notes = []  # fresh notes for this opponent turn
+            for step in SESSION.opponent.stream_turn(eng, table_talk=SESSION.chat_log[-8:]):
+                SESSION.last_turn_notes.append(f"{step['summary']} — {step['reasoning']}")
                 yield sse({"type": "action", "summary": step["summary"],
                            "reasoning": step["reasoning"], "events": step["events"],
                            "fallback": step["fallback"], "view": game_view(eng)})

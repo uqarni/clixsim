@@ -102,7 +102,7 @@ class LLMOpponent:
         rows.sort(key=lambda r: r[0], reverse=True)
         return [(i, fig, cand) for i, (_, fig, cand) in enumerate(rows)]
 
-    def _prompt(self, engine: Engine, ranked) -> str:
+    def _prompt(self, engine: Engine, ranked, table_talk: list[dict] | None = None) -> str:
         snap = board_snapshot(engine)
         options = []
         for cid, fig, cand in ranked:
@@ -122,6 +122,14 @@ class LLMOpponent:
             "note": "Choose exactly one candidate id. Pick the 'Pass' option only "
             "if no action improves your position.",
         }
+        if table_talk:
+            payload["table_talk"] = table_talk
+            payload["table_talk_note"] = (
+                "Recent banter between you ('opponent') and the human. Honor plans "
+                "you stated when they are tactically sound — your play should feel "
+                "consistent with your words — but never sacrifice a winning line "
+                "to keep a banter promise."
+            )
         return json.dumps(payload, indent=2)
 
     def _battle_system(self, engine: Engine) -> str:
@@ -141,8 +149,8 @@ class LLMOpponent:
                 + "\n".join(lines))
         return f"{_SYSTEM}\n\n{rules_digest()}\n\n{card}"
 
-    def _ask(self, engine: Engine, ranked) -> tuple[int | None, str]:
-        prompt = self._prompt(engine, ranked)
+    def _ask(self, engine: Engine, ranked, table_talk: list[dict] | None = None) -> tuple[int | None, str]:
+        prompt = self._prompt(engine, ranked, table_talk)
         try:
             self.calls += 1
             resp = self._client.messages.create(
@@ -180,7 +188,7 @@ class LLMOpponent:
             for s in self.stream_turn(engine)
         ]
 
-    def stream_turn(self, engine: Engine):
+    def stream_turn(self, engine: Engine, table_talk: list[dict] | None = None):
         """Yield one dict per action (summary, LLM reasoning, engine events) as it
         resolves, then end the turn. Falls back to the heuristic per action, and a
         candidate the engine rejects is excluded and re-picked (never ends the
@@ -193,7 +201,7 @@ class LLMOpponent:
             if not ranked:
                 break
             ask_llm = self.available and not retry_heuristic
-            chosen_id, rationale = self._ask(engine, ranked) if ask_llm else (None, "")
+            chosen_id, rationale = self._ask(engine, ranked, table_talk) if ask_llm else (None, "")
             fallback = chosen_id is None
             if fallback:
                 if ask_llm:
