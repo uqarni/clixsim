@@ -3,6 +3,7 @@ import {
   newGameStreamUrl,
   type ConstructEvent,
   type ConstructFigure,
+  type DraftPlan,
   type GameView,
 } from "../api";
 import type { GameConfig } from "./NewGame";
@@ -30,6 +31,7 @@ export default function Construction({
   const [picks, setPicks] = useState<Pick[]>([]);
   const [llmPts, setLlmPts] = useState(0);
   const [pools, setPools] = useState<{ human?: ConstructFigure[]; llm?: ConstructFigure[] }>({});
+  const [plan, setPlan] = useState<DraftPlan | null>(null);
   const [status, setStatus] = useState<"streaming" | "ready" | "error">("streaming");
   const [error, setError] = useState<string>("");
   const readyView = useRef<GameView | null>(null);
@@ -45,6 +47,9 @@ export default function Construction({
           break;
         case "pool":
           setPools((p) => ({ ...p, [e.side]: e.pool }));
+          break;
+        case "plan":
+          setPlan(e.plan);
           break;
         case "human_army":
           setHumanArmy(e.army);
@@ -120,7 +125,18 @@ export default function Construction({
             {config.mode === "sealed" && pools.llm && (
               <div className="pool-note">Pool: {pools.llm.length} figures pulled</div>
             )}
-            {picks.length === 0 && status === "streaming" && <div className="empty">Thinking…</div>}
+            {plan && (
+              <div className="draft-plan">
+                <div className="draft-plan-label">Game plan</div>
+                <div className="draft-plan-strategy">{plan.strategy}</div>
+                {plan.formation_plan && (
+                  <div className="draft-plan-formation">⚔ {plan.formation_plan}</div>
+                )}
+              </div>
+            )}
+            {picks.length === 0 && status === "streaming" && (
+              <div className="empty">{plan ? "Drafting to plan…" : "Taking stock of the pool…"}</div>
+            )}
             {picks.map((p, i) => (
               <div className="draft-pick" key={i}>
                 <div className="draft-row">

@@ -244,6 +244,70 @@ _SCHEMA = {
     "additionalProperties": False,
 }
 
+# Up-front planning pass (user request 2026-07-03): take stock of the WHOLE pool,
+# reason, commit to a formation + strategy, THEN pick one figure at a time to
+# execute it — instead of greedy myopic picks that spammed the same cheap unit.
+_PLAN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "strategy": {"type": "string",
+                     "description": "2-4 sentences: the whole game plan for this army"},
+        "primary_faction": {"type": "string",
+                            "description": "the ONE faction to concentrate for a formation"},
+        "formation_plan": {"type": "string",
+                           "description": "which formation (movement/ranged/close) and from which figures"},
+        "must_grab": {"type": "array", "items": {"type": "string"},
+                      "description": "figure names to prioritize"},
+    },
+    "required": ["strategy", "primary_faction", "formation_plan", "must_grab"],
+    "additionalProperties": False,
+}
+
+_HEAL_IDS = {ab.HEALING, ab.MAGIC_HEALING, ab.NECROMANCY}
+
+
+def _planning_digest(db: FigureDB, figs: list[FigureDef]) -> list[dict]:
+    """Compact by-faction stock-take of the available pool for the planning
+    pass: how many formation-capable figures each faction has, whether it holds
+    a healer, and its strongest few pieces."""
+    by_fac: dict[str, list[FigureDef]] = {}
+    for f in figs:
+        by_fac.setdefault(f.faction, []).append(f)
+    out = []
+    for fac, members in sorted(by_fac.items(), key=lambda kv: -len(kv[1])):
+        cap = [m for m in members if _formation_capable(m)]
+        ranged_cap = [m for m in cap if m.is_ranged]
+        top = sorted(members, key=lambda m: -m.points)[:4]
+        out.append({
+            "faction": fac,
+            "distinct_figures": len(members),
+            "formation_capable": len(cap),
+            "ranged_formation_capable": len(ranged_cap),
+            "has_healer": any(m.all_ability_ids() & _HEAL_IDS for m in members),
+            "top_pieces": [{"name": m.short_name, "points": m.points, "role": _role(m)}
+                           for m in top],
+        })
+    return out
+
+
+def _heuristic_plan(db: FigureDB, figs: list[FigureDef], doctrine: str) -> dict:
+    """Deterministic plan for the key-less / heuristic path: concentrate on the
+    faction with the most formation-capable figures."""
+    digest = _planning_digest(db, figs)
+    formable = [d for d in digest if d["formation_capable"] >= 3] or digest
+    if not formable:
+        return {}
+    best = max(formable, key=lambda d: (d["formation_capable"], d["distinct_figures"]))
+    kind = "ranged" if best["ranged_formation_capable"] >= 3 else "movement"
+    return {
+        "strategy": f"Concentrate on {best['faction']} for a {kind} formation, add a "
+                    f"healer if available, and round out with the strongest affordable pieces.",
+        "primary_faction": best["faction"],
+        "formation_plan": f"{max(3, min(5, best['formation_capable']))} {best['faction']} "
+                          f"figures for a {kind} formation",
+        "must_grab": [p["name"] for p in best["top_pieces"][:2]],
+    }
+
 
 @dataclass
 class ArmyBuilder:
@@ -257,6 +321,7 @@ class ArmyBuilder:
     available: bool = field(default=False, init=False)
     last_error: str = field(default="", init=False)
     doctrine: str = field(default="", init=False)
+    plan: dict = field(default_factory=dict, init=False)  # the up-front strategy
 
     def __post_init__(self) -> None:
         self.doctrine = random.Random(self.seed).choice(DOCTRINES)
@@ -281,6 +346,37 @@ class ArmyBuilder:
             f"some cost): {self.doctrine}\n\n{rules_digest()}\n\n{abilities_card(db)}"
         )
 
+    def make_plan(self, db: FigureDB, available: list[FigureDef], budget: int) -> dict:
+        """Take stock of the ENTIRE available pool and commit to a formation +
+        strategy BEFORE drafting figure-by-figure (user request). Sets and
+        returns self.plan; falls back to a deterministic plan without an API."""
+        if not self.available:
+            self.plan = _heuristic_plan(db, available, self.doctrine)
+            return self.plan
+        payload = {
+            "budget": budget,
+            "doctrine": self.doctrine,
+            "pool_by_faction": _planning_digest(db, available),
+            "task": "Take stock of the ENTIRE pool above BEFORE drafting. Decide: "
+                    "which ONE faction to concentrate for a formation (need 3-5 "
+                    "same-faction figures), what formation type and from which "
+                    "pieces, which key figures you must grab, and the overall plan. "
+                    "You will then pick figures one at a time to execute THIS plan.",
+        }
+        try:
+            resp = self._client.messages.create(
+                model=self.model, max_tokens=700, system=self.system_prompt(db),
+                output_config={"effort": self.effort,
+                               "format": {"type": "json_schema", "schema": _PLAN_SCHEMA}},
+                messages=[{"role": "user", "content": json.dumps(payload)}],
+            )
+            text = next((b.text for b in resp.content if getattr(b, "type", "") == "text"), "")
+            self.plan = json.loads(text)
+        except Exception as e:
+            self.last_error = f"plan error: {e}"
+            self.plan = _heuristic_plan(db, available, self.doctrine)
+        return self.plan
+
     def _ask(self, db: FigureDB, cands: list[FigureDef], army_brief: list[dict],
              remaining: int, budget: int, seed: int = 0) -> tuple[int | None, str] | None:
         # Shuffle the presentation so the priciest-first ordering doesn't anchor
@@ -294,6 +390,10 @@ class ArmyBuilder:
             "candidates": briefs,
             "note": "Choose one candidate id to add, or -1 to stop.",
         }
+        if getattr(self, "plan", None):
+            # Every pick executes the up-front plan — this is what keeps the
+            # draft coherent instead of greedy-and-myopic.
+            payload["your_plan"] = self.plan
         try:
             resp = self._client.messages.create(
                 model=self.model, max_tokens=512, system=self.system_prompt(db),
@@ -334,6 +434,11 @@ class ArmyBuilder:
             return None, "No affordable figures left.", False
         pool = cands
         used_factions = {b.get("faction") for b in army_brief} - {"Mage Spawn", None}
+        # Steer the first pick toward the plan's primary faction so the fallback
+        # executes the same strategy the plan committed to.
+        _plan = getattr(self, "plan", None) or {}
+        if not used_factions and _plan.get("primary_faction"):
+            used_factions = {_plan["primary_faction"]}
         if used_factions:
             same = [f for f in pool if f.faction in used_factions]
             if same:

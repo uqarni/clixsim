@@ -483,6 +483,17 @@ def _construct_stream(mode: str, points: int, opponent: str, seed: int,
             pool_counts = {}
             for fid in llm_pool:
                 pool_counts[fid] = pool_counts.get(fid, 0) + 1
+
+        # Planning pass (user request): take stock of the WHOLE pool, reason,
+        # and commit to a formation + strategy BEFORE picking figure-by-figure.
+        if llm_pool is not None:
+            planning_pool = [db.get(i) for i in sorted(set(llm_pool))]
+        else:
+            planning_pool = _affordable(db, None, budget, set(), None)
+        plan = builder.make_plan(db, planning_pool, budget)
+        if plan:
+            draft_notes.append("PLAN: " + plan.get("strategy", ""))
+            yield sse({"type": "plan", "plan": plan})
         # Pick cap scales with the budget — a flat 12 stranded ~140 pts of a
         # 400-pt draft built from cheap figures (it's a runaway guard, not a
         # design constraint).
@@ -548,6 +559,11 @@ def _construct_stream(mode: str, points: int, opponent: str, seed: int,
         # engine so it survives restarts with the game).
         SESSION.engine.doctrine = builder.doctrine
         SESSION.engine.draft_notes = draft_notes[:20]
+        # The battle picker + chat inherit the draft PLAN (its game plan), not
+        # just the doctrine flavor — so play executes the strategy it drafted for.
+        if builder.plan.get("strategy"):
+            SESSION.engine.doctrine = (
+                f"{builder.doctrine} — this game's plan: {builder.plan['strategy']}")
         _auto_deploy_llm(SESSION.engine)  # deploy-only games (no terrain phase)
         yield sse({"type": "ready", "view": game_view(SESSION.engine)})
     except Exception as e:  # never leave the client hanging

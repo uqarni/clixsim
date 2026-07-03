@@ -168,3 +168,37 @@ def test_battle_prompt_close_formation_cohesion_is_correct(db):
     from clixengine.ai.llm import _SYSTEM
 
     assert "not each other" in _SYSTEM
+
+
+def test_draft_planning_pass_commits_to_a_formation_faction(db):
+    """The up-front planning pass (user request): take stock, decide a primary
+    faction with a real formation, and hand that to the pick loop."""
+    from clixengine.build import ArmyBuilder, _planning_digest, sample_sealed_pool
+
+    pool = [db.get(i) for i in sorted(set(sample_sealed_pool(db, 55)))]
+    b = ArmyBuilder.__new__(ArmyBuilder)
+    b.available = False
+    b.plan = {}
+    b.doctrine = "Gunline: massed shooters."
+    plan = b.make_plan(db, pool, 200)
+    assert plan.get("primary_faction")
+    # The chosen faction must actually have >=3 formation-capable figures.
+    digest = {d["faction"]: d for d in _planning_digest(db, pool)}
+    assert digest[plan["primary_faction"]]["formation_capable"] >= 3
+
+
+def test_plan_steers_the_heuristic_fallback_first_pick(db):
+    """A plan's primary faction biases the fallback's opening pick even before
+    any figure is drafted (empty army)."""
+    from clixengine.build import ArmyBuilder, _affordable
+
+    b = ArmyBuilder.__new__(ArmyBuilder)
+    b.available = False
+    b.plan = {"primary_faction": "Necropolis Sect"}
+    b.doctrine = "x"
+    cands = _affordable(db, None, 200, set(), None)
+    if not any(c.faction == "Necropolis Sect" for c in cands):
+        import pytest
+        pytest.skip("faction not affordable in roster")
+    fig, _reason, used_llm = b.pick(db, cands, [], 200, 200, seed=1)
+    assert not used_llm and fig.faction == "Necropolis Sect"

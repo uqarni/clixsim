@@ -299,9 +299,17 @@ export interface ConstructFigure {
   stats?: FigureStats;
   clicks?: number;
 }
+export interface DraftPlan {
+  strategy: string;
+  primary_faction: string;
+  formation_plan: string;
+  must_grab: string[];
+}
+
 export type ConstructEvent =
   | { type: "start"; mode: string; budget: number }
   | { type: "pool"; side: "human" | "llm"; pool: ConstructFigure[] }
+  | { type: "plan"; plan: DraftPlan }
   | { type: "human_army"; army: ConstructFigure[]; points: number }
   | { type: "llm_start"; available: boolean }
   | { type: "llm_pick"; figure: ConstructFigure; reasoning: string; used_llm: boolean; remaining: number; army: ConstructFigure[]; points: number }
