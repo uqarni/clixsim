@@ -1772,6 +1772,26 @@ class Engine:
         primary = max(figs, key=lambda f: (f.damage, f.attack))
         pushers = [f.short_name for f in figs if f.action_tokens >= 1]
         out: list[dict] = []
+        # Size-gate explanations: with 2 shooters selected, the volley option
+        # used to silently vanish and the only message was the CLOSE formation's
+        # "not in base contact" — deeply confusing for a player trying to shoot
+        # together. Say why the near-miss kind is unavailable, once.
+        if len(uids) == 2 and all(f.range > 0 for f in figs):
+            out.append({
+                "kind": "ranged_formation", "target": -1, "target_name": "-",
+                "primary": primary.uid, "primary_name": primary.short_name,
+                "members": list(uids), "ok": False,
+                "reason": "a volley (ranged formation) needs 3-5 same-faction "
+                          "shooters - you selected 2. Add a third shooter, or "
+                          "just shoot twice with your two actions.",
+            })
+        elif len(uids) > 3:
+            out.append({
+                "kind": "close_formation", "target": -1, "target_name": "-",
+                "primary": primary.uid, "primary_name": primary.short_name,
+                "members": list(uids), "ok": False,
+                "reason": f"a close-combat gang-up is 2-3 figures (you selected {len(uids)})",
+            })
         for t in sorted(self.state.figures.values(), key=lambda f: f.uid):
             if not t.is_alive or t.owner == primary.owner:
                 continue

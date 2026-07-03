@@ -371,3 +371,17 @@ def test_selfplay_standoffs_terminate(db):
     from clixengine.evalharness import play_game
     r = play_game(db, 1000, max_turns=150)
     assert r["winner"] is not None
+
+
+def test_two_shooters_get_the_volley_size_explanation(db):
+    """Two archers selecting a distant healer used to see ONLY the close-
+    formation 'not in base contact' rejection — the volley size rule (3-5,
+    P4-R29) was never mentioned."""
+    e = build_engine(db, [
+        ("human", "Utem Crossbowman", (10, 10), math.pi / 2, 0),
+        ("human", "Utem Crossbowman", (11.1, 10), math.pi / 2, 0),
+        ("llm", "Mending Priestess", (10, 20), -math.pi / 2, 0),
+    ], active="human")
+    opts = e.formation_attack_options([0, 1])
+    volley_notes = [o for o in opts if o["kind"] == "ranged_formation" and not o["ok"]]
+    assert volley_notes and any("3-5" in o["reason"] for o in volley_notes)
