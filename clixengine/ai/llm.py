@@ -43,6 +43,11 @@ best; deviate only for a stated strategic reason.
 charger dies in 1-2 turns for nothing. Advance as a formation or wait at a \
 rally point until 2+ figures can engage the SAME target the same turn \
 ("pins_shooter" and flank candidates are what a committed turn looks like).
+- ACTIVATE THE WHOLE ARMY. Your losses show back-line figures getting 3 \
+actions in 46 turns while the frontline hogged every slot — idle figures are \
+wasted points. A move fact "idle_turns": N means that figure has sat out N of \
+your turns; give long-idle figures their advance unless something is truly \
+more urgent. Formation moves are the efficient way to bring a group forward.
 - Concentrate fire to eliminate enemy figures; finish wounded, high-value \
 targets. KILL ENABLERS FIRST: a healer out-repairs your chip damage and a \
 necromancer refunds your kills — candidates marked priority_target exist for \

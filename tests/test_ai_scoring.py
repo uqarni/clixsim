@@ -274,4 +274,4 @@ def test_prompts_carry_sportsmanship_and_warmth(db):
     from clixengine.chat import _PERSONA
 
     assert "SPORTSMANSHIP" in _SYSTEM and "stall" in _SYSTEM
-    assert "READ THE ROOM" in _PERSONA
+    assert "THOUGHTFUL" in _PERSONA and "NEVER open with a rebuttal" in _PERSONA

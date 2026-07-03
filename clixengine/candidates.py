@@ -434,6 +434,12 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
     # reports the danger delta so neither the heuristic nor the LLM walks into
     # a kill zone blind (plan 1.2; the audit's most-corroborated finding).
     danger_now = threat_score(engine, figure, figure.position)
+    # Turns since this figure last got a real action: greedy selection starved
+    # back-line figures to 3 activations in 46 turns — advances by long-idle
+    # figures must eventually outrank the frontline's marginal shuffles.
+    last = getattr(engine, "_last_active_turn", {}).get(figure.uid)
+    idle_turns = max(0, (engine.state.turn_number - last) // 2) if last is not None \
+        else engine.state.turn_number // 2
 
     def add_move(dest: Vec, facing: float, label: str, extra: dict) -> bool:
         dest = _clamp_to_board(engine, dest, figure.base_radius)
@@ -449,6 +455,7 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
              "free": free,
              "incoming_clicks_here": round(danger_now, 2),
              "incoming_clicks_at_dest": round(danger_after, 2),
+             **({"idle_turns": idle_turns} if idle_turns >= 3 else {}),
              **extra},
         ))
         return True

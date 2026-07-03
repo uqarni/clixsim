@@ -256,18 +256,24 @@ def _danger_penalty(engine: Engine, figure: Figure, ann: dict) -> float:
         * _staleness(engine)
 
 
-def _support_count(engine: Engine, figure: Figure, target_uid) -> int:
-    """Friendlies already in base contact with the same target — massed attacks
-    (the human's playbook) beat the serial suicide charges the audit found."""
+def _support_count(engine: Engine, figure: Figure, target_uid) -> float:
+    """Massed-attack support at the target: friendlies already in contact count
+    fully; friendlies who could REACH contact this turn count half (someone has
+    to charge FIRST — without the potential term nobody ever initiated, and the
+    audited horde 'refused to feed units in' one at a time forever)."""
     t = engine.state.figures.get(target_uid)
     if t is None:
-        return 0
-    n = 0
+        return 0.0
+    n = 0.0
     for fr in engine.state.living(figure.owner):
-        if fr.uid == figure.uid:
+        if fr.uid == figure.uid or fr.is_demoralized:
             continue
         if in_base_contact(fr.position, fr.base_radius, t.position, t.base_radius):
-            n += 1
+            n += 1.0
+        elif fr.damage > 0 and not engine.state.opposing_contacts(fr):
+            gap = distance(fr.position, t.position) - (fr.base_radius + t.base_radius)
+            if gap <= fr.speed + 0.5:
+                n += 0.5  # can pile on the same turn
     return n
 
 
@@ -300,7 +306,7 @@ def _move_value(engine: Engine, figure: Figure, cand: Candidate) -> float:
     pole_pen = 0.0
     support = 0.0
     if hint in ("charge", "flank"):
-        support = 0.35 * min(2, _support_count(engine, figure, ann.get("target")))
+        support = 0.35 * min(2.0, _support_count(engine, figure, ann.get("target")))
         if ann.get("pins_shooter"):
             support += 0.5  # basing a shooter silences it (P4-R23)
         if hint == "flank":
@@ -331,6 +337,11 @@ def _move_value(engine: Engine, figure: Figure, cand: Candidate) -> float:
             val = 0.5 + 0.15 * max(0.0, progress)
     if hint == "cover":
         val = max(val, 0.9)  # +1 def under fire is a real turn's work
+    # Idle pressure: a benched figure's advance grows more urgent every turn it
+    # sits out (never enough to outrank a real attack; enough to beat marginal
+    # frontline shuffles). Retreats/kites don't count — only joining the game.
+    if hint in ("approach", "detour", "charge", "flank", "range_band", "rally"):
+        val += min(1.5, 0.12 * ann.get("idle_turns", 0))
     if hint == "reface" and ann.get("enables_attack"):
         # Turning to face an in-range enemy unlocks next turn's attack — worth
         # a real slice of that attack (self-play locked up because refacing

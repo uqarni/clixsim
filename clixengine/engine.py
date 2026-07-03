@@ -828,9 +828,20 @@ class Engine:
         figure.acted_nonpass_this_turn = True
         figure.action_tokens += 1
         self._acted_uids.add(figure.uid)
+        self._mark_active(figure.uid)
         if not free:
             self._actions_spent += 1
         return pushing
+
+    def _mark_active(self, uid: int) -> None:
+        """Record the turn a figure last received a real action — the AI's
+        idle-pressure scoring reads this (audited games starved back-line
+        figures to 3 activations in 46 turns while the frontline hogged both
+        action slots every turn)."""
+        la = getattr(self, "_last_active_turn", None)
+        if la is None:
+            la = self._last_active_turn = {}
+        la[uid] = self.state.turn_number
 
     def _apply_pushing_damage(self, figure: Figure, events: list[dict]) -> None:
         # Pushing deals 1 click after the action resolves; Toughness does not
@@ -1517,6 +1528,7 @@ class Engine:
             g.acted_nonpass_this_turn = True
             g.action_tokens += 1
             self._acted_uids.add(g.uid)
+            self._mark_active(g.uid)
         self._actions_spent += 1  # the whole formation is one action
         return pushers
 

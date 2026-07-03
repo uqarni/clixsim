@@ -385,3 +385,35 @@ def test_two_shooters_get_the_volley_size_explanation(db):
     opts = e.formation_attack_options([0, 1])
     volley_notes = [o for o in opts if o["kind"] == "ranged_formation" and not o["ok"]]
     assert volley_notes and any("3-5" in o["reason"] for o in volley_notes)
+
+
+def test_idle_pressure_grows_on_benched_figures(db):
+    """Back-line figures got 3 activations in 46 turns (audit of 2026-07-03
+    games): an idle figure's advance must gain urgency every benched turn."""
+    e = build_engine(db, [
+        ("human", "Werebear", (10, 10), math.pi / 2, 0),
+        ("llm", "Seething Knight", (10, 30), -math.pi / 2, 0),
+    ], active="llm")
+    sk = e.state.figure(1)
+    e.state.turn_number = 21  # long game, this figure never activated
+    cs = generate_candidates(e, sk)
+    adv = _find(cs, kind="move", hint="approach")
+    assert adv is not None and adv.annotation.get("idle_turns", 0) >= 3
+    late = score_candidate(e, sk, adv)
+    e.state.turn_number = 3
+    cs2 = generate_candidates(e, sk)
+    adv2 = _find(cs2, kind="move", hint="approach")
+    early = score_candidate(e, sk, adv2)
+    assert late > early + 0.5  # urgency grew with the bench time
+
+
+def test_charge_support_counts_reachable_co_attackers(db):
+    """Somebody must charge FIRST: a friend who can pile on the same turn
+    counts toward the support bonus (0.5), not only friends already there."""
+    from clixengine.ai.evaluation import _support_count
+    e = build_engine(db, [
+        ("human", "Werebear", (10, 10), math.pi / 2, 0),
+        ("llm", "Seething Knight", (10, 14), -math.pi / 2, 0),
+        ("llm", "Seething Knight", (12, 14), -math.pi / 2, 0),  # can also reach
+    ], active="llm")
+    assert _support_count(e, e.state.figure(1), 0) >= 0.5
