@@ -280,8 +280,10 @@ def test_formation_attack_options_close_gang_with_rear(db):
     r = e.apply(CloseIntent(gang["primary"], gang["target"],
                             formation_uids=tuple(gang["members"])))
     assert r.ok
-    # 2 members can't volley: no ranged_formation entries for a pair.
-    assert not [o for o in opts if o["kind"] == "ranged_formation"]
+    # 2 members can't volley — only the informational size note may appear.
+    ranged = [o for o in opts if o["kind"] == "ranged_formation"]
+    assert not [o for o in ranged if o["ok"]]
+    assert all("3-5" in o["reason"] for o in ranged)
 
 
 def test_ranged_formation_candidates_cover_every_visible_target(db):
