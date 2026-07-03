@@ -495,34 +495,34 @@ def _construct_stream(mode: str, points: int, opponent: str, seed: int,
                            "role": _role(db.get(i))} for i in llm_ids]
             pick, reason, used_llm = builder.pick(db, cands, army_brief, remaining, budget, seed * 100 + step)
             if pick is None:
-                # Draft-stop guard (plan 1.5): one game was fielded at 111/200
-                # points because an early -1 was honored unconditionally. Refuse
-                # to stop while real budget remains and options exist — top up
-                # with the formation-aware heuristic instead.
-                if remaining > max(10, budget * 0.05) and cands:
-                    fill = heuristic_army(db, "llm", remaining, seed * 7 + step,
-                                          candidate_ids=llm_pool).figure_ids
-                    for fid in fill:
-                        f = db.get(fid)
-                        if f.points > remaining:
-                            continue
-                        if f.is_unique and f.id in used_uniques:
-                            continue
-                        if pool_counts is not None and pool_counts.get(fid, 0) <= 0:
-                            continue
-                        llm_ids.append(fid)
-                        remaining -= f.points
-                        if f.is_unique:
-                            used_uniques.add(fid)
-                        if pool_counts is not None:
-                            pool_counts[fid] -= 1
-                        draft_notes.append(f"{f.short_name} ({f.points}pts): budget top-up "
-                                           "(an under-strength army loses at the draft table)")
-                        yield sse({"type": "llm_pick", "figure": _brief(fid),
-                                   "reasoning": "Topping up the remaining budget.",
-                                   "used_llm": False, "remaining": remaining,
-                                   "army": [_brief(i) for i in llm_ids],
-                                   "points": budget - remaining})
+                # Draft-stop guard (plan 1.5): an early -1 used to be honored
+                # unconditionally (111/200-pt army). Refuse to stop while real
+                # budget remains: greedy-fill straight from _affordable, which
+                # respects the SEALED pool's remaining pulls and used uniques —
+                # the old top-up consulted the full pool and could pick only
+                # already-consumed figures, adding nothing (171/200 sealed).
+                majority = None
+                if llm_ids:
+                    from collections import Counter as _Counter
+                    majority = _Counter(db.get(i).faction for i in llm_ids).most_common(1)[0][0]
+                while remaining > max(10, budget * 0.05):
+                    fill_cands = _affordable(db, llm_pool, remaining, used_uniques, pool_counts)
+                    if not fill_cands:
+                        break
+                    f = next((c for c in fill_cands if c.faction == majority), fill_cands[0])
+                    llm_ids.append(f.id)
+                    remaining -= f.points
+                    if f.is_unique:
+                        used_uniques.add(f.id)
+                    if pool_counts is not None:
+                        pool_counts[f.id] -= 1
+                    draft_notes.append(f"{f.short_name} ({f.points}pts): budget top-up "
+                                       "(an under-strength army loses at the draft table)")
+                    yield sse({"type": "llm_pick", "figure": _brief(f.id),
+                               "reasoning": "Topping up the remaining budget.",
+                               "used_llm": False, "remaining": remaining,
+                               "army": [_brief(i) for i in llm_ids],
+                               "points": budget - remaining})
                 yield sse({"type": "llm_stop", "reasoning": reason, "used_llm": used_llm})
                 break
             llm_ids.append(pick.id)
