@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 
 from .engine import Engine
+from .threat import clicks_to_demoralized, figure_threat_brief, remaining_clicks
 from .state import Figure
 
 
@@ -39,7 +40,25 @@ def _figure_view(engine: Engine, f: Figure) -> dict:
         "active_abilities": abils,
         "push_tokens": f.action_tokens,
         "in_base_contact_with": contacts,
+        # Dial futures (plan 1.8): the human client renders whole dials; the AI
+        # used to see only the current click — it called a 2-click figure
+        # "healthy" right before the game-ending self-push.
+        "remaining_clicks": remaining_clicks(f),
+        "clicks_to_demoralized": clicks_to_demoralized(f),
+        "next_clicks": _dial_future(f),
     }
+
+
+def _dial_future(f, n: int = 2) -> list[dict]:
+    """Stats of the next couple of clicks — kill thresholds and stat cliffs."""
+    out = []
+    dial = f.definition.dial
+    for i in range(f.current_click + 1, min(f.current_click + 1 + n, f.definition.num_live_clicks)):
+        cs = dial[i]
+        out.append({"speed": cs.speed, "attack": cs.attack, "defense": cs.defense,
+                    "damage": cs.damage,
+                    "abilities": [a.name for a in cs.abilities]})
+    return out
 
 
 def _terrain_brief(t) -> dict:
@@ -55,13 +74,24 @@ def _terrain_brief(t) -> dict:
 
 def board_snapshot(engine: Engine) -> dict:
     state = engine.state
+    figures = []
+    for f in state.living():
+        fv = _figure_view(engine, f)
+        if f.owner == state.active_player:
+            # Engine-computed danger facts for the side about to act (plan 1.8):
+            # the prompt forbids the model from doing geometry, so the engine
+            # must SAY who is in how much trouble where it stands.
+            fv["threats"] = figure_threat_brief(engine, f)
+        figures.append(fv)
     return {
         "turn": state.turn_number,
         "active_player": state.active_player,
         "actions_per_turn": state.actions_per_turn(),
-        "actions_remaining": state.actions_per_turn() - len(engine._acted_uids),
+        # Engine truth — counting _acted_uids undercounts after a formation
+        # action (5 members token, 1 action spent; the old math reported -3).
+        "actions_remaining": engine._actions_remaining(),
         "board": {"width": state.board.width, "height": state.board.height},
-        "figures": [_figure_view(engine, f) for f in state.living()],
+        "figures": figures,
         "terrain": [_terrain_brief(t) for t in state.terrain],
         "ability_coverage": engine.ability_coverage(),
     }

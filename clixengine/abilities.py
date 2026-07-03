@@ -46,12 +46,11 @@ IMPLEMENTED_ABILITY_IDS: set[int] = {
     AQUATIC, BATTLE_ARMOR, BERSERK, COMMAND, DEFEND, DEMORALIZED,
     FLAME_LIGHTNING, FLIGHT, HEALING, MAGIC_BLAST, MAGIC_ENHANCEMENT, MAGIC_HEALING,
     MAGIC_IMMUNITY, MAGIC_LEVITATION, NECROMANCY, POLE_ARM, QUICKNESS, REGENERATION,
-    SHOCKWAVE, TOUGHNESS, VAMPIRISM, WEAPON_MASTER,
+    SHOCKWAVE, STEALTH, TOUGHNESS, VAMPIRISM, WEAPON_MASTER,
 }
-# Implemented but effectively inert until terrain exists (M2): Stealth needs
-# hindering terrain to block LoF; Flight/Aquatic's terrain clauses are moot but
-# their figure-pass-through and break-away effects are live.
-TERRAIN_DEPENDENT_IDS: set[int] = {STEALTH}
+# Stealth is LIVE since terrain shipped: a line of fire to a Stealth figure
+# that crosses hindering terrain is treated as blocked (engine.line_of_fire).
+TERRAIN_DEPENDENT_IDS: set[int] = set()
 # Whole effect depends on the capture subsystem (FUT-CAP), which is out of scope:
 # reported separately so coverage isn't overstated.
 CAPTURE_PENDING_IDS: set[int] = {BATTLE_FURY}

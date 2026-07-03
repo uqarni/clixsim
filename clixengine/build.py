@@ -57,6 +57,9 @@ def _fig_brief(db: FigureDB, f: FigureDef) -> dict:
         "rank": f.rank,          # Weak | Standard | Tough | Unique
         "rarity": f.rarity,      # "1".."6"
         "unique": f.is_unique,
+        # Movement formations need grounded, non-Mage-Spawn figures — the
+        # drafter used to justify picks with formation plans the engine forbids.
+        "formation_capable": _formation_capable(f),
         "abilities": _top_abilities(db, f),
         # starting-click stats + printed range so the drafter can compare figures
         "stats": {
@@ -208,7 +211,12 @@ unless you are deliberately drafting a horde.
 
 SPEND THE BUDGET. An army that leaves points on the table is strictly weaker — \
 keep picking until fewer than ~10 points remain. In big-points games, that \
-means BIG pieces, not more copies of the cheapest figure."""
+means BIG pieces, not more copies of the cheapest figure.
+
+DRAFT A HEALER when the pool offers one (Healing/Magic Healing/Necromancy): \
+every archived attrition loss traces to the enemy repairing damage the army \
+could not. Candidates carry "formation_capable" — only plan formations around \
+figures where it is true."""
 
 # A per-game drafting doctrine keeps armies varied across games (the model
 # otherwise converges on the same "best" picks every time).

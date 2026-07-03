@@ -501,8 +501,15 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
         charge_label = (f"Hunt down {target.short_name} (enemy support piece)"
                         if why == "support" else f"Advance into contact with {target.short_name}")
         if distance(figure.position, contact) <= eff_speed + 1e-9:
-            added = add_move(contact, facing, charge_label,
-                             {"target": target.uid, "intent_hint": "charge", **prio, **pins})
+            # Is the natural contact point already on the target's rear arc?
+            # (Approaching from behind — the charge IS the flank.)
+            contact_rear = in_rear_arc(target.position, target.facing, contact,
+                                       target.arc_half_angle)
+            added = add_move(
+                contact, facing,
+                charge_label + (" — from the REAR (+1)" if contact_rear else ""),
+                {"target": target.uid, "intent_hint": "flank" if contact_rear else "charge",
+                 **({"rear": True} if contact_rear else {}), **prio, **pins})
             # Flank: a second contact point on the target's REAR arc (+1 attack,
             # no retaliation facing). Only reachable on oblique approaches — the
             # straight-segment move rule forbids crossing the target's base.
@@ -510,7 +517,8 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
                 target.position.x - math.cos(target.facing) * (figure.base_radius + target.base_radius),
                 target.position.y - math.sin(target.facing) * (figure.base_radius + target.base_radius),
             )
-            if distance(figure.position, behind) <= eff_speed + 1e-9:
+            if (not contact_rear
+                    and distance(figure.position, behind) <= eff_speed + 1e-9):
                 add_move(behind, _facing_toward(behind, target.position),
                          f"Flank behind {target.short_name} (rear attack: +1, no front-arc reply)",
                          {"target": target.uid, "intent_hint": "flank", "rear": True,
@@ -599,8 +607,18 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
             f"Re-face toward {nearest.short_name} — needed before a close attack"
             if engaged_behind else f"Turn to face {nearest.short_name}"
         )
+        # Does this re-face UNLOCK an attack next activation? (in contact, or a
+        # shooter with the enemy inside range) — the fact that makes it compete.
+        enables = engaged_behind or (
+            figure.range > 0
+            and distance(figure.position, nearest.position) <= figure.range
+            and not engine.state.opposing_contacts(figure)
+            and not in_front_arc(figure.position, figure.facing,
+                                 nearest.position, figure.arc_half_angle)
+        )
         add_move(figure.position, _facing_toward(figure.position, nearest.position),
-                 reface_label, {"intent_hint": "reface"})
+                 reface_label,
+                 {"intent_hint": "reface", **({"enables_attack": True} if enables else {})})
 
     # Rally: a *singleton* joins the nearest same-faction ally to build a
     # movement/ranged formation. Only singletons rally (figures already touching

@@ -55,7 +55,8 @@ class HeuristicAI:
             for s in self.stream_turn(engine)
         ]
 
-    def stream_turn(self, engine: Engine, table_talk: list[dict] | None = None):
+    def stream_turn(self, engine: Engine, table_talk: list[dict] | None = None,
+                    memory: list[str] | None = None):
         """Yield one dict per action (summary, reasoning, events) as it resolves,
         then end the turn — the streaming form used by the live opponent view.
         ``table_talk`` is accepted for interface parity (the heuristic doesn't

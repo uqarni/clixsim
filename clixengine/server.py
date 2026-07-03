@@ -11,6 +11,7 @@ game session lives in-process (single-player local app).
 from __future__ import annotations
 
 import json
+import math
 import pickle
 import threading
 from contextlib import asynccontextmanager
@@ -290,22 +291,95 @@ def intent_from_dict(d: dict):
     raise HTTPException(400, f"unknown intent kind: {kind!r}")
 
 
+def _auto_deploy_llm(eng: Engine) -> None:
+    """Doctrine-agnostic combined-arms deployment for the AI (plan 3.3): melee
+    screen up front, shooters and support behind, faction-mates adjacent so
+    formations exist on turn one. All 19 deploy events across three archived
+    games were the human's — the AI had been starting in its raw draft row,
+    shooters exposed, regardless of the terrain it just placed."""
+    if eng.state.phase != "deploy" or getattr(eng, "llm_deployed", False):
+        return
+    figs = [f for f in eng.state.figures.values() if f.owner == "llm" and f.is_alive]
+    if not figs:
+        return
+    h = eng.state.board.height
+    w = eng.state.board.width
+
+    def role(f) -> int:
+        names = {a.name for a in f.definition.dial[f.current_click].abilities}
+        if any(n in names for n in ("Healing", "Magic Healing", "Necromancy")):
+            return 2  # support: safest row
+        return 1 if f.range > 0 else 0  # shooters middle, melee front
+
+    figs.sort(key=lambda f: (role(f), f.definition.faction, -f.points))
+    # llm deploys at the TOP edge; "front" (toward the human) = smaller y.
+    rows_y = [h - 2.45, h - 1.35, h - 0.6]
+    by_role: dict[int, list] = {0: [], 1: [], 2: []}
+    for f in figs:
+        by_role[role(f)].append(f)
+    if not by_role[0]:  # pure gunline: shooters take the front two rows
+        by_role[0], by_role[1] = by_role[1], []
+    for r_idx, members in by_role.items():
+        if not members:
+            continue
+        spacing = 1.11  # touching -> formations are live immediately
+        x0 = w / 2 - spacing * (len(members) - 1) / 2
+        for i, f in enumerate(members):
+            placed = False
+            for nudge in (0.0, 0.6, -0.6, 1.2, -1.2, 2.4, -2.4):
+                res = eng.deploy_figure(
+                    "llm", f.uid, (x0 + spacing * i + nudge, rows_y[r_idx]),
+                    -math.pi / 2)
+                if getattr(res, "ok", False):
+                    placed = True
+                    break
+            if not placed:
+                pass  # keep its draft-row spot — legal by construction
+    eng.llm_deployed = True
+
+
+def _best_spin_facing(eng: Engine, fig) -> float:
+    """Threat-weighted free-spin facing (plan 1.6). The old face-the-mover rule
+    was deterministic and got farmed: the human pinned with a cheap figure to
+    force the spin, then rear-killed with the expensive one already in contact
+    (3 of 5 deaths in one archived game). Face the most dangerous adjacent
+    enemy instead; when the two worst both fit in the front arc, bisect."""
+    threats = []
+    for o in eng.state.opposing_contacts(fig):
+        if not o.is_alive:
+            continue
+        odds = eng.hit_odds(o.uid, fig.uid, attack_type="close")
+        threats.append((odds * max(1, o.damage), o))
+    if not threats:
+        return fig.facing
+    threats.sort(key=lambda t: -t[0])
+    best = threats[0][1]
+    ang = angle_to(fig.position, best.position)
+    if len(threats) >= 2:
+        a2 = angle_to(fig.position, threats[1][1].position)
+        diff = (a2 - ang + math.pi) % (2 * math.pi) - math.pi
+        # Bisect only when both threats then sit inside the front arc.
+        if abs(diff) < 2 * fig.arc_half_angle * 0.95:
+            mid = ang + diff / 2
+            if abs((ang - mid + math.pi) % (2 * math.pi) - math.pi) < fig.arc_half_angle:
+                ang = mid
+    return ang
+
+
 def _auto_free_spin_opponents(eng: Engine, result) -> None:
     """When the human moves into base contact with the AI's figures, the AI takes
-    its free spin (P4-R9): each contacted opponent re-faces toward the mover. Keeps
-    the rule symmetric without asking the AI to reason about facing."""
+    its free spin (P4-R9): each contacted opponent re-faces toward its most
+    DANGEROUS adjacent enemy (not blindly toward the mover). Keeps the rule
+    symmetric without asking the AI to reason about facing."""
     if not getattr(result, "ok", False):
         return
     for e in getattr(result, "events", []):
         if e.get("type") != "free_spin_offer":
             continue
-        mover = eng.state.figures.get(e.get("by"))
-        if mover is None:
-            continue
         for u in e.get("spinners", []):
             fig = eng.state.figures.get(u)
             if fig and fig.is_alive and fig.owner != eng.state.active_player:
-                eng.apply(FreeSpinIntent(u, angle_to(fig.position, mover.position)))
+                eng.apply(FreeSpinIntent(u, _best_spin_facing(eng, fig)))
 
 
 def _candidate_view(c) -> dict:
@@ -421,6 +495,34 @@ def _construct_stream(mode: str, points: int, opponent: str, seed: int,
                            "role": _role(db.get(i))} for i in llm_ids]
             pick, reason, used_llm = builder.pick(db, cands, army_brief, remaining, budget, seed * 100 + step)
             if pick is None:
+                # Draft-stop guard (plan 1.5): one game was fielded at 111/200
+                # points because an early -1 was honored unconditionally. Refuse
+                # to stop while real budget remains and options exist — top up
+                # with the formation-aware heuristic instead.
+                if remaining > max(10, budget * 0.05) and cands:
+                    fill = heuristic_army(db, "llm", remaining, seed * 7 + step,
+                                          candidate_ids=llm_pool).figure_ids
+                    for fid in fill:
+                        f = db.get(fid)
+                        if f.points > remaining:
+                            continue
+                        if f.is_unique and f.id in used_uniques:
+                            continue
+                        if pool_counts is not None and pool_counts.get(fid, 0) <= 0:
+                            continue
+                        llm_ids.append(fid)
+                        remaining -= f.points
+                        if f.is_unique:
+                            used_uniques.add(fid)
+                        if pool_counts is not None:
+                            pool_counts[fid] -= 1
+                        draft_notes.append(f"{f.short_name} ({f.points}pts): budget top-up "
+                                           "(an under-strength army loses at the draft table)")
+                        yield sse({"type": "llm_pick", "figure": _brief(fid),
+                                   "reasoning": "Topping up the remaining budget.",
+                                   "used_llm": False, "remaining": remaining,
+                                   "army": [_brief(i) for i in llm_ids],
+                                   "points": budget - remaining})
                 yield sse({"type": "llm_stop", "reasoning": reason, "used_llm": used_llm})
                 break
             llm_ids.append(pick.id)
@@ -446,6 +548,7 @@ def _construct_stream(mode: str, points: int, opponent: str, seed: int,
         # engine so it survives restarts with the game).
         SESSION.engine.doctrine = builder.doctrine
         SESSION.engine.draft_notes = draft_notes[:20]
+        _auto_deploy_llm(SESSION.engine)  # deploy-only games (no terrain phase)
         yield sse({"type": "ready", "view": game_view(SESSION.engine)})
     except Exception as e:  # never leave the client hanging
         yield sse({"type": "error", "message": str(e)})
@@ -533,6 +636,7 @@ def place_terrain_polygon(req: PlaceTerrainPolygonReq):
     finally:
         SESSION.terrain_lock.release()
     if result.ok:
+        _auto_deploy_llm(eng)  # terrain may have just completed -> AI arranges its line
         SESSION.checkpoint(reason="terrain")
     return {
         "ok": result.ok,
@@ -560,6 +664,7 @@ def place_terrain(req: PlaceTerrainReq):
         result = eng.place_terrain(SESSION.human_side, req.key, req.center, req.rotation)
     finally:
         SESSION.terrain_lock.release()
+    _auto_deploy_llm(eng)
     return {
         "ok": result.ok,
         "reason": getattr(result, "reason", None),
@@ -579,6 +684,7 @@ def skip_terrain():
         result = eng.skip_terrain_placement(SESSION.human_side)
     finally:
         SESSION.terrain_lock.release()
+    _auto_deploy_llm(eng)
     return {
         "ok": result.ok,
         "reason": getattr(result, "reason", None),
@@ -640,6 +746,7 @@ def terrain_placement_stream():
                 SESSION.checkpoint(reason="terrain")
                 yield sse({"type": "place", "summary": r.summary, "reasoning": reason,
                            "used_llm": used, "view": game_view(eng)})
+            _auto_deploy_llm(eng)  # alternation may have ended -> AI arranges its line
             yield sse({"type": "done", "view": game_view(eng)})
         except Exception as e:
             yield sse({"type": "error", "message": str(e), "view": game_view(eng)})
@@ -796,7 +903,10 @@ def opponent_turn_stream():
         try:
             SESSION.last_turn_notes = []  # fresh notes for this opponent turn
             notes_turn = eng.state.turn_number  # before stream_turn's end_turn()
-            for step in SESSION.opponent.stream_turn(eng, table_talk=SESSION.chat_log[-8:]):
+            recent = [f"turn {n['turn']}: " + " | ".join(n["notes"][:3])
+                      for n in SESSION.ai_notes_log[-3:]]
+            for step in SESSION.opponent.stream_turn(
+                    eng, table_talk=SESSION.chat_log[-8:], memory=recent):
                 SESSION.last_turn_notes.append(f"{step['summary']} — {step['reasoning']}")
                 yield sse({"type": "action", "summary": step["summary"],
                            "reasoning": step["reasoning"], "events": step["events"],

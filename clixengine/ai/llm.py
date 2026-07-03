@@ -34,19 +34,34 @@ probability. Your job is pure strategy: choose the single best action from the \
 numbered list of engine-validated, legal candidate actions provided each step.
 
 Principles of strong play:
-- Concentrate fire to eliminate enemy figures (removing a figure removes its \
-attacks and scores its point value).
-- Prefer high expected-damage actions; finish wounded, high-value targets.
-- Use ranged attackers to hit without being hit; keep them out of base contact.
-- Advance melee figures into contact; attack the target's rear arc for +1 when \
-you can.
+- READ THE FACTS: every candidate carries engine-computed numbers. \
+"incoming_clicks_at_dest" is how hard the enemy hits that spot next turn — \
+walking a figure somewhere hotter than where it stands needs a REASON \
+(a kill, a pin, massed support). "heuristic_rank" 0 is the engine's greedy \
+best; deviate only for a stated strategic reason.
+- MASS, THEN COMMIT. Never feed figures into a gunline one at a time — a solo \
+charger dies in 1-2 turns for nothing. Advance as a formation or wait at a \
+rally point until 2+ figures can engage the SAME target the same turn \
+("pins_shooter" and flank candidates are what a committed turn looks like).
+- Concentrate fire to eliminate enemy figures; finish wounded, high-value \
+targets. KILL ENABLERS FIRST: a healer out-repairs your chip damage and a \
+necromancer refunds your kills — candidates marked priority_target exist for \
+exactly this.
+- Use ranged attackers to hit without being hit: kite (step back out of a \
+chaser's reach and keep shooting), take cover (+1 def in woods/on hills), and \
+NEVER stand inside a longer-ranged enemy's band without a purpose. Basing an \
+enemy shooter silences it (P4-R23); your own based shooters should break away.
 - PUSHING: any candidate whose facts say "pushes": true deals 1 click of \
-SELF-damage to that figure the moment the action resolves (P4-R4), and \
-"push_would_eliminate": true means it would KILL your own figure. Treat pushed \
-actions as costing a click of your own dial: take them only for a decisive \
-payoff (finishing off an enemy, a game-swinging hit) — otherwise act with a \
-FRESH figure or Pass the tired one (resting clears its tokens). Spreading \
-actions across fresh figures beats hammering one figure two turns in a row.
+SELF-damage the moment it resolves (P4-R4). "push_would_eliminate" kills your \
+figure; "push_would_demoralize" is nearly as bad — a Demoralized figure cannot \
+attack and no longer counts toward victory. Push only deep, healthy dials for \
+a decisive payoff.
+- NEVER PASS. Tokens clear by themselves on any figure you leave alone — an \
+explicit pass burns one of your precious actions for nothing. If nothing is \
+worth doing, end the turn.
+- Demoralized OWN figures are strategic corpses: never spend actions moving or \
+"preserving" them.
+- Doctrine is flavor, not license: it NEVER justifies a negative-EV action.
 - SPORTSMANSHIP / ENDGAME: never stall a decided game. If you have no \
 realistic path to victory (your last figures are battered and outgunned), do \
 NOT loop retreat/rest turn after turn to delay the end — advance toward the \
@@ -73,6 +88,41 @@ _SCHEMA = {
     "required": ["choice_id", "rationale"],
     "additionalProperties": False,
 }
+
+
+def _annotate_reply_deltas(engine: Engine, rows, k: int = 4) -> None:
+    """Bounded one-ply lookahead (plan 3.1): for the top-k MOVE-like candidates,
+    apply the move on a scratch copy of the deterministic engine and report the
+    opponent's best single reply score afterward. Moves only — attack outcomes
+    are dice, and their odds are already annotated."""
+    import copy as _copy
+
+    from .heuristic import HeuristicAI
+
+    sim = HeuristicAI()
+    done = 0
+    for _score, _fig, cand in rows:
+        if done >= k:
+            break
+        if cand.kind not in ("move", "formation_move"):
+            continue
+        done += 1
+        try:
+            ghost = _copy.deepcopy(engine)
+            res = ghost.apply(_copy.deepcopy(cand.intent))
+            if not getattr(res, "ok", False):
+                continue
+            ghost.end_turn()
+            if ghost.state.ended:
+                continue
+            reply = sim.best_decision(ghost)
+            if reply is not None:
+                cand.annotation["enemy_best_reply_after"] = {
+                    "action": reply.candidate.label,
+                    "value": round(reply.score, 1),
+                }
+        except Exception:
+            continue  # advisory only — never let lookahead break the turn
 
 
 def position_hopeless(engine: Engine, ratio: float = 0.35) -> bool:
@@ -124,7 +174,10 @@ class LLMOpponent:
     # ------------------------------------------------------------------ #
     def _ranked_candidates(self, engine: Engine) -> list[tuple[int, object, object]]:
         """Flatten all candidates across actionable figures, ranked by the
-        heuristic score (best first), tagged with a stable id."""
+        heuristic score (best first), tagged with a stable id. The heuristic
+        rank and score are STAMPED on each candidate (plan 1.9d) — the model
+        used to see options with no idea which the engine thought best, and
+        one-ply reply deltas are attached to the top few (plan 3.1, bounded)."""
         rows = []
         for fig in engine.actionable_figures():
             for cand in generate_candidates(engine, fig):
@@ -133,9 +186,15 @@ class LLMOpponent:
             primary = engine.state.figure(cand.annotation["primary"])
             rows.append((score_candidate(engine, primary, cand), primary, cand))
         rows.sort(key=lambda r: r[0], reverse=True)
+        for rank, (score, _fig, cand) in enumerate(rows):
+            cand.annotation["heuristic_rank"] = rank
+            cand.annotation["heuristic_score"] = round(score, 2)
+        _annotate_reply_deltas(engine, rows)
         return [(i, fig, cand) for i, (_, fig, cand) in enumerate(rows)]
 
-    def _prompt(self, engine: Engine, ranked, table_talk: list[dict] | None = None) -> str:
+    def _prompt(self, engine: Engine, ranked, table_talk: list[dict] | None = None,
+                memory: list[str] | None = None,
+                turn_log: list[str] | None = None) -> str:
         snap = board_snapshot(engine)
         endgame = position_hopeless(engine)
         options = []
@@ -164,6 +223,13 @@ class LLMOpponent:
                 "consistent with your words — but never sacrifice a winning line "
                 "to keep a banter promise."
             )
+        if memory:
+            # Turn memory (plan 2.6): each ask used to be stateless — a figure
+            # oscillated between two exact points for 60 turns. Stay consistent
+            # with the plan you narrated unless the board actually changed.
+            payload["your_recent_turns"] = memory
+        if turn_log:
+            payload["this_turn_so_far"] = turn_log
         if endgame:
             payload["endgame_note"] = (
                 "Your position is almost certainly LOST — your remaining strength "
@@ -200,8 +266,10 @@ class LLMOpponent:
                         + "\n- ".join(notes) + "\nPlay to that plan.")
         return f"{_SYSTEM}\n\n{rules_digest()}\n\n{card}{identity}"
 
-    def _ask(self, engine: Engine, ranked, table_talk: list[dict] | None = None) -> tuple[int | None, str]:
-        prompt = self._prompt(engine, ranked, table_talk)
+    def _ask(self, engine: Engine, ranked, table_talk: list[dict] | None = None,
+             memory: list[str] | None = None,
+             turn_log: list[str] | None = None) -> tuple[int | None, str]:
+        prompt = self._prompt(engine, ranked, table_talk, memory, turn_log)
         try:
             self.calls += 1
             resp = self._client.messages.create(
@@ -239,12 +307,15 @@ class LLMOpponent:
             for s in self.stream_turn(engine)
         ]
 
-    def stream_turn(self, engine: Engine, table_talk: list[dict] | None = None):
+    def stream_turn(self, engine: Engine, table_talk: list[dict] | None = None,
+                    memory: list[str] | None = None):
         """Yield one dict per action (summary, LLM reasoning, engine events) as it
         resolves, then end the turn. Falls back to the heuristic per action, and a
         candidate the engine rejects is excluded and re-picked (never ends the
-        turn — that reads as the opponent freezing)."""
+        turn — that reads as the opponent freezing). ``memory`` carries the last
+        few turns' rationales so plans persist across the stateless asks."""
         rejected: set[str] = set()
+        turn_log: list[str] = []  # what this turn has already done
         retry_heuristic = False  # after a rejection, re-pick without another API call
         while engine.actionable_figures() and not engine.state.ended:
             ranked = [r for r in self._ranked_candidates(engine)
@@ -252,7 +323,8 @@ class LLMOpponent:
             if not ranked:
                 break
             ask_llm = self.available and not retry_heuristic
-            chosen_id, rationale = self._ask(engine, ranked, table_talk) if ask_llm else (None, "")
+            chosen_id, rationale = (self._ask(engine, ranked, table_talk, memory, turn_log)
+                                    if ask_llm else (None, ""))
             fallback = chosen_id is None
             if fallback:
                 if ask_llm:
@@ -267,6 +339,12 @@ class LLMOpponent:
                 fig_uid = fig_obj.uid
                 score = 0.0 if cand.kind == "pass" else score_candidate(engine, fig_obj, cand)
                 reasoning = rationale
+            if cand.kind == "pass":
+                # NEVER pass: tokens clear on their own for idle figures — an
+                # explicit pass burns an action slot (the audit counted 28 of
+                # them, all wasted). Choosing pass means "nothing worth doing":
+                # end the turn instead.
+                break
             result = engine.apply(cand.intent)
             if not result.ok:
                 self.last_error = f"engine rejected: {result.reason}"
@@ -278,6 +356,7 @@ class LLMOpponent:
                 continue
             rejected.clear()
             retry_heuristic = False
+            turn_log.append(f"{cand.label} — {reasoning[:120]}" if reasoning else cand.label)
             yield {
                 "figure_uid": fig_uid, "candidate": cand, "score": score,
                 "summary": cand.label, "reasoning": reasoning,

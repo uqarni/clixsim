@@ -132,11 +132,17 @@ class Engine:
         elev_a, elev_t = self._elev(a.position), self._elev(t.position)
         # Blocking terrain / elevation blocks the line of fire.
         if self.state.terrain:
-            blocked, _ = terr.lof_terrain(
+            blocked, hindering = terr.lof_terrain(
                 self.state.terrain, a.position, t.position, elev_a, elev_t,
                 self._stand_on(a.position), self._stand_on(t.position))
             if blocked:
                 return False, "line of fire blocked by terrain"
+            # Stealth (§card text): a line of fire to this warrior that passes
+            # through hindering terrain is treated as blocking. The ability
+            # shipped inert — the AI drafted (and lost) Stealth figures whose
+            # printed defense never materialized.
+            if hindering and ab.STEALTH in t.active_ability_ids():
+                return False, f"{t.short_name}'s Stealth: hindering terrain blocks the line of fire"
         # Blocked if it crosses an intervening base — but a fully-elevated shot
         # ignores non-elevated bases (§Elevated Terrain).
         both_elev = elev_a == 1 and elev_t == 1
@@ -177,16 +183,20 @@ class Engine:
     # ------------------------------------------------------------------ #
     # Terrain placement (setup phase) — players alternate placing pieces
     # ------------------------------------------------------------------ #
-    def _where_label(self, c: Vec) -> str:
-        """Human/AI-readable rough position for a candidate placement."""
+    def _where_label(self, c: Vec, owner: str = "human") -> str:
+        """Owner-relative rough position for a candidate placement. The old
+        label called y<h/3 "near your side" for BOTH players — the AI (top
+        edge) placed all 9 audited pieces deep in the HUMAN's half believing
+        they were defensive, and the human camped an AI-placed hill for 9
+        turns."""
         w, h = self.state.board.width, self.state.board.height
         col = "left" if c.x < w / 3 else "right" if c.x > 2 * w / 3 else "center"
-        if c.y < h / 3:
-            row = "near your side"
-        elif c.y > 2 * h / 3:
-            row = "near the enemy side"
-        else:
-            row = "midfield"
+        near_bottom = c.y < h / 3
+        near_top = c.y > 2 * h / 3
+        own_side = near_top if owner == "llm" else near_bottom
+        enemy_side = near_bottom if owner == "llm" else near_top
+        row = ("near your side" if own_side
+               else "near the ENEMY side" if enemy_side else "midfield")
         return f"{row}, {col}" if col != "center" else row
 
     def terrain_placement_candidates(self, owner: str, max_n: int = 6) -> list[dict]:
@@ -194,12 +204,16 @@ class Engine:
         fits) for an AI placer to choose among — the engine owns geometry, so the
         placer only ever selects a pre-validated option. Scans a fine grid so a
         spot is found whenever one exists (avoids a placer stalling on a full-ish
-        board)."""
+        board). The scan starts from the OWNER's half (own-half cover first,
+        then midfield, then enemy territory) — the old y-ascending scan always
+        offered the human's half first, to either player."""
         w, h = self.state.board.width, self.state.board.height
         band = 3.0
         step = 2.0
         xs = [3.0 + step * i for i in range(int((w - 6.0) / step) + 1)]
         ys = [band + 1.0 + step * i for i in range(int((h - 2 * band - 2.0) / step) + 1)]
+        if owner == "llm":
+            ys = sorted(ys, reverse=True)  # llm deploys at the top edge
         rots = [0.0, math.pi / 4, math.pi / 2]
         placed = len(self.state.terrain)
         out: list[dict] = []
@@ -216,7 +230,7 @@ class Engine:
                     out.append({
                         "key": tmpl.key, "label": tmpl.label, "kind": tmpl.kind,
                         "blurb": tmpl.blurb, "center": [round(x, 2), round(y, 2)],
-                        "rotation": round(r, 4), "where": self._where_label(center),
+                        "rotation": round(r, 4), "where": self._where_label(center, owner),
                     })
                     break
             if len(out) >= max_n:
@@ -931,6 +945,12 @@ class Engine:
         start = f.position
         if broke_away:
             f.position = dest
+            # Anti-thrash memory (plan 2.6): remember where the figure came
+            # from so the AI scoring can penalize exactly undoing a move.
+            prev = getattr(self, "_prev_positions", None)
+            if prev is None:
+                prev = self._prev_positions = {}
+            prev[f.uid] = (start.x, start.y)
         f.facing = intent.facing  # re-face allowed even on a failed break-away
         events.append(self.log.emit(
             "move", figure=f.uid, frm=[start.x, start.y],

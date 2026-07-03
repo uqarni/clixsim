@@ -201,6 +201,46 @@ def _shockwave_value(engine: Engine, figure: Figure, cand: Candidate) -> float:
     return max(0.0, v)
 
 
+_DAMAGE_EVENTS = ("close_attack", "ranged_attack", "magic_blast", "shockwave",
+                  "flame_lightning", "close_formation", "ranged_formation",
+                  "push_damage", "pole_arm", "crit_miss")
+
+
+def _staleness(engine: Engine) -> float:
+    """Aggression ramp: if NOBODY has dealt combat damage for a while, mutual
+    caution has produced a standoff — decay the danger penalty (and the value
+    of turtling actions like Regenerate) so somebody commits. Self-play showed
+    two regen-tanks healing at each other forever; a standoff is a non-game."""
+    turns_since = 0
+    current = engine.state.turn_number
+    for e in reversed(engine.log.events[-240:]):
+        if e.get("type") == "begin_turn":
+            turns_since = current - e.get("turn", current)
+        if e.get("type") in _DAMAGE_EVENTS and e.get("clicks", 0) > 0:
+            break
+        if turns_since >= 12:
+            break
+    return max(0.25, 1.0 - 0.12 * max(0, turns_since - 6))
+
+
+def side_hopeless(engine: Engine, owner: str, ratio: float = 0.35) -> bool:
+    """Sportsmanship at the scoring level: ``owner``'s effective strength is a
+    small fraction of the enemy's. A hopeless side must stop valuing evasion —
+    kiting/retreat-looping a decided game is the one unforgivable behavior
+    (a real game dragged turn 53 to 60 this way; self-play draws did the same)."""
+    def strength(side: str) -> float:
+        total = 0.0
+        for f in engine.state.living(side):
+            s = f.definition.points * max(0.1, f.health_fraction())
+            if f.is_demoralized:
+                s *= 0.3
+            total += s
+        return total
+    mine = strength(owner)
+    theirs = strength("human" if owner == "llm" else "llm")
+    return theirs > 0 and mine < ratio * theirs
+
+
 def _danger_penalty(engine: Engine, figure: Figure, ann: dict) -> float:
     """Exposure cost of ending a move where the candidate says (plan 1.2):
     penalize INCREASING exposure hard, standing exposed a little. Units are
@@ -211,7 +251,8 @@ def _danger_penalty(engine: Engine, figure: Figure, ann: dict) -> float:
     if after is None or now is None:
         return 0.0
     frac_vpc = min(1.6, _vpc(figure) / 6.0)  # expensive figures fear fire more
-    return (0.30 * max(0.0, after - now) + 0.06 * after) * (0.6 + frac_vpc)
+    return (0.30 * max(0.0, after - now) + 0.06 * after) * (0.6 + frac_vpc) \
+        * _staleness(engine)
 
 
 def _support_count(engine: Engine, figure: Figure, target_uid) -> int:
@@ -287,7 +328,19 @@ def _move_value(engine: Engine, figure: Figure, cand: Candidate) -> float:
             val = 0.5 + 0.15 * max(0.0, progress)
     if hint == "cover":
         val = max(val, 0.9)  # +1 def under fire is a real turn's work
-    return max(0.03, val + support) * 0.5 - pole_pen - _danger_penalty(engine, figure, ann)
+    if hint == "reface" and ann.get("enables_attack"):
+        # Turning to face an in-range enemy unlocks next turn's attack — worth
+        # a real slice of that attack (self-play locked up because refacing
+        # never competed with regen-tanking).
+        val = max(val, 1.6)
+    if hint in ("kite", "retreat") and side_hopeless(engine, figure.owner):
+        val *= 0.15  # a lost army fights to the finish; it doesn't run laps
+    # Anti-thrash (plan 2.6): a figure oscillated between two exact points for
+    # 60 turns — walking back to where it JUST stood is almost never a plan.
+    prev = getattr(engine, "_prev_positions", {}).get(figure.uid)
+    thrash = 0.5 if prev and distance(dpt, Vec(prev[0], prev[1])) < 0.4 else 0.0
+    return max(0.03, val + support) * 0.5 - pole_pen - thrash \
+        - _danger_penalty(engine, figure, ann)
 
 
 def _charge_pole_arm_penalty(engine: Engine, figure: Figure, dest: Vec) -> float:
@@ -341,7 +394,9 @@ def score_candidate(engine: Engine, figure: Figure, cand: Candidate) -> float:
     elif k == "heal":
         val = _heal_value(engine, figure, cand)
     elif k == "regenerate":
-        val = (10.0 / 6.0) * _vpc(figure)  # engine heals max(0, d6-2): EV 1.67
+        # Engine heals max(0, d6-2): EV 1.67 clicks. Decays with staleness —
+        # regen-tanking a standoff heals nothing that matters and stalls games.
+        val = (10.0 / 6.0) * _vpc(figure) * _staleness(engine)
     elif k == "necromancy":
         val = 0.35 * cand.annotation.get("revive_points", 0)  # returns wounded
     elif k == "levitate":
