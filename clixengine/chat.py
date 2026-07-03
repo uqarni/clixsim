@@ -36,10 +36,13 @@ or +1 healing when healing); natural 2 = critical miss (the attacker takes 1 sel
 - Ranged attacks need a clear line of fire and the target in your front arc, and you can't \
 fire while in base contact. Close combat needs base contact + front arc; hitting the \
 target's rear arc gives +1 attack.
-- Actions per turn = build total / 100. Acting a figure on consecutive turns adds push \
-tokens; pushing a third turn costs self-damage. Passing rests a figure and clears tokens.
-- Formations: 3-5 touching same-faction figures move as one action; combat formations pool \
-an attack (+2 per extra ranged member; +1 per extra close member; +1 for a rear attacker).
+- Actions per turn = build total / 100. Acting a figure a SECOND consecutive turn is a \
+push: it takes 1 click of self-damage immediately; a third consecutive action is forbidden. \
+A figure given no action simply rests and clears its tokens — passing is never required.
+- Formations: 3-5 touching same-faction figures move as one action. Ranged formations are \
+3-5 same-faction shooters touching each other (+2 to the roll per extra member); close \
+formations are 2-3 same-faction attackers who each touch the TARGET, not each other \
+(+1 per extra member, +1 more if any attacker is on the rear arc).
 - A figure is eliminated on 3 skulls. You win by eliminating or demoralizing every enemy \
 figure. Optional abilities may be switched off until end of turn."""
 

@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 from . import abilities as ab
 from . import terrain as terr
-from .engine import Engine
+from .engine import MAGE_SPAWN_FACTION, Engine
 from .geometry import (
     CONTACT_TOLERANCE,
     Vec,
@@ -36,8 +36,27 @@ from .intents import (
     PassIntent,
     RangedIntent,
     RegenerateIntent,
+    ToggleAbilityIntent,
 )
 from .state import Figure
+from .threat import clicks_to_demoralized, threat_score
+
+# Enemy figures whose CURRENT click carries one of these are force multipliers:
+# the audit found an unopposed healer out-repaired the AI's entire net damage
+# and a necromancer refunded 5 of 7 kills. Approach candidates must exist for
+# them even when they hide behind the line (plan 1.4).
+SUPPORT_ABILITY_NAMES = ("Necromancy", "Healing", "Magic Healing", "Command")
+
+
+def _is_support(fig: Figure) -> bool:
+    names = {a.name for a in fig.definition.dial[fig.current_click].abilities}
+    return any(n in names for n in SUPPORT_ABILITY_NAMES)
+
+
+def _poly_centroid(piece) -> "Vec":
+    xs = [v.x for v in piece.polygon]
+    ys = [v.y for v in piece.polygon]
+    return Vec(sum(xs) / len(xs), sum(ys) / len(ys))
 
 D6_AVG = 3.5  # expected value of a six-sided die (Weapon Master / Magic Blast)
 
@@ -105,11 +124,47 @@ def generate_candidates(engine: Engine, figure: Figure) -> list[Candidate]:
     if (has_budget or quick) and figure.speed > 0 and figure.action_tokens < 2:
         _move_candidates(engine, figure, enemies, cands, demoralized, free=quick)
 
+    # ---- cancel optional Flight/Aquatic/Quickness to unlock a formation ----
+    # (plan 1.1d). Free and un-tokened; auto-restores at the figure's next turn.
+    # Costs base pass-through / easy break-away for the rest of THIS turn, so
+    # it's only offered when it actually enables a 3+ movement formation.
+    if has_budget and not demoralized:
+        barred_ref = next(
+            (a for a in figure.definition.dial[figure.current_click].abilities
+             if a.id in (ab.FLIGHT, ab.AQUATIC, ab.QUICKNESS) and a.optional
+             and a.id in figure.active_ability_ids()),
+            None,
+        )
+        if barred_ref is not None and figure.definition.faction != MAGE_SPAWN_FACTION:
+            groundmates = [
+                fr for fr in engine.state.friends_of(figure)
+                if fr.definition.faction == figure.definition.faction
+                and not (fr.active_ability_ids() & (ab.FREE_MOVEMENT_IDS | {ab.QUICKNESS}))
+                and not engine.state.opposing_contacts(fr)
+                and in_base_contact(figure.position, figure.base_radius,
+                                    fr.position, fr.base_radius)
+            ]
+            if len(groundmates) >= 2:
+                cands.append(Candidate(
+                    ToggleAbilityIntent(figure.uid, barred_ref.id, off=True),
+                    "toggle_ability",
+                    f"Switch off {barred_ref.name} this turn — unlocks a movement "
+                    f"formation with {len(groundmates)} touching faction-mates "
+                    f"(loses its movement perks until end of turn)",
+                    {"ability": barred_ref.name,
+                     "enables_formation_size": len(groundmates) + 1,
+                     "free": True}))
+
     # ---- pass (costs the action; only when there is budget) -------------
+    # NOTE: a figure given NO action clears its tokens anyway at turn end
+    # (state.end_owner_turn), so an explicit pass buys nothing an idle figure
+    # doesn't get for free — it exists for the human UI; the AI should end its
+    # turn instead of passing.
     if has_budget:
         cands.append(Candidate(
-            PassIntent(figure.uid), "pass", "Pass (rest, clear push tokens)",
-            {"clears_tokens": figure.action_tokens > 0},
+            PassIntent(figure.uid), "pass",
+            "Stand down (tokens clear anyway if it simply doesn't act)",
+            {"clears_tokens": figure.action_tokens > 0, "wastes_action": True},
         ))
 
     # A tokened figure PUSHES on any non-pass action: 1 click of self-damage
@@ -117,6 +172,7 @@ def generate_candidates(engine: Engine, figure: Figure) -> list[Candidate]:
     # instead of having to cross-reference tokens in the board snapshot.
     if figure.action_tokens >= 1:
         dying = (figure.definition.num_live_clicks - 1 - figure.current_click) <= 0
+        to_demo = clicks_to_demoralized(figure)
         for c in cands:
             if c.kind == "pass":
                 continue
@@ -124,6 +180,10 @@ def generate_candidates(engine: Engine, figure: Figure) -> list[Candidate]:
             c.annotation["push_self_damage"] = 1
             if dying:
                 c.annotation["push_would_eliminate"] = True
+            elif to_demo is not None and to_demo <= 1:
+                # The next click is the Demoralized cliff: can't attack, doesn't
+                # count for victory — strategically this push loses the figure.
+                c.annotation["push_would_demoralize"] = True
     return cands
 
 
@@ -355,17 +415,26 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
                     return True
         return False
 
+    # Exposure where the figure STANDS, computed once — every move candidate
+    # reports the danger delta so neither the heuristic nor the LLM walks into
+    # a kill zone blind (plan 1.2; the audit's most-corroborated finding).
+    danger_now = threat_score(engine, figure, figure.position)
+
     def add_move(dest: Vec, facing: float, label: str, extra: dict) -> bool:
         dest = _clamp_to_board(engine, dest, figure.base_radius)
         key = (round(dest.x, 2), round(dest.y, 2), round(facing, 2))
         if key in move_seen or _move_illegal(dest):
             return False
         move_seen.add(key)
+        danger_after = threat_score(engine, figure, dest)
         cands.append(Candidate(
             MoveIntent(figure.uid, (dest.x, dest.y), facing, free=free), "move", label,
             {"dest": [round(dest.x, 2), round(dest.y, 2)],
              "move_distance": round(distance(figure.position, dest), 2),
-             "free": free, **extra},
+             "free": free,
+             "incoming_clicks_here": round(danger_now, 2),
+             "incoming_clicks_at_dest": round(danger_after, 2),
+             **extra},
         ))
         return True
 
@@ -399,40 +468,126 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
         return best_fallback
 
     enemies_by_dist = sorted(enemies, key=lambda e: distance(figure.position, e.position))
-    for target in ([] if demoralized else enemies_by_dist[:3]):
+    # Approach targets: the 3 nearest PLUS priority pieces regardless of distance
+    # rank — enemy support (healers/necromancers/commanders) and the biggest
+    # shooter. The audit found the enemy healer was unreachable BY CONSTRUCTION
+    # for 60 turns because only the nearest 3 ever got approach candidates.
+    targets: list[tuple[Figure, str]] = [(t, "near") for t in enemies_by_dist[:3]]
+    if not demoralized:
+        for e in enemies_by_dist:
+            if _is_support(e):
+                targets.append((e, "support"))
+        shooters = [e for e in enemies if e.range > 0 and not e.is_demoralized]
+        if shooters:
+            targets.append((max(shooters, key=lambda e: e.points), "shooter"))
+    seen_targets: set[int] = set()
+    for target, why in ([] if demoralized else targets):
+        if target.uid in seen_targets:
+            continue
+        seen_targets.add(target.uid)
         if in_base_contact(figure.position, figure.base_radius,
                            target.position, target.base_radius):
             continue  # already engaged — close combat is the action, not another approach
         dvec_len = distance(figure.position, target.position)
         facing = _facing_toward(figure.position, target.position)
         contact = _contact_point(engine, figure, target)
+        prio: dict = {}
+        if why == "support":
+            prio["priority_target"] = "support (healer/necromancer/commander — kills near it get repaired or refunded)"
+        elif why == "shooter":
+            prio["priority_target"] = "the enemy's biggest shooter"
+        pins = ({"pins_shooter": True}  # basing a shooter silences it (P4-R23)
+                if target.range > 0 and not engine.state.opposing_contacts(target) else {})
+        charge_label = (f"Hunt down {target.short_name} (enemy support piece)"
+                        if why == "support" else f"Advance into contact with {target.short_name}")
         if distance(figure.position, contact) <= eff_speed + 1e-9:
-            added = add_move(contact, facing, f"Advance into contact with {target.short_name}",
-                             {"target": target.uid, "intent_hint": "charge"})
+            added = add_move(contact, facing, charge_label,
+                             {"target": target.uid, "intent_hint": "charge", **prio, **pins})
+            # Flank: a second contact point on the target's REAR arc (+1 attack,
+            # no retaliation facing). Only reachable on oblique approaches — the
+            # straight-segment move rule forbids crossing the target's base.
+            behind = Vec(
+                target.position.x - math.cos(target.facing) * (figure.base_radius + target.base_radius),
+                target.position.y - math.sin(target.facing) * (figure.base_radius + target.base_radius),
+            )
+            if distance(figure.position, behind) <= eff_speed + 1e-9:
+                add_move(behind, _facing_toward(behind, target.position),
+                         f"Flank behind {target.short_name} (rear attack: +1, no front-arc reply)",
+                         {"target": target.uid, "intent_hint": "flank", "rear": True,
+                          **prio, **pins})
         else:
-            step = _point_toward(figure.position, target.position, eff_speed)
-            added = add_move(step, facing, f"Advance toward {target.short_name}",
-                             {"target": target.uid, "intent_hint": "approach"})
+            added = add_move(_point_toward(figure.position, target.position, eff_speed),
+                             facing, f"Advance toward {target.short_name}",
+                             {"target": target.uid, "intent_hint": "approach", **prio})
         if not added:
             det = _detour_toward(target)
             if det is not None:
                 add_move(det, _facing_toward(det, target.position),
                          f"Advance toward {target.short_name} (around terrain)",
-                         {"target": target.uid, "intent_hint": "detour"})
+                         {"target": target.uid, "intent_hint": "detour", **prio})
         if figure.range > 0 and dvec_len > figure.range:
             stop = _point_toward(figure.position, target.position, dvec_len - figure.range + 0.1)
             stop = _point_toward(figure.position, stop,
                                  min(eff_speed, distance(figure.position, stop)))
             add_move(stop, facing, f"Move into range of {target.short_name}",
-                     {"target": target.uid, "intent_hint": "range_band"})
+                     {"target": target.uid, "intent_hint": "range_band", **prio})
+
+    # Kite (plan 1.2c): a shooter about to be based steps back out of the
+    # chaser's reach while staying inside its own range — the audit's Wings
+    # fliers had a guaranteed kiting win and instead stood still for 24 turns.
+    if (figure.range > 0 and not demoralized and enemies_by_dist
+            and not engine.state.opposing_contacts(figure)):
+        chasers = [
+            e for e in enemies_by_dist
+            if not e.is_demoralized and e.damage > 0
+            and distance(figure.position, e.position)
+            - (figure.base_radius + e.base_radius) <= e.speed + 1.0
+        ]
+        if chasers:
+            chief = chasers[0]
+            gap = distance(figure.position, chief.position) - (figure.base_radius + chief.base_radius)
+            need = chief.speed - gap + 1.0  # step that puts contact out of reach
+            step = min(eff_speed, max(1.0, need))
+            away = Vec(figure.position.x + (figure.position.x - chief.position.x),
+                       figure.position.y + (figure.position.y - chief.position.y))
+            dest = _point_toward(figure.position, away, step)
+            add_move(dest, _facing_toward(dest, chief.position),
+                     f"Kite back from {chief.short_name} — deny contact, keep shooting",
+                     {"target": chief.uid, "intent_hint": "kite",
+                      "escapes_reach": step >= need - 1e-6})
+
+    # Take cover (plan 2.4): under ranged fire, hindering terrain and hills are
+    # +1 defense — 0 of 74 audited AI moves ever ended on either.
+    if not demoralized and pieces and danger_now > 0.4:
+        shooters_exist = any(e.range > 0 and not e.is_demoralized for e in enemies)
+        if shooters_exist:
+            covers = [t for t in pieces
+                      if (t.kind == "hindering" and not t.low_wall) or t.elevated]
+            covers.sort(key=lambda t: distance(figure.position, _poly_centroid(t)))
+            for t in covers[:2]:
+                c = _poly_centroid(t)
+                dest = _point_toward(figure.position, c,
+                                     min(eff_speed, distance(figure.position, c)))
+                kind = "the hill (+1 def, height advantage)" if t.elevated \
+                    else "the woods (+1 def vs shooting)"
+                add_move(dest, _facing_toward(dest, enemies_by_dist[0].position),
+                         f"Take cover on {kind}",
+                         {"intent_hint": "cover", "cover_defense_bonus": 1})
 
     if enemies_by_dist:
         nearest = enemies_by_dist[0]
         away = Vec(figure.position.x - (nearest.position.x - figure.position.x),
                    figure.position.y - (nearest.position.y - figure.position.y))
+        retreat_extra: dict = {"intent_hint": "retreat"}
+        if engine.state.opposing_contacts(figure):
+            # Leaving contact needs a break-away roll (P4-R8) — for a based
+            # shooter this is THE move: escape, then shoot next turn (P4-R23).
+            retreat_extra["requires_break_away"] = True
+            if figure.range > 0:
+                retreat_extra["frees_my_ranged_attack"] = True
         add_move(_point_toward(figure.position, away, eff_speed),
                  _facing_toward(figure.position, nearest.position),
-                 f"Retreat from {nearest.short_name}", {"intent_hint": "retreat"})
+                 f"Retreat from {nearest.short_name}", retreat_extra)
         # Say WHY a re-face matters when the enemy is already touching but out of
         # the front arc — it's the prerequisite for the close attack (P4-R27).
         engaged_behind = in_base_contact(
@@ -544,29 +699,11 @@ def _cohesive_clusters(figs: list[Figure]) -> list[list[Figure]]:
     return comps
 
 
-def _make_formation_move(engine: Engine, cluster: list[Figure]) -> Candidate | None:
-    """Rigid translation of a cohesive cluster toward the nearest enemy — relative
-    positions (hence cohesion) are preserved by construction."""
-    enemies = engine.state.opponents_of(cluster[0])
-    if not enemies:
-        return None
-    cx = sum(f.position.x for f in cluster) / len(cluster)
-    cy = sum(f.position.y for f in cluster) / len(cluster)
-    centroid = Vec(cx, cy)
-    tgt = min(enemies, key=lambda e: distance(centroid, e.position))
-    pieces = engine.state.terrain
-    # Slowest member sets the pace (P4-R13), with hindering halving applied.
-    speed = min(terr.effective_speed(pieces, f.speed, f.position, f.base_radius)
-                for f in cluster)
-    step = min(speed, max(0.0, distance(centroid, tgt.position) - 3.0))
-    if step <= 0.1:
-        return None
-    d = tgt.position - centroid
-    L = d.length()
-    if L < 1e-9:
-        return None
-    off = Vec(d.x / L * step, d.y / L * step)
+def _formation_translation(engine: Engine, cluster: list[Figure], off: Vec,
+                           face_at: Vec) -> tuple[list, list] | None:
+    """Validate ONE rigid translation for every member; (dests, facings) or None."""
     board = engine.state.board
+    pieces = engine.state.terrain
     member_uids = {f.uid for f in cluster}
     dests, facings = [], []
     for f in cluster:
@@ -590,14 +727,55 @@ def _make_formation_move(engine: Engine, cluster: list[Figure]) -> Candidate | N
             if terr.hindering_entry_violation(pieces, f.position, nd, f.base_radius) is not None:
                 return None
         dests.append((nd.x, nd.y))
-        facings.append(_facing_toward(nd, tgt.position))
-    uids = tuple(f.uid for f in cluster)
-    intent = MoveIntent(cluster[0].uid, dests[0], facings[0], formation_uids=uids,
-                        member_dests=tuple(dests), member_facings=tuple(facings))
-    return Candidate(intent, "formation_move",
-                     f"Formation move ({len(cluster)} {cluster[0].definition.faction})",
-                     {"primary": cluster[0].uid, "members": list(uids),
-                      "size": len(cluster), "toward": tgt.uid})
+        facings.append(_facing_toward(nd, face_at))
+    return dests, facings
+
+
+def _make_formation_move(engine: Engine, cluster: list[Figure]) -> Candidate | None:
+    """Rigid translation of a cohesive cluster toward an enemy — relative
+    positions (hence cohesion) are preserved by construction.
+
+    Probes multiple targets, bearings, and step sizes (plan 1.1): the old
+    single-attempt version (full step at the nearest enemy only) meant one
+    human wall deleted the AI's action-economy tool for an entire game —
+    verified in the Anvil archive, where the translation toward the Magus
+    failed all game while the one toward the Artillerists was always legal."""
+    enemies = engine.state.opponents_of(cluster[0])
+    if not enemies:
+        return None
+    cx = sum(f.position.x for f in cluster) / len(cluster)
+    cy = sum(f.position.y for f in cluster) / len(cluster)
+    centroid = Vec(cx, cy)
+    pieces = engine.state.terrain
+    # Slowest member sets the pace (P4-R13), with hindering halving applied.
+    speed = min(terr.effective_speed(pieces, f.speed, f.position, f.base_radius)
+                for f in cluster)
+    by_dist = sorted(enemies, key=lambda e: distance(centroid, e.position))
+    for tgt in by_dist[:3]:
+        full = min(speed, max(0.0, distance(centroid, tgt.position) - 3.0))
+        if full <= 0.1:
+            continue
+        bearing = math.atan2(tgt.position.y - centroid.y, tgt.position.x - centroid.x)
+        for rot in (0.0, math.pi / 6, -math.pi / 6, math.pi / 3, -math.pi / 3):
+            for frac in (1.0, 0.66, 0.5):
+                step = full * frac
+                off = Vec(math.cos(bearing + rot) * step, math.sin(bearing + rot) * step)
+                ok = _formation_translation(engine, cluster, off, tgt.position)
+                if ok is None:
+                    continue
+                dests, facings = ok
+                uids = tuple(f.uid for f in cluster)
+                intent = MoveIntent(cluster[0].uid, dests[0], facings[0],
+                                    formation_uids=uids, member_dests=tuple(dests),
+                                    member_facings=tuple(facings))
+                suffix = "" if rot == 0.0 and frac == 1.0 else " (around the blockage)"
+                return Candidate(
+                    intent, "formation_move",
+                    f"Formation move ({len(cluster)} {cluster[0].definition.faction})"
+                    f" toward {tgt.short_name}{suffix}",
+                    {"primary": cluster[0].uid, "members": list(uids),
+                     "size": len(cluster), "toward": tgt.uid})
+    return None
 
 
 def _make_ranged_formations(engine: Engine, cluster: list[Figure], cands: list[Candidate]) -> None:
