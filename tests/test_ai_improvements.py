@@ -269,3 +269,105 @@ def test_eval_harness_plays_a_game(db):
     r = play_game(db, seed=4242, points=100, max_turns=40)
     assert r["human"]["actions"] > 0 and r["llm"]["actions"] > 0
     assert "avg_chosen_odds" in r["human"]
+
+
+# --- adversarial-review fixes -----------------------------------------------------
+def test_threat_score_never_mutates_positions(db):
+    """The threat model must be PURE: an earlier version temporarily mutated
+    figure.position — concurrent HTTP requests observed phantom positions and
+    restore-races could strand them permanently."""
+    from clixengine.threat import threat_score
+    e = build_engine(db, [
+        ("human", "Troll Artillerist", (10, 10), math.pi / 2, 0),
+        ("llm", "Werebear", (10, 18), -math.pi / 2, 0),
+    ], active="llm")
+    wb = e.state.figure(1)
+    before = (wb.position.x, wb.position.y)
+    src = open("clixengine/threat.py").read()
+    assert ".position =" not in src.replace("mover.position, at", ""), \
+        "threat.py writes figure positions again"
+    threat_score(e, wb, Vec(5, 5))
+    assert (wb.position.x, wb.position.y) == before
+
+
+def test_toggle_ability_is_not_a_push(db):
+    """The engine treats toggles as non-actions (no budget, no token) — they
+    must not carry push facts or pay push cost."""
+    grounded = [f for f in db.all_figures()
+                if f.faction == "Black Powder Rebels" and not f.is_unique
+                and not (f.all_ability_ids() & {ab.FLIGHT, ab.AQUATIC, ab.QUICKNESS})][:2]
+    flyer = next((f for f in db.all_figures()
+                  if f.faction == "Black Powder Rebels"
+                  and any(a.id in (ab.FLIGHT, ab.QUICKNESS) and a.optional
+                          for a in f.dial[f.starting_click].abilities)), None)
+    if flyer is None or len(grounded) < 2:
+        pytest.skip("no togglable faction trio in db")
+    e = build_engine(db, [
+        ("llm", flyer.id, (10, 10), 0.0, 0),
+        ("llm", grounded[0].id, (11.1, 10), 0.0, 0),
+        ("llm", grounded[1].id, (12.2, 10), 0.0, 0),
+        ("human", "Werebear", (30, 30), 0.0, 0),
+    ], active="llm")
+    fig = e.state.figure(0)
+    fig.action_tokens = 1  # tokened — actions would push, toggles must not
+    toggles = [c for c in generate_candidates(e, fig) if c.kind == "toggle_ability"]
+    assert toggles, "toggle candidate missing"
+    t = toggles[0]
+    assert "pushes" not in t.annotation and "push_would_demoralize" not in t.annotation
+    assert score_candidate(e, fig, t) > 0  # not charged a phantom push cost
+
+
+def test_demoralized_cannot_be_toggled_off(db):
+    from clixengine.intents import ToggleAbilityIntent
+    fdef, demo_click = _figure_with_demoralized_dial(db)
+    e = build_engine(db, [
+        ("llm", fdef.id, (10, 10), 0.0, demo_click),
+        ("human", "Werebear", (30, 30), 0.0, 0),
+    ], active="llm")
+    r = e.apply(ToggleAbilityIntent(0, DEMORALIZED_ABILITY_ID, off=True))
+    assert not r.ok and r.reason == "not_optional"
+
+
+def test_magic_blast_ignores_terrain_defense(db):
+    """Card: 'no terrain modifiers are applied' — hindering must not add +1
+    against a Magic Blast (resolver AND candidate odds)."""
+    from clixengine import terrain as terr
+    blaster = next(f for f in db.all_figures()
+                   if ab.MAGIC_BLAST in f.all_ability_ids() and f.range >= 8)
+    e = build_engine(db, [
+        ("human", blaster.id, (10, 4), math.pi / 2, 0),
+        ("llm", "Werebear", (10, 11), -math.pi / 2, 0),
+    ], active="human")
+    f = e.state.figure(0)
+    if ab.MAGIC_BLAST not in f.active_ability_ids():
+        pytest.skip("blast not on starting click")
+    def blast_odds():
+        cs = generate_candidates(e, f)
+        c = _find(cs, kind="magic_blast")
+        return c.annotation["hit_odds"] if c else None
+    clear = blast_odds()
+    e.state.terrain.append(terr.piece_from_polygon(
+        "hindering", (Vec(8, 6.5), Vec(12, 6.5), Vec(12, 8.5), Vec(8, 8.5)), 0, "human"))
+    through = blast_odds()
+    assert clear is not None and through == clear, (clear, through)
+
+
+def test_cover_candidate_only_when_reachable(db):
+    from clixengine import terrain as terr
+    e = build_engine(db, [
+        ("human", "Troll Artillerist", (10, 10), math.pi / 2, 0),
+        ("llm", "Werebear", (10, 18), -math.pi / 2, 0),
+    ], active="llm")
+    # Hill 20" away — unreachable this turn: no cover candidate may claim +1.
+    e.state.terrain.append(terr.piece_from_polygon(
+        "elevated", (Vec(28, 30), Vec(34, 30), Vec(34, 35), Vec(28, 35)), 0, "llm"))
+    cs = generate_candidates(e, e.state.figure(1))
+    covers = [c for c in cs if c.annotation.get("intent_hint") == "cover"]
+    assert not covers
+
+
+def test_selfplay_standoffs_terminate(db):
+    """Reviewer reproduction: seed 1000 kited forever. It must now resolve."""
+    from clixengine.evalharness import play_game
+    r = play_game(db, 1000, max_turns=150)
+    assert r["winner"] is not None

@@ -46,7 +46,7 @@ from .intents import (
 )
 from .probability import crit_hit_probability, hit_probability, outcome
 from .rng import DiceRoller
-from .state import Board, Figure, GameState
+from .state import DEMORALIZED_ABILITY_ID, Board, Figure, GameState
 
 # Ability effect coverage lives in clixengine.abilities (X6 telemetry).
 IMPLEMENTED_ABILITY_IDS = ab.IMPLEMENTED_ABILITY_IDS
@@ -760,6 +760,10 @@ class Engine:
             return Rejection("no_ability", "that ability is not on the current click")
         if not ref.optional:
             return Rejection("not_optional", f"{ref.name} is not an optional ability")
+        if intent.ability_id == DEMORALIZED_ABILITY_ID:
+            # The data marks Demoralized 'optional' but it is a STATE, not a
+            # power — switching it off would let a broken figure fight again.
+            return Rejection("not_optional", "Demoralized cannot be switched off")
         if intent.off:
             f.disabled_ability_ids.add(intent.ability_id)
         else:

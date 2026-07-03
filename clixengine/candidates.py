@@ -136,14 +136,26 @@ def generate_candidates(engine: Engine, figure: Figure) -> list[Candidate]:
             None,
         )
         if barred_ref is not None and figure.definition.faction != MAGE_SPAWN_FACTION:
-            groundmates = [
+            same = [
                 fr for fr in engine.state.friends_of(figure)
                 if fr.definition.faction == figure.definition.faction
                 and not (fr.active_ability_ids() & (ab.FREE_MOVEMENT_IDS | {ab.QUICKNESS}))
                 and not engine.state.opposing_contacts(fr)
-                and in_base_contact(figure.position, figure.base_radius,
-                                    fr.position, fr.base_radius)
             ]
+            # Cohesion is a CHAIN (P4-R14), not all-touching-the-flyer: walk the
+            # contact graph from this figure through its grounded faction-mates.
+            cluster = [figure]
+            frontier = [figure]
+            pool = list(same)
+            while frontier:
+                cur = frontier.pop()
+                for fr in list(pool):
+                    if in_base_contact(cur.position, cur.base_radius,
+                                       fr.position, fr.base_radius):
+                        pool.remove(fr)
+                        cluster.append(fr)
+                        frontier.append(fr)
+            groundmates = cluster[1:]
             if len(groundmates) >= 2:
                 cands.append(Candidate(
                     ToggleAbilityIntent(figure.uid, barred_ref.id, off=True),
@@ -174,8 +186,8 @@ def generate_candidates(engine: Engine, figure: Figure) -> list[Candidate]:
         dying = (figure.definition.num_live_clicks - 1 - figure.current_click) <= 0
         to_demo = clicks_to_demoralized(figure)
         for c in cands:
-            if c.kind == "pass":
-                continue
+            if c.kind in ("pass", "toggle_ability"):
+                continue  # non-actions: the engine neither budgets nor tokens them
             c.annotation["pushes"] = True
             c.annotation["push_self_damage"] = 1
             if dying:
@@ -247,7 +259,10 @@ def _ranged_candidates(engine, figure, enemies, cands, aids):
             if any(in_base_contact(t.position, t.base_radius, fr.position, fr.base_radius)
                    for fr in engine.state.friends_of(figure)):
                 continue  # P4-R25: can't target an enemy adjacent to your own figure
-            hit = engine.hit_odds(figure.uid, t.uid, attack_type="ranged")
+            # Card: Magic Blast applies NO terrain modifiers — odds must match
+            # the resolver (raw effective defense, no hindering/height bonus).
+            hit = hit_probability(
+                figure.attack, ab.effective_defense(engine.state, t, "ranged", 0))
             cands.append(Candidate(
                 RangedIntent(figure.uid, (t.uid,), variant="magic_blast"), "magic_blast",
                 f"Magic Blast {t.short_name}",
@@ -574,11 +589,11 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
             covers.sort(key=lambda t: distance(figure.position, _poly_centroid(t)))
             for t in covers[:2]:
                 c = _poly_centroid(t)
-                dest = _point_toward(figure.position, c,
-                                     min(eff_speed, distance(figure.position, c)))
+                if distance(figure.position, c) > eff_speed + 1e-9:
+                    continue  # can't actually REACH the cover — no false +1 claims
                 kind = "the hill (+1 def, height advantage)" if t.elevated \
                     else "the woods (+1 def vs shooting)"
-                add_move(dest, _facing_toward(dest, enemies_by_dist[0].position),
+                add_move(c, _facing_toward(c, enemies_by_dist[0].position),
                          f"Take cover on {kind}",
                          {"intent_hint": "cover", "cover_defense_bonus": 1})
 

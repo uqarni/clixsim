@@ -8,6 +8,15 @@ economy (a shooter already in range fires on its next activation — full
 weight; a figure that must first spend its action closing threatens only the
 turn after — discounted).
 
+PURE with respect to engine state: the hypothetical position is threaded
+through every computation explicitly. An earlier version temporarily mutated
+figure.position and restored it — concurrent HTTP requests (candidates fetch,
+chat snapshot, opponent stream share one engine with no lock) could observe
+phantom positions and even strand them permanently via restore-clobber races.
+
+The enemy's front arc is deliberately ignored: a figure re-faces freely when
+it acts, so facing never protects you from a threat one activation away.
+
 The forensic audit found the old AI donated ~15-20 clicks per game walking
 into 92-97% kill zones because nothing in its scoring or its prompt knew
 incoming fire existed (docs/ai-improvement-plan.md, items 1.2/1.8).
@@ -16,13 +25,59 @@ incoming fire existed (docs/ai-improvement-plan.md, items 1.2/1.8).
 from __future__ import annotations
 
 from . import abilities as ab
-from .geometry import Vec, distance, in_base_contact
+from . import terrain as terr
+from .geometry import Vec, distance, in_base_contact, segment_circle_intersects
 from .probability import hit_probability
 from .state import DEMORALIZED_ABILITY_ID, Figure
 
 # A figure that must close before it can strike threatens the FOLLOWING turn;
 # discount that future damage relative to fire that lands next activation.
 SOON_WEIGHT = 0.5
+
+
+def _lof_to_point(engine, shooter: Figure, mover: Figure, at: Vec) -> tuple[bool, int]:
+    """(clear, defense_mod) for shooter firing at ``mover`` standing at ``at``,
+    computed WITHOUT touching engine state. Mirrors engine.line_of_fire's
+    terrain/base/Stealth blocking (front arc intentionally excluded — the
+    shooter re-faces when it acts) plus the terrain defense modifiers."""
+    state = engine.state
+    elev_a = engine._elev(shooter.position)
+    elev_t = engine._elev(at)
+    mod = 0
+    if state.terrain:
+        blocked, hindering = terr.lof_terrain(
+            state.terrain, shooter.position, at, elev_a, elev_t,
+            engine._stand_on(shooter.position), engine._stand_on(at))
+        if blocked:
+            return False, 0
+        if hindering:
+            if ab.STEALTH in mover.active_ability_ids():
+                return False, 0  # Stealth: hindering blocks the line entirely
+            mod += 1
+    if elev_t == 1 and elev_a == 0:
+        mod += 1  # height advantage for the target
+    both_elev = elev_a == 1 and elev_t == 1
+    for other in state.living():
+        if other.uid in (shooter.uid, mover.uid):
+            continue
+        if both_elev and engine._elev(other.position) == 0:
+            continue
+        if segment_circle_intersects(shooter.position, at, other.position, other.base_radius):
+            return False, 0
+    return True, mod
+
+
+def _shooter_engaged(engine, shooter: Figure, mover: Figure, at: Vec) -> bool:
+    """Is the shooter based by any of the mover's side (mover evaluated at
+    ``at``)? A based shooter cannot make a ranged attack (P4-R23)."""
+    if in_base_contact(shooter.position, shooter.base_radius, at, mover.base_radius):
+        return True
+    for o in engine.state.living(mover.owner):
+        if o.uid == mover.uid:
+            continue
+        if in_base_contact(shooter.position, shooter.base_radius, o.position, o.base_radius):
+            return True
+    return False
 
 
 def expected_incoming_clicks(engine, mover: Figure, at: Vec) -> tuple[float, float]:
@@ -32,40 +87,38 @@ def expected_incoming_clicks(engine, mover: Figure, at: Vec) -> tuple[float, flo
     must first spend an action closing (within speed+reach envelope)."""
     imm = 0.0
     soon = 0.0
-    old = mover.position
-    mover.position = at  # evaluate defenses/LoF at the hypothetical position
-    try:
-        for e in engine.state.opponents_of(mover):
-            if not e.is_alive or e.is_demoralized or e.damage <= 0:
-                continue
-            d = distance(e.position, at)
-            contact = in_base_contact(e.position, e.base_radius, at, mover.base_radius)
-            can_melee_now = contact
-            can_shoot_now = (
-                not contact
-                and e.range > 0
-                and d <= e.range
-                and ab.can_make_ranged_attack(e)
-                and not engine.state.opposing_contacts(e)
-                and engine.line_of_fire(e.uid, mover.uid)[0]
-            )
-            if can_melee_now or can_shoot_now:
-                atype = "close" if can_melee_now else "ranged"
-                eff_def = ab.effective_defense(
-                    engine.state, mover, atype, engine.terrain_defense_mod(e, mover, atype))
+    for e in engine.state.opponents_of(mover):
+        if not e.is_alive or e.is_demoralized or e.damage <= 0:
+            continue
+        d = distance(e.position, at)
+        contact = in_base_contact(e.position, e.base_radius, at, mover.base_radius)
+        if contact:
+            eff_def = ab.effective_defense(engine.state, mover, "close", 0)
+            odds = hit_probability(e.attack, eff_def)
+            per = ab.damage_after_defenses(mover, e.damage, "close", False)
+            imm += odds * per
+            continue
+        can_shoot_now = (
+            e.range > 0
+            and d <= e.range
+            and ab.can_make_ranged_attack(e)
+            and not _shooter_engaged(engine, e, mover, at)
+        )
+        if can_shoot_now:
+            clear, mod = _lof_to_point(engine, e, mover, at)
+            if clear:
+                eff_def = ab.effective_defense(engine.state, mover, "ranged", mod)
                 odds = hit_probability(e.attack, eff_def)
-                per = ab.damage_after_defenses(mover, e.damage, atype, False)
+                per = ab.damage_after_defenses(mover, e.damage, "ranged", False)
                 imm += odds * per
-            else:
-                reach = e.speed + (e.range if e.range > 0
-                                   else e.base_radius + mover.base_radius)
-                if d <= reach:
-                    eff_def = ab.effective_defense(engine.state, mover, "close", 0)
-                    odds = hit_probability(e.attack, eff_def)
-                    per = ab.damage_after_defenses(mover, e.damage, "close", False)
-                    soon += odds * per
-    finally:
-        mover.position = old
+                continue
+        reach = e.speed + (e.range if e.range > 0
+                           else e.base_radius + mover.base_radius)
+        if d <= reach:
+            eff_def = ab.effective_defense(engine.state, mover, "close", 0)
+            odds = hit_probability(e.attack, eff_def)
+            per = ab.damage_after_defenses(mover, e.damage, "close", False)
+            soon += odds * per
     return imm, soon
 
 

@@ -201,9 +201,10 @@ def _shockwave_value(engine: Engine, figure: Figure, cand: Candidate) -> float:
     return max(0.0, v)
 
 
+# Enemy-directed damage only: self-inflicted pushes/crit-misses must not reset
+# the standoff detector (they were exactly the noise that kept it asleep).
 _DAMAGE_EVENTS = ("close_attack", "ranged_attack", "magic_blast", "shockwave",
-                  "flame_lightning", "close_formation", "ranged_formation",
-                  "push_damage", "pole_arm", "crit_miss")
+                  "flame_lightning", "close_formation", "ranged_formation")
 
 
 def _staleness(engine: Engine) -> float:
@@ -310,8 +311,10 @@ def _move_value(engine: Engine, figure: Figure, cand: Candidate) -> float:
         in_band_now = contact < cur <= figure.range
         if hint == "kite":
             # Deny contact while keeping the target shootable — the audited
-            # Wings game was a guaranteed kite win the AI never took.
-            val = 1.5 if ann.get("escapes_reach") else 0.6
+            # Wings game was a guaranteed kite win the AI never took. Decays
+            # with staleness: two shooters kiting EACH OTHER forever was the
+            # regen-standoff reborn (self-play seed 1000 never terminated).
+            val = (1.5 if ann.get("escapes_reach") else 0.6) * _staleness(engine)
         elif in_band_after and not in_band_now:
             val = 1.4
         elif in_band_after:
@@ -409,5 +412,6 @@ def score_candidate(engine: Engine, figure: Figure, cand: Candidate) -> float:
         val = _move_value(engine, figure, cand)
     else:
         val = 0.0
-    # Every non-pass action pays a push-cost when the figure is already fatigued.
-    return val - _push_cost(figure)
+    # Every non-pass ACTION pays a push-cost when the figure is already
+    # fatigued. Toggles are non-actions: no budget, no token, no push.
+    return val - (0.0 if k == "toggle_ability" else _push_cost(figure))
