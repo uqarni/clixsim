@@ -417,3 +417,31 @@ def test_charge_support_counts_reachable_co_attackers(db):
         ("llm", "Seething Knight", (12, 14), -math.pi / 2, 0),  # can also reach
     ], active="llm")
     assert _support_count(e, e.state.figure(1), 0) >= 0.5
+
+
+def test_heal_offered_at_engine_contact_tolerance(db):
+    """A sub-0.02" gap shows contact dots and the engine accepts the heal, but
+    the candidate used a 1e-6 epsilon and hid the Heal button (Leech Medic /
+    Seething Knight, 'distance 0.0 but can't heal')."""
+    from clixengine.geometry import CONTACT_TOLERANCE
+    from clixengine.intents import CloseIntent
+    medic = next(f for f in db.all_figures() if ab.HEALING in f.all_ability_ids())
+    r = 0.55  # standard base radius
+    gap = 2 * r - CONTACT_TOLERANCE / 2  # inside tolerance, but > 1e-6 short of touching
+    e = build_engine(db, [
+        ("human", medic.id, (10, 10), math.pi / 2, 0),
+        ("human", "Seething Knight", (10, 10 + gap), math.pi / 2, 3),  # wounded
+    ], active="human")
+    m, sk = e.state.figure(0), e.state.figure(1)
+    if ab.HEALING not in m.active_ability_ids():
+        pytest.skip("healing not on starting click")
+    assert sk.current_click > sk.definition.starting_click  # wounded
+    cs = generate_candidates(e, m)
+    heals = [c for c in cs if c.kind == "heal" and c.annotation.get("target") == 1]
+    assert heals, "Heal button hidden despite engine-legal contact"
+    # And the engine actually accepts it.
+    assert e.apply(CloseIntent(0, 1, variant="healing")).ok
+    # No redundant 'move to heal' at ~0 distance for an already-touchable ally.
+    approaches = [c for c in cs if c.annotation.get("intent_hint") == "heal_approach"
+                  and c.annotation.get("target") == 1]
+    assert not approaches

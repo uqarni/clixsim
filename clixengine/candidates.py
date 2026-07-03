@@ -311,12 +311,15 @@ def _ranged_candidates(engine, figure, enemies, cands, aids):
 
 def _support_candidates(engine, figure, cands, aids):
     state = engine.state
-    # Healing (close): heal a wounded friendly in base contact.
+    # Healing (close): heal a wounded friendly in base contact. Use the SAME
+    # tolerance as the engine applier (in_base_contact / CONTACT_TOLERANCE): a
+    # 1e-6 epsilon here hid the Heal button when a sub-0.02" gap still showed
+    # contact dots and the engine would have accepted the heal.
     if ab.HEALING in aids and not state.opposing_contacts(figure):
         for fr in state.friends_of(figure):
-            if _wounded(fr) and not state.opposing_contacts(fr) and distance(
-                figure.position, fr.position
-            ) <= figure.base_radius + fr.base_radius + 1e-6:
+            if _wounded(fr) and not state.opposing_contacts(fr) and in_base_contact(
+                figure.position, figure.base_radius, fr.position, fr.base_radius
+            ):
                 # Healing ignores all modifiers, so the hit chance is raw attack
                 # vs raw defense (NOT effective_defense — the engine ignores Defend
                 # / Battle Armor here, engine.py _resolve_healing).
@@ -688,6 +691,10 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
                      reverse=True)
         for ally in wounded[:2]:
             d = distance(figure.position, ally.position)
+            if not heal_ranged and in_base_contact(
+                figure.position, figure.base_radius, ally.position, ally.base_radius
+            ):
+                continue  # already touchable — the Heal candidate itself covers it
             if heal_ranged:
                 need = d - max(0.5, figure.range - 0.5)  # inside range, small margin
             else:
