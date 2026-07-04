@@ -21,6 +21,9 @@ from .geometry import (
     CONTACT_TOLERANCE,
     Vec,
     angle_to,
+    circles_gap,
+    circles_in_contact,
+    circles_overlap,
     distance,
     in_base_contact,
     in_front_arc,
@@ -29,6 +32,7 @@ from .geometry import (
     polygon_extent,
     polygon_is_simple,
     segment_circle_intersects,
+    segment_hits_circles,
 )
 from .intents import (
     CloseIntent,
@@ -46,7 +50,16 @@ from .intents import (
 )
 from .probability import crit_hit_probability, hit_probability, outcome
 from .rng import DiceRoller
-from .state import DEMORALIZED_ABILITY_ID, Board, Figure, GameState
+from .state import (
+    DEMORALIZED_ABILITY_ID,
+    Board,
+    Figure,
+    GameState,
+    arc_target_point,
+    contact_is_rear,
+    figure_gap,
+    figures_in_base_contact,
+)
 
 # Ability effect coverage lives in clixengine.abilities (X6 telemetry).
 IMPLEMENTED_ABILITY_IDS = ab.IMPLEMENTED_ABILITY_IDS
@@ -112,7 +125,7 @@ class Engine:
 
     def in_front_arc_of(self, viewer_uid: int, target_uid: int) -> bool:
         v, t = self.state.figure(viewer_uid), self.state.figure(target_uid)
-        return in_front_arc(v.position, v.facing, t.position, v.arc_half_angle)
+        return in_front_arc(v.position, v.facing, arc_target_point(v, t), v.arc_half_angle)
 
     def _elev(self, p: Vec) -> int:
         return terr.elevation_at(self.state.terrain, p) if self.state.terrain else 0
@@ -125,7 +138,9 @@ class Engine:
         Returns (clear, reason)."""
         a = self.state.figure(attacker_uid)
         t = self.state.figure(target_uid)
-        if not in_front_arc(a.position, a.facing, t.position, a.arc_half_angle):
+        # Arc/range/LoF all anchor on front dots (P5-R2); a mounted target's
+        # nearest circle decides the arc bearing.
+        if not in_front_arc(a.position, a.facing, arc_target_point(a, t), a.arc_half_angle):
             return False, "target not in firer's front arc"
         if distance(a.position, t.position) > a.range + 1e-9:
             return False, "target beyond range"
@@ -151,14 +166,10 @@ class Engine:
                 continue
             if both_elev and self._elev(other.position) == 0:
                 continue
-            if segment_circle_intersects(
-                a.position, t.position, other.position, other.base_radius
-            ):
+            if segment_hits_circles(a.position, t.position, other.circles()):
                 return False, f"line of fire blocked by {other.short_name}"
         for friend in self.state.friends_of(a):
-            if in_base_contact(
-                t.position, t.base_radius, friend.position, friend.base_radius
-            ):
+            if figures_in_base_contact(t, friend):
                 return False, "target is in base contact with a friendly figure"
         return True, "clear"
 
@@ -495,15 +506,14 @@ class Engine:
         """Targets in the attacker's front arc & base contact. bool = rear hit."""
         out = []
         for t in self.state.opponents_of(figure):
-            if not in_base_contact(
-                figure.position, figure.base_radius, t.position, t.base_radius
-            ):
+            if not figures_in_base_contact(figure, t):
                 continue
             if not in_front_arc(
-                figure.position, figure.facing, t.position, figure.arc_half_angle
+                figure.position, figure.facing, arc_target_point(figure, t),
+                figure.arc_half_angle,
             ):
                 continue
-            rear = in_rear_arc(t.position, t.facing, figure.position, t.arc_half_angle)
+            rear = contact_is_rear(t, figure)
             out.append((t, rear))
         return out
 
@@ -536,9 +546,7 @@ class Engine:
             seen.add(u)
             fu = same[u]
             for v, fv in same.items():
-                if v not in seen and in_base_contact(
-                    fu.position, fu.base_radius, fv.position, fv.base_radius
-                ):
+                if v not in seen and figures_in_base_contact(fu, fv):
                     stack.append(v)
         return [same[u] for u in seen]
 
@@ -574,10 +582,9 @@ class Engine:
                         key=lambda o: distance(figure.position, o.position)):
             if e.uid in close_ok or e.uid in ranged_ok:
                 continue
-            adjacent = in_base_contact(figure.position, figure.base_radius,
-                                       e.position, e.base_radius)
-            in_arc = in_front_arc(figure.position, figure.facing, e.position,
-                                  figure.arc_half_angle)
+            adjacent = figures_in_base_contact(figure, e)
+            in_arc = in_front_arc(figure.position, figure.facing,
+                                  arc_target_point(figure, e), figure.arc_half_angle)
             if adjacent:
                 if not in_arc:
                     hints.append(f"Can't close-attack {e.short_name}: it's beside/behind "
@@ -591,8 +598,7 @@ class Engine:
                 elif not in_arc:
                     hints.append(f"Can't shoot {e.short_name}: it's not in your front arc "
                                  f"(P4-R24). Re-face toward it with a move.")
-                elif any(in_base_contact(e.position, e.base_radius, fr.position, fr.base_radius)
-                         for fr in friends):
+                elif any(figures_in_base_contact(e, fr) for fr in friends):
                     hints.append(f"Can't shoot {e.short_name}: it's in base contact with one "
                                  f"of your own figures (P4-R25) — you'd risk your ally.")
                 else:
@@ -606,9 +612,8 @@ class Engine:
                         if ab.MAGIC_BLAST in aids:
                             immune = ab.MAGIC_IMMUNITY in e.active_ability_ids()
                             screen = next(
-                                (fr for fr in friends if in_base_contact(
-                                    e.position, e.base_radius,
-                                    fr.position, fr.base_radius)),
+                                (fr for fr in friends
+                                 if figures_in_base_contact(e, fr)),
                                 None,
                             )
                             if immune:
@@ -653,7 +658,7 @@ class Engine:
                                      f"Re-face toward it.")
                         break
                 elif heal_touch:
-                    gap = near - (figure.base_radius + fr.base_radius)
+                    gap = figure_gap(figure, fr)
                     if gap > 1e-6:
                         hints.append(f"Can't heal {fr.short_name}: Healing needs base contact "
                                      f"— you're {gap:.1f}″ short of touching. Drag close and "
@@ -784,9 +789,7 @@ class Engine:
         ba = 2 if (attack_type == "ranged" and ab.has(t, ab.BATTLE_ARMOR)) else 0
         best_share = 0
         for fr in self.state.friends_of(t):
-            if ab.has(fr, ab.DEFEND) and in_base_contact(
-                t.position, t.base_radius, fr.position, fr.base_radius
-            ):
+            if ab.has(fr, ab.DEFEND) and figures_in_base_contact(t, fr):
                 best_share = max(best_share, fr.defense)
         defend = max(0, best_share - base_def)
         tmod = self.terrain_defense_mod(a, t, attack_type)
@@ -1003,9 +1006,11 @@ class Engine:
         for p in self.state.opponents_of(mover):
             if not ab.has(p, ab.POLE_ARM):
                 continue
-            if in_base_contact(
-                mover.position, mover.base_radius, p.position, p.base_radius
-            ) and in_front_arc(p.position, p.facing, mover.position, p.arc_half_angle):
+            # Capsule ruling (plan §2.3(6)): any-circle contact triggers, judged
+            # against the mover's FRONT dot in the pole-arm's arc.
+            if figures_in_base_contact(mover, p) and in_front_arc(
+                p.position, p.facing, mover.position, p.arc_half_angle
+            ):
                 dmg = self._deal_combat_damage(mover, 1, source_type="ability")
                 events.append(self.log.emit(
                     "pole_arm", attacker=p.uid, target=mover.uid, clicks=dmg,
@@ -1112,15 +1117,15 @@ class Engine:
         t = self.state.figures.get(intent.target_uid)
         if t is None or not t.is_alive or t.owner == f.owner:
             return Rejection("bad_target", "target must be a living opponent")
-        if not in_base_contact(f.position, f.base_radius, t.position, t.base_radius):
+        if not figures_in_base_contact(f, t):
             return Rejection("not_adjacent", "attacker not in base contact with target")
-        if not in_front_arc(f.position, f.facing, t.position, f.arc_half_angle):
+        if not in_front_arc(f.position, f.facing, arc_target_point(f, t), f.arc_half_angle):
             return Rejection("out_of_arc", "target not in attacker's front arc (P4-R27)")
 
         events: list[dict] = []
         pushing = self._consume_nonpass(f)
 
-        rear = in_rear_arc(t.position, t.facing, f.position, t.arc_half_angle)
+        rear = contact_is_rear(t, f)
         atk = f.attack + (1 if rear else 0)
         d1, d2, total = self.rng.roll_2d6("attack", f"{f.short_name} close")
         eff_def = ab.effective_defense(self.state, t, "close", self.terrain_defense_mod(f, t, "close"))
@@ -1197,13 +1202,13 @@ class Engine:
         t = self.state.figures.get(intent.target_uids[0])
         if t is None or not t.is_alive or t.owner == f.owner:
             return Rejection("bad_target", "target must be a living opponent")
-        if not in_front_arc(f.position, f.facing, t.position, f.arc_half_angle):
+        if not in_front_arc(f.position, f.facing, arc_target_point(f, t), f.arc_half_angle):
             return Rejection("out_of_arc", "target not in firer's front arc")
         if distance(f.position, t.position) > f.range + 1e-9:
             return Rejection("out_of_range", "target beyond range")
         # Magic Blast ignores LoF blocking, but not the P4-R25 targeting rule.
         for friend in self.state.friends_of(f):
-            if in_base_contact(t.position, t.base_radius, friend.position, friend.base_radius):
+            if figures_in_base_contact(t, friend):
                 return Rejection("adjacent_friendly",
                                  "target is in base contact with a friendly figure")
         events: list[dict] = []
@@ -1245,7 +1250,7 @@ class Engine:
         for o in self.state.living():
             if o.uid in (f.uid, prim.uid):
                 continue
-            if in_base_contact(prim.position, prim.base_radius, o.position, o.base_radius):
+            if figures_in_base_contact(prim, o):
                 affected.append(o)
         events: list[dict] = []
         pushing = self._consume_nonpass(f)
@@ -1277,7 +1282,7 @@ class Engine:
             for b in self.state.living():
                 if b.uid in (f.uid, o.uid):
                     continue
-                if segment_circle_intersects(f.position, o.position, b.position, b.base_radius):
+                if segment_hits_circles(f.position, o.position, b.circles()):
                     return False
             return True
 
@@ -1321,7 +1326,7 @@ class Engine:
             return Rejection("bad_target", "target is in base contact with an opponent")
         if ab.has(t, ab.MAGIC_IMMUNITY):
             return Rejection("magic_immune", f"{t.short_name} is immune to Magic effects")
-        if not in_front_arc(f.position, f.facing, t.position, f.arc_half_angle):
+        if not in_front_arc(f.position, f.facing, arc_target_point(f, t), f.arc_half_angle):
             return Rejection("out_of_arc", "target not in firer's front arc")
         if distance(f.position, t.position) > f.range + 1e-9:
             return Rejection("out_of_range", "target beyond range")
@@ -1349,7 +1354,7 @@ class Engine:
         t = self.state.figures.get(intent.target_uid)
         if t is None or not t.is_alive or t.owner != f.owner:
             return Rejection("bad_target", "Healing targets a friendly figure")
-        if not in_base_contact(f.position, f.base_radius, t.position, t.base_radius):
+        if not figures_in_base_contact(f, t):
             return Rejection("not_adjacent", "healer not in base contact with target")
         if self.state.opposing_contacts(f) or self.state.opposing_contacts(t):
             return Rejection("in_contact", "neither figure may be in contact with an opponent")
@@ -1445,7 +1450,7 @@ class Engine:
             return Rejection("already_acted", "levitation target has already acted this turn")
         if ab.has(t, ab.MAGIC_IMMUNITY):
             return Rejection("magic_immune", "target is immune to Magic effects")
-        if not in_base_contact(f.position, f.base_radius, t.position, t.base_radius):
+        if not figures_in_base_contact(f, t):
             return Rejection("not_adjacent", "target must be in base contact with the caster")
         dest = Vec(*intent.dest)
         if distance(t.position, dest) > 10 + 1e-9:
@@ -1488,12 +1493,16 @@ class Engine:
     # ------------------------------------------------------------------ #
     # Formations (P4-R11..R16, R29)
     # ------------------------------------------------------------------ #
-    def _positions_cohesive(self, positions, radii) -> bool:
-        n = len(positions)
+    def _positions_cohesive(self, footprints) -> bool:
+        """Cohesion over base FOOTPRINTS (each a Circles tuple — one circle for
+        standard bases, two for mounted): every member touches at least one
+        other, and the touch graph is a single connected group. Any part of a
+        peanut base satisfies 'touching' (P5 formations ruling)."""
+        n = len(footprints)
         adj = {i: set() for i in range(n)}
         for i in range(n):
             for j in range(i + 1, n):
-                if in_base_contact(positions[i], radii[i], positions[j], radii[j]):
+                if circles_in_contact(footprints[i], footprints[j]):
                     adj[i].add(j)
                     adj[j].add(i)
         if any(not adj[i] for i in range(n)):
@@ -1562,7 +1571,7 @@ class Engine:
         # path is never taken. Documented in docs/progress.md → Known limitations.
         if any(self.state.opposing_contacts(g) for g in figs):
             return Rejection("bad_formation", "members in base contact with enemies must move individually")
-        if not self._positions_cohesive([g.position for g in figs], [g.base_radius for g in figs]):
+        if not self._positions_cohesive([g.circles() for g in figs]):
             return Rejection("bad_formation", "members must each touch another member at the start")
         dests = [Vec(*d) for d in intent.member_dests]
         facings = list(intent.member_facings)
@@ -1570,48 +1579,53 @@ class Engine:
             return Rejection("bad_formation", "must give a destination and facing for each member")
         pieces = self.state.terrain
         # Slowest member's speed (P4-R13), with hindering halving applied per
-        # member before taking the minimum (§Hindering). Members never fly
-        # (Flight/Aquatic are rejected above), so no flier exemptions here.
+        # member before taking the minimum (§Hindering — any part of the base
+        # touching counts). Members never fly (Flight/Aquatic rejected above).
         speed = min(
-            terr.effective_speed(pieces, g.speed, g.position, g.base_radius) for g in figs
+            terr.footprint_effective_speed(pieces, g.speed, g.circles()) for g in figs
         )
         member_uids = {g.uid for g in figs}
-        for g, d in zip(figs, dests):
+        for g, d, fac in zip(figs, dests, facings):
+            end_circles = g.circles(d, fac)
             if distance(g.position, d) > speed + 1e-9:
                 return Rejection("too_far", f"{g.short_name} exceeds formation speed {speed}\"")
-            if not self.state.board.contains(d, g.base_radius):
+            if not self.state.board.contains_circles(end_circles):
                 return Rejection("off_board", f"{g.short_name} would leave the board")
-            # Each member's straight path may not cross a non-member base, and it
-            # may not end overlapping one (P4-R6/R14).
+            # Each member's path (the ruler line from the front dot, P5-R10) may
+            # not cross a non-member base, and the final footprint may not
+            # overlap one (P4-R6/R14; a mounted blocker blocks with both circles).
             for other in self.state.living():
                 if other.uid in member_uids:
                     continue
-                if distance(g.position, d) > 1e-9 and segment_circle_intersects(
-                    g.position, d, other.position, other.base_radius
+                if distance(g.position, d) > 1e-9 and segment_hits_circles(
+                    g.position, d, other.circles()
                 ):
                     return Rejection("path_blocked",
                                      f"{g.short_name}'s path crosses {other.short_name}'s base")
-                if distance(d, other.position) < g.base_radius + other.base_radius - CONTACT_TOLERANCE:
+                if circles_overlap(end_circles, other.circles()):
                     return Rejection("end_on_base",
                                      f"{g.short_name} would end on {other.short_name}'s base")
             # Terrain is validated per member exactly like a single move — a
             # formation may not carry its members into blocking terrain / deep
             # water, and entering hindering ends the move there (P4-R30).
             if pieces:
-                if terr.base_in_blocking(pieces, d, g.base_radius):
+                if terr.footprint_in_blocking(pieces, end_circles):
                     return Rejection("in_blocking",
                                      f"{g.short_name} would end in impassable terrain")
                 if distance(g.position, d) > 1e-9:
-                    if terr.blocking_between(pieces, g.position, d, g.base_radius):
+                    if terr.footprint_blocking_between(pieces, g.circles(), end_circles):
                         return Rejection("path_blocked",
                                          f"{g.short_name}'s path crosses impassable terrain")
-                    hv = terr.hindering_entry_violation(pieces, g.position, d, g.base_radius)
+                    hv = terr.footprint_hindering_entry_violation(
+                        pieces, g.circles(), end_circles)
                     if hv is not None:
                         return Rejection(
                             "must_stop_in_hindering",
                             f"{g.short_name} must stop on entering hindering terrain",
                         )
-        if not self._positions_cohesive(dests, [g.base_radius for g in figs]):
+        if not self._positions_cohesive(
+            [g.circles(d, fac) for g, d, fac in zip(figs, dests, facings)]
+        ):
             return Rejection("bad_formation", "formation must stay cohesive (one touching group) at the end")
         events: list[dict] = []
         pushers = self._token_formation(figs)
@@ -1655,7 +1669,7 @@ class Engine:
         primary = self.state.figures.get(primary_uid)
         if primary is None or primary.uid not in uids:
             return Rejection("bad_formation", "primary attacker must be a member")
-        if not self._positions_cohesive([g.position for g in figs], [g.base_radius for g in figs]):
+        if not self._positions_cohesive([g.circles() for g in figs]):
             return Rejection("bad_formation", "members must each touch another member")
         target = self.state.figures.get(target_uid)
         if target is None or not target.is_alive or target.owner == primary.owner:
@@ -1726,9 +1740,9 @@ class Engine:
         for g in figs:
             if g.is_demoralized:
                 return Rejection("bad_formation", "a demoralized figure may not join a formation")
-            if not in_base_contact(g.position, g.base_radius, target.position, target.base_radius):
+            if not figures_in_base_contact(g, target):
                 return Rejection("not_adjacent", f"{g.short_name} is not in base contact with the target")
-            if not in_front_arc(g.position, g.facing, target.position, g.arc_half_angle):
+            if not in_front_arc(g.position, g.facing, arc_target_point(g, target), g.arc_half_angle):
                 return Rejection("out_of_arc", f"{g.short_name}'s front arc is not on the target")
         return figs, primary, target
 
@@ -1741,10 +1755,7 @@ class Engine:
         uids = list(intent.formation_uids)
         events: list[dict] = []
         pushers = self._token_formation(figs)
-        rear = 1 if any(
-            in_rear_arc(target.position, target.facing, g.position, target.arc_half_angle)
-            for g in figs
-        ) else 0
+        rear = 1 if any(contact_is_rear(target, g) for g in figs) else 0
         atk = primary.attack + (len(figs) - 1) + rear  # +1/extra member, +1 if any rear
         d1, d2, total = self.rng.roll_2d6("attack", "close formation")
         eff_def = ab.effective_defense(self.state, target, "close", self.terrain_defense_mod(primary, target, "close"))
@@ -1827,8 +1838,7 @@ class Engine:
                     n = len(uids)
                     mode = "ranged" if kind == "ranged_formation" else "close"
                     rear = mode == "close" and any(
-                        in_rear_arc(tgt.position, tgt.facing, g.position, tgt.arc_half_angle)
-                        for g in _figs
+                        contact_is_rear(tgt, g) for g in _figs
                     )
                     atk = (prim.attack + 2 * (n - 1) if mode == "ranged"
                            else prim.attack + (n - 1) + (1 if rear else 0))
@@ -1881,9 +1891,7 @@ class Engine:
                     self._bonus_actions += 1
                     events.append(self.log.emit("command_bonus", figure=f.uid, roll=roll))
                 for friend in self.state.friends_of(f):
-                    if friend.is_demoralized and in_base_contact(
-                        f.position, f.base_radius, friend.position, friend.base_radius
-                    ):
+                    if friend.is_demoralized and figures_in_base_contact(f, friend):
                         healed = friend.heal_clicks(1)
                         if healed:
                             events.append(self.log.emit("command_heal", figure=f.uid, target=friend.uid))

@@ -11,11 +11,20 @@ import math
 from dataclasses import dataclass, field
 
 from .data import ClickStats, FigureDef
-from .geometry import Vec, in_base_contact
+from .geometry import (
+    CONTACT_TOLERANCE,
+    Circles,
+    Vec,
+    capsule_circles,
+    circles_gap,
+    circles_in_contact,
+    closest_circle_pair,
+    in_front_arc,
+)
 
-# Standard single base radius in inches. Mage Knight bugs use a ~1.1" diameter
-# standard base; no mounted "peanut" bases appear in the Rebellion seed roster
-# (D5(d) / OQ-6), so a single radius suffices for v1.
+# Standard single base radius in inches. Mage Knight figures use a ~1.1"
+# diameter base; mounted Lancers figures use a double base of two such circles
+# (equal radii), so one radius constant still suffices (P5-R1).
 STANDARD_BASE_RADIUS = 0.55
 
 # Demoralized is encoded as a dial ability on a figure's final click (§Demoralized).
@@ -101,6 +110,29 @@ class Figure:
     def is_ranged(self) -> bool:
         return self.definition.range > 0
 
+    # -- base footprint (P5-R1: mounted = two circles along the facing axis) --
+    @property
+    def mounted(self) -> bool:
+        # getattr: FigureDefs pickled before the Lancers ingest lack the field.
+        return bool(getattr(self.definition, "mounted", False))
+
+    @property
+    def rear_position(self) -> Vec:
+        """Rear-circle centre for a mounted figure; == position for singles."""
+        if not self.mounted:
+            return self.position
+        return self.circles()[1][0]
+
+    def circles(self, pos: Vec | None = None, facing: float | None = None) -> Circles:
+        """Footprint circles, optionally at a hypothetical placement. Facing is
+        load-bearing for mounted figures: it decides where the rear circle sits."""
+        return capsule_circles(
+            pos if pos is not None else self.position,
+            facing if facing is not None else self.facing,
+            self.base_radius,
+            self.mounted,
+        )
+
     @property
     def is_demoralized(self) -> bool:
         """A figure on its Demoralized click may only move or pass, may not
@@ -162,6 +194,63 @@ class Figure:
         self.acted_nonpass_this_turn = False
 
 
+def figures_in_base_contact(
+    a: Figure,
+    b: Figure,
+    eps: float = CONTACT_TOLERANCE,
+    a_pos: Vec | None = None,
+    a_facing: float | None = None,
+) -> bool:
+    """Base contact between two figures — ANY circle pair touching (P5-R1).
+    ``a_pos``/``a_facing`` evaluate figure ``a`` at a hypothetical placement.
+    This is the ONLY figure-vs-figure contact entry point; direct
+    ``geometry.in_base_contact`` calls on figure pairs are a bug (they miss the
+    rear circle of a mounted base)."""
+    return circles_in_contact(a.circles(a_pos, a_facing), b.circles(), eps)
+
+
+def figure_gap(
+    a: Figure, b: Figure, a_pos: Vec | None = None, a_facing: float | None = None
+) -> float:
+    """Minimum edge gap between two figures' footprints (negative = overlap)."""
+    return circles_gap(a.circles(a_pos, a_facing), b.circles())
+
+
+def contact_is_rear(
+    target: Figure,
+    other: Figure,
+    other_pos: Vec | None = None,
+    other_facing: float | None = None,
+) -> bool:
+    """Is ``other``'s contact with ``target`` through the target's REAR arc?
+
+    P5-R9 ruling for capsules: with the printed arc on the front circle and
+    arc <= 180, contact through the rear circle is rear-arc contact, always;
+    front-circle contact is classified by bearing at the front dot. The one
+    270-degree mounted unit (High Battle Mage On Scorpion Mount) has an arc
+    that physically wraps onto the rear circle, so the pure angular test at
+    the front dot governs ALL its contact points. Standard figures reduce to
+    the existing bearing test against the other's nearest circle centre.
+    """
+    tcircles = target.circles()
+    tc, oc = closest_circle_pair(tcircles, other.circles(other_pos, other_facing))
+    arc_deg = float(getattr(target.definition, "arc_deg", 90.0))
+    if target.mounted and arc_deg <= 180.0 and tc[0] != tcircles[0][0]:
+        return True  # contact through the rear circle
+    d = oc[0] - target.position
+    if d.length() <= 1e-9:
+        return False
+    return not in_front_arc(target.position, target.facing, oc[0], target.arc_half_angle)
+
+
+def arc_target_point(attacker: Figure, target: Figure) -> Vec:
+    """The point on ``target`` an arc/bearing test should aim at: the centre of
+    the target's circle nearest the attacker's front dot (== target.position
+    for singles, so single-base behaviour is unchanged)."""
+    tc, _ = closest_circle_pair(target.circles(), ((attacker.position, attacker.base_radius),))
+    return tc[0]
+
+
 @dataclass
 class Board:
     width: float = 36.0
@@ -172,6 +261,10 @@ class Board:
             radius <= p.x <= self.width - radius
             and radius <= p.y <= self.height - radius
         )
+
+    def contains_circles(self, circles: Circles) -> bool:
+        """Whole footprint on the board — every circle inside (P5-R7)."""
+        return all(self.contains(c, r) for c, r in circles)
 
 
 @dataclass
@@ -225,9 +318,7 @@ class GameState:
         for o in others:
             if o.uid == figure.uid:
                 continue
-            if in_base_contact(
-                figure.position, figure.base_radius, o.position, o.base_radius
-            ):
+            if figures_in_base_contact(figure, o):
                 out.append(o)
         return out
 

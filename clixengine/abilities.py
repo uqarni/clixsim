@@ -116,13 +116,11 @@ def effective_defense(state, target, attack_type: str, terrain_mod: int = 0) -> 
     base = target.defense
     ba = attack_type == "ranged" and has(target, BATTLE_ARMOR)
     # Defend: swap in the best friendly provider's printed defense if higher.
+    from .state import figures_in_base_contact
+
     best_share = 0
     for friend in state.friends_of(target):
-        from .geometry import in_base_contact
-
-        if has(friend, DEFEND) and in_base_contact(
-            target.position, target.base_radius, friend.position, friend.base_radius
-        ):
+        if has(friend, DEFEND) and figures_in_base_contact(target, friend):
             best_share = max(best_share, friend.defense)
     d = max(base, best_share)
     if ba:
@@ -153,13 +151,11 @@ def ranged_damage_bonus(state, attacker, target) -> int:
     *inflicts* the extra clicks (ability 108)."""
     if _magic_immune(target) or _magic_immune(attacker):
         return 0
-    from .geometry import in_base_contact
+    from .state import figures_in_base_contact
 
     bonus = 0
     for friend in state.friends_of(attacker, include_self=False):
-        if has(friend, MAGIC_ENHANCEMENT) and in_base_contact(
-            attacker.position, attacker.base_radius, friend.position, friend.base_radius
-        ):
+        if has(friend, MAGIC_ENHANCEMENT) and figures_in_base_contact(attacker, friend):
             bonus += 1
     return bonus
 

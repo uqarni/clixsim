@@ -46,7 +46,7 @@ def test_movement_formation_generated_and_moves_cohesively(db):
         assert f.position.y > starts[u].y  # advanced toward the enemy
     # Still cohesive: each member touches another.
     figs = [e.state.figure(u) for u in cand.annotation["members"]]
-    assert e._positions_cohesive([f.position for f in figs], [f.base_radius for f in figs])
+    assert e._positions_cohesive([f.circles() for f in figs])
 
 
 def test_movement_formation_requires_single_faction(db):

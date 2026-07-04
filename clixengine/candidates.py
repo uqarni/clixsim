@@ -22,6 +22,7 @@ from .geometry import (
     angle_to,
     distance,
     in_base_contact,
+    segment_hits_circles,
     in_front_arc,
     in_rear_arc,
     segment_circle_intersects,
@@ -38,7 +39,7 @@ from .intents import (
     RegenerateIntent,
     ToggleAbilityIntent,
 )
-from .state import Figure
+from .state import Figure, arc_target_point, figures_in_base_contact
 from .threat import clicks_to_demoralized, threat_score
 
 # Enemy figures whose CURRENT click carries one of these are force multipliers:
@@ -150,8 +151,7 @@ def generate_candidates(engine: Engine, figure: Figure) -> list[Candidate]:
             while frontier:
                 cur = frontier.pop()
                 for fr in list(pool):
-                    if in_base_contact(cur.position, cur.base_radius,
-                                       fr.position, fr.base_radius):
+                    if figures_in_base_contact(cur, fr):
                         pool.remove(fr)
                         cluster.append(fr)
                         frontier.append(fr)
@@ -256,7 +256,7 @@ def _ranged_candidates(engine, figure, enemies, cands, aids):
                 continue
             if not in_front_arc(figure.position, figure.facing, t.position, figure.arc_half_angle):
                 continue
-            if any(in_base_contact(t.position, t.base_radius, fr.position, fr.base_radius)
+            if any(figures_in_base_contact(t, fr)
                    for fr in engine.state.friends_of(figure)):
                 continue  # P4-R25: can't target an enemy adjacent to your own figure
             # Card: Magic Blast applies NO terrain modifiers — odds must match
@@ -294,7 +294,7 @@ def _ranged_candidates(engine, figure, enemies, cands, aids):
             for b in engine.state.living():
                 if b.uid in (figure.uid, o.uid):
                     continue
-                if segment_circle_intersects(figure.position, o.position, b.position, b.base_radius):
+                if segment_hits_circles(figure.position, o.position, b.circles()):
                     return False
             return True
 
@@ -319,9 +319,8 @@ def _support_candidates(engine, figure, cands, aids):
     # contact dots and the engine would have accepted the heal.
     if ab.HEALING in aids and not state.opposing_contacts(figure):
         for fr in state.friends_of(figure):
-            if _wounded(fr) and not state.opposing_contacts(fr) and in_base_contact(
-                figure.position, figure.base_radius, fr.position, fr.base_radius
-            ):
+            if _wounded(fr) and not state.opposing_contacts(fr) \
+                    and figures_in_base_contact(figure, fr):
                 # Healing ignores all modifiers, so the hit chance is raw attack
                 # vs raw defense (NOT effective_defense — the engine ignores Defend
                 # / Battle Armor here, engine.py _resolve_healing).
@@ -512,8 +511,7 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
         if target.uid in seen_targets:
             continue
         seen_targets.add(target.uid)
-        if in_base_contact(figure.position, figure.base_radius,
-                           target.position, target.base_radius):
+        if figures_in_base_contact(figure, target):
             continue  # already engaged — close combat is the action, not another approach
         dvec_len = distance(figure.position, target.position)
         facing = _facing_toward(figure.position, target.position)
@@ -625,10 +623,11 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
                  f"Retreat from {nearest.short_name}", retreat_extra)
         # Say WHY a re-face matters when the enemy is already touching but out of
         # the front arc — it's the prerequisite for the close attack (P4-R27).
-        engaged_behind = in_base_contact(
-            figure.position, figure.base_radius, nearest.position, nearest.base_radius
+        engaged_behind = figures_in_base_contact(
+            figure, nearest
         ) and not in_front_arc(
-            figure.position, figure.facing, nearest.position, figure.arc_half_angle
+            figure.position, figure.facing, arc_target_point(figure, nearest),
+            figure.arc_half_angle
         )
         reface_label = (
             f"Re-face toward {nearest.short_name} — needed before a close attack"
@@ -655,7 +654,7 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
         same = [fr for fr in engine.state.friends_of(figure)
                 if fr.definition.faction == figure.definition.faction]
         touching = any(
-            in_base_contact(figure.position, figure.base_radius, fr.position, fr.base_radius)
+            figures_in_base_contact(figure, fr)
             for fr in same
         )
         if len(same) >= 2 and not touching:
@@ -668,7 +667,7 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
                 def _clustered(fr):
                     return any(
                         o.uid != fr.uid
-                        and in_base_contact(fr.position, fr.base_radius, o.position, o.base_radius)
+                        and figures_in_base_contact(fr, o)
                         for o in same
                     )
                 friend = min(reachable, key=lambda fr: (not _clustered(fr),
@@ -693,9 +692,7 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
                      reverse=True)
         for ally in wounded[:2]:
             d = distance(figure.position, ally.position)
-            if not heal_ranged and in_base_contact(
-                figure.position, figure.base_radius, ally.position, ally.base_radius
-            ):
+            if not heal_ranged and figures_in_base_contact(figure, ally):
                 continue  # already touchable — the Heal candidate itself covers it
             if heal_ranged:
                 need = d - max(0.5, figure.range - 0.5)  # inside range, small margin
@@ -727,7 +724,7 @@ def _cohesive_clusters(figs: list[Figure]) -> list[list[Figure]]:
     adj: dict[int, set] = {f.uid: set() for f in figs}
     for i, a in enumerate(figs):
         for b in figs[i + 1:]:
-            if in_base_contact(a.position, a.base_radius, b.position, b.base_radius):
+            if figures_in_base_contact(a, b):
                 adj[a.uid].add(b.uid)
                 adj[b.uid].add(a.uid)
     seen: set[int] = set()
@@ -764,7 +761,7 @@ def _formation_translation(engine: Engine, cluster: list[Figure], off: Vec,
         for other in engine.state.living():
             if other.uid in member_uids:
                 continue
-            if segment_circle_intersects(f.position, nd, other.position, other.base_radius):
+            if segment_hits_circles(f.position, nd, other.circles()):
                 return None
             if distance(nd, other.position) < f.base_radius + other.base_radius - CONTACT_TOLERANCE:
                 return None
@@ -859,7 +856,7 @@ def _make_close_formations(engine: Engine, members: list[Figure], cands: list[Ca
     for t in engine.state.opponents_of(members[0]):
         attackers = [
             f for f in members
-            if in_base_contact(f.position, f.base_radius, t.position, t.base_radius)
+            if figures_in_base_contact(f, t)
             and in_front_arc(f.position, f.facing, t.position, f.arc_half_angle)
         ]
         if len(attackers) < 2:

@@ -26,9 +26,9 @@ from __future__ import annotations
 
 from . import abilities as ab
 from . import terrain as terr
-from .geometry import Vec, distance, in_base_contact, segment_circle_intersects
+from .geometry import Vec, distance, segment_hits_circles
 from .probability import hit_probability
-from .state import DEMORALIZED_ABILITY_ID, Figure
+from .state import DEMORALIZED_ABILITY_ID, Figure, figures_in_base_contact
 
 # A figure that must close before it can strike threatens the FOLLOWING turn;
 # discount that future damage relative to fire that lands next activation.
@@ -62,20 +62,22 @@ def _lof_to_point(engine, shooter: Figure, mover: Figure, at: Vec) -> tuple[bool
             continue
         if both_elev and engine._elev(other.position) == 0:
             continue
-        if segment_circle_intersects(shooter.position, at, other.position, other.base_radius):
+        if segment_hits_circles(shooter.position, at, other.circles()):
             return False, 0
     return True, mod
 
 
 def _shooter_engaged(engine, shooter: Figure, mover: Figure, at: Vec) -> bool:
     """Is the shooter based by any of the mover's side (mover evaluated at
-    ``at``)? A based shooter cannot make a ranged attack (P4-R23)."""
-    if in_base_contact(shooter.position, shooter.base_radius, at, mover.base_radius):
+    ``at``)? A based shooter cannot make a ranged attack (P4-R23). The
+    hypothetical mover is evaluated front-dot-only (facing at ``at`` unknown) —
+    a documented heuristic approximation for mounted movers (plan §2.3(7))."""
+    if figures_in_base_contact(mover, shooter, a_pos=at):
         return True
     for o in engine.state.living(mover.owner):
         if o.uid == mover.uid:
             continue
-        if in_base_contact(shooter.position, shooter.base_radius, o.position, o.base_radius):
+        if figures_in_base_contact(shooter, o):
             return True
     return False
 
@@ -91,7 +93,7 @@ def expected_incoming_clicks(engine, mover: Figure, at: Vec) -> tuple[float, flo
         if not e.is_alive or e.is_demoralized or e.damage <= 0:
             continue
         d = distance(e.position, at)
-        contact = in_base_contact(e.position, e.base_radius, at, mover.base_radius)
+        contact = figures_in_base_contact(mover, e, a_pos=at)
         if contact:
             eff_def = ab.effective_defense(engine.state, mover, "close", 0)
             odds = hit_probability(e.attack, eff_def)

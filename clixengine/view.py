@@ -100,6 +100,11 @@ def figure_view(engine: Engine, f: Figure) -> dict:
         "elevation": engine._elev(f.position) if f.is_alive else 0,
         "facing_deg": round(math.degrees(f.facing) % 360, 1),
         "base_radius": f.base_radius,
+        # Double-base (P5-R1): rear circle centre is server-computed so the
+        # client never re-derives it through the rounded facing above.
+        "mounted": f.mounted,
+        **({"rear_pos": [round(f.rear_position.x, 3), round(f.rear_position.y, 3)]}
+           if f.mounted else {}),
         "arc_deg": round(math.degrees(f.arc_half_angle), 1),  # front-arc HALF-angle
         "range": f.range,
         "targets": f.targets,

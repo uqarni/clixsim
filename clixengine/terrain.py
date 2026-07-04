@@ -304,6 +304,60 @@ def effective_speed(pieces: list[TerrainPiece], speed: int, start: Vec, radius: 
 
 
 # --------------------------------------------------------------------------- #
+# Footprint (capsule) wrappers — a footprint is geometry.Circles: one circle
+# for a standard base, front+rear for a mounted double base (P5-R1). The
+# single-circle functions above stay for terrain-vs-terrain checks and the
+# web client's mirrors.
+# --------------------------------------------------------------------------- #
+def footprint_in_blocking(pieces: list[TerrainPiece], circles) -> bool:
+    """Any circle of the footprint overlapping blocking terrain (illegal end/
+    placement — P5-R7's 'may not rest on blocking terrain')."""
+    return any(base_in_blocking(pieces, c, r) for c, r in circles)
+
+
+def footprint_blocking_between(pieces: list[TerrainPiece], start_circles, end_circles):
+    """Blocking piece hit by the footprint en route: each circle sweeps its own
+    parallel chord (plan §2.3(2)). Start/end footprints are zipped front-to-front,
+    rear-to-rear; a facing change at the destination makes the rear chord an
+    approximation — endpoint legality (P5-R7) is exact, the sweep is not."""
+    for (c0, r), (c1, _r1) in zip(start_circles, end_circles):
+        t = blocking_between(pieces, c0, c1, r)
+        if t is not None:
+            return t
+    return None
+
+
+def footprint_effective_speed(pieces: list[TerrainPiece], speed: int, circles) -> int:
+    """Speed halved if ANY part of the base starts touching speed-halving
+    hindering (§Hindering: 'any part of his base touching')."""
+    if any(_starts_in_speed_hindering(pieces, c, r) for c, r in circles):
+        return max(1, math.ceil(speed / 2))
+    return speed
+
+
+def footprint_hindering_entry_violation(
+    pieces: list[TerrainPiece], start_circles, end_circles
+) -> TerrainPiece | None:
+    """Capsule variant of the entering-hindering stop: a footprint that starts
+    clear of a hindering piece and sweeps into it must END touching it."""
+    for t in pieces:
+        if not t.is_hindering_move():
+            continue
+        if any(circle_intersects_polygon(c, r, t.polygon) for c, r in start_circles):
+            continue  # started touching it — the halved speed already applied
+        swept = any(
+            swept_base_crosses_polygon(c0, c1, r, t.polygon)
+            for (c0, r), (c1, _r1) in zip(start_circles, end_circles)
+        )
+        ends_touching = any(
+            circle_intersects_polygon(c, r, t.polygon) for c, r in end_circles
+        )
+        if swept and not ends_touching:
+            return t
+    return None
+
+
+# --------------------------------------------------------------------------- #
 # Line-of-fire terrain verdict (used by the engine's LoF + combat modifiers)
 # --------------------------------------------------------------------------- #
 def lof_terrain(

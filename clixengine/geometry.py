@@ -1,11 +1,17 @@
 """Continuous-space geometry for the Mage Knight engine.
 
 All positions are floats in inches; there is no grid (DP3). Facing is an angle in
-radians measured counter-clockwise from the +x axis. Figures occupy circular
-bases of ``base_radius`` inches centred on ``position`` (the dial's centre dot).
+radians measured counter-clockwise from the +x axis. Standard figures occupy one
+circular base of ``base_radius`` inches centred on ``position`` (the dial's
+centre dot). Mounted (Lancers) figures occupy a double "peanut" base: two equal
+circles joined along the facing axis, with ``position`` = the FRONT circle's
+centre dot (P5-R1/R2 — all measurements anchor there) and the rear circle centre
+derived as ``position - 2r * facing_unit``.
 
 Every spatial predicate the rules need lives here so the engine — not the LLM —
-owns geometry (DP2). Functions are pure and deterministic.
+owns geometry (DP2). Functions are pure and deterministic. ``Circles`` (a tuple
+of (centre, radius) pairs, length 1 or 2) is the uniform footprint currency:
+shape-aware predicates take circle lists so single and double bases share code.
 """
 
 from __future__ import annotations
@@ -134,6 +140,59 @@ def path_crosses_base(
     cross a figure base (§Movement, P4-R6). Semantically identical to
     ``segment_circle_intersects`` but named for the movement rule."""
     return segment_circle_intersects(p0, p1, centre, radius, eps)
+
+
+# --------------------------------------------------------------------------- #
+# Capsule (double-base) footprints — P5-R1. A footprint is a tuple of
+# (centre, radius) circles: length 1 for a standard base, 2 for a mounted one.
+# --------------------------------------------------------------------------- #
+Circles = tuple[tuple[Vec, float], ...]
+
+
+def capsule_circles(pos: Vec, facing: float, r: float, mounted: bool) -> Circles:
+    """Circle decomposition of a base at a (possibly hypothetical) placement.
+    The rear circle of a double base trails the front dot along -facing."""
+    if not mounted:
+        return ((pos, r),)
+    rear = Vec(pos.x - 2.0 * r * math.cos(facing), pos.y - 2.0 * r * math.sin(facing))
+    return ((pos, r), (rear, r))
+
+
+def circles_gap(ca: Circles, cb: Circles) -> float:
+    """Minimum edge gap between two footprints (negative if overlapping)."""
+    return min(edge_distance(a, ra, b, rb) for a, ra in ca for b, rb in cb)
+
+
+def circles_in_contact(ca: Circles, cb: Circles, eps: float = CONTACT_TOLERANCE) -> bool:
+    """Base contact between footprints: ANY circle pair touching counts (§Base
+    Contact — 'their bases are touching', anywhere on the peanut)."""
+    return circles_gap(ca, cb) <= eps
+
+
+def circles_overlap(ca: Circles, cb: Circles, tol: float = CONTACT_TOLERANCE) -> bool:
+    """Real overlap (bases resting on each other) — beyond touching tolerance."""
+    return circles_gap(ca, cb) < -tol
+
+
+def closest_circle_pair(
+    ca: Circles, cb: Circles
+) -> tuple[tuple[Vec, float], tuple[Vec, float]]:
+    """The (circle-of-a, circle-of-b) pair with the smallest edge gap — the pair
+    a contact actually happens through. Deterministic tie-break: first-listed
+    (front circle first) wins, so a dead-heat resolves to the front dot."""
+    best, best_gap = None, float("inf")
+    for a in ca:
+        for b in cb:
+            gap = edge_distance(a[0], a[1], b[0], b[1])
+            if gap < best_gap - CONTACT_EPS:
+                best, best_gap = (a, b), gap
+    return best  # type: ignore[return-value]  # ca/cb are non-empty
+
+
+def segment_hits_circles(p0: Vec, p1: Vec, circles: Circles, eps: float = CONTACT_EPS) -> bool:
+    """Does the segment cross any circle of a footprint? (LoF / path blocking —
+    a mounted blocker blocks with BOTH halves of its base.)"""
+    return any(segment_circle_intersects(p0, p1, c, r, eps) for c, r in circles)
 
 
 # --------------------------------------------------------------------------- #

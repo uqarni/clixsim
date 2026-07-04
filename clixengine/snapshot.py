@@ -29,6 +29,9 @@ def _figure_view(engine: Engine, f: Figure) -> dict:
         "points": f.points,
         "pos": [round(f.position.x, 2), round(f.position.y, 2)],
         "facing_deg": round(math.degrees(f.facing) % 360, 1),
+        # Mounted (P5): double base, no free spin, break-away fails only on 1,
+        # Shake Off on successful break away. The LLM prompt explains the rules.
+        **({"mounted": True} if f.mounted else {}),
         "click": f.current_click,
         "health_fraction": round(f.health_fraction(), 2),
         "speed": f.speed,
