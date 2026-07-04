@@ -222,15 +222,37 @@ The product spans five phases end-to-end: **(1)** point selection, **(2)** army 
 
 ---
 
-### Phase 5 — Debrief & Analysis
+### §5 — Lancers Expansion: Mounted Warriors (P5-R*)
+
+**Purpose:** faithful support for the Lancers (2001) double-base cavalry, under the
+January 2002 Unlimited rules ("mounted warriors follow all rules for normal figures,
+except where noted"). Full research + rulings: docs/lancers-plan.md.
+
+- **P5-R1** — **Double base:** a mounted warrior (horseshoe speed symbol; identified in data by the `" On "` name pattern — the symbol was never digitized) occupies a "peanut" base of two equal circles joined along the facing axis. Engine representation: `position` = FRONT-circle center dot; rear circle derived at `position − 2r·facing`.
+- **P5-R2** — All distance and line-of-fire measurements anchor on the **front-half center dot** (Lancers 2001 r.4 — sole source; Unlimited is silent but the physical bases print the dot there). Base CONTACT is any-circle touching.
+- **P5-R3** — Mounted break away fails only on a natural **1** (also granted by Charge/Bound card text to their carriers).
+- **P5-R4** — A mounted warrior that fails a break away may **not rotate** to a new facing (overrides the movement-formation "can still rotate" clause per the Unlimited p.3 master rule).
+- **P5-R5** — **Shake Off:** on a successful break away, 1 click to each opposing figure that was in base contact **outside the mounted warrior's front arc**; reducible by Toughness/Invulnerability; suppressed by an active Ram (dormant — no Rebellion/Lancers unit carries Ram).
+- **P5-R6** — A mounted warrior **never receives a free spin**; a mounted MOVER still grants standard defenders theirs (defender-side exception only).
+- **P5-R7** — After moving (or any facing change), the whole double base must rest legally: on the board, on no other figure base, outside blocking terrain (Lancers 2001 r.5). Endpoint legality only — no rotation sweep. Every engine facing write validates this.
+- **P5-R8** — Dial turns from under the base (physical only; no engine effect).
+- **P5-R9** — **Arc ruling (capsule):** contact through the rear circle = rear-arc contact for printed arcs ≤ 180°; front-circle contact classified by bearing at the front dot vs `arc_deg`. The one 270° mounted unit (High Battle Mage On Scorpion Mount) uses the pure bearing test for ALL contact points (its printed arc wraps onto the rear circle).
+- **P5-R10** — **Movement path (capsule):** the path is the ruler LINE from the front dot (may not cross figure bases — a mounted blocker blocks with both circles — nor thread touching figures); blocking TERRAIN is swept by both circles along parallel chords; hindering start-halving = any circle touching; entry-stop = per the existing engine approximation, ending in contact with the entered piece.
+- **P5-R11** — **Deployment:** the entire double base must fit inside the 3" starting band (facing the enemy, the legal front-dot strip is `[3r, 3−r]` deep).
+- **P5-R12** — **Charge (91) / Bound (90):** a move action covers up to 2× speed (doubling before the hindering halving); if the figure did not start the TURN in enemy contact and moved ≤ 1× speed, it may make a free close (Charge) / ranged (Bound) attack as the same action — resolved AFTER the free-spin window as a `rider` intent (no second token, no extra budget, no re-push; expires on any other intent). Both bar ANY formation while showing (optional → cancelable) and grant break-away-on-1.
+- **P5-R13** — **Invulnerability (101):** +2 defense vs ranged attacks that target or can affect the figure; damage from combat/ability sources −2 (not pushing/crit-miss); cannot be healed (single choke point: `Figure.heal_clicks`); cannot capture or be captured (capture pending, FUT-CAP).
+
+---
+
+### Phase 6 — Debrief & Analysis
 
 **Purpose:** review and learn from the completed game.
 
-- **P5-R1** — Persist a complete, ordered **game log**: every action, roll (with seed), state delta, and VP event — sufficient to fully reconstruct the game.
-- **P5-R2** — **Replay:** step forward/back through the game; render the board at any point.
-- **P5-R3** — **Summary:** final VP breakdown, turn count, per-figure outcome (survived / eliminated / captured), key swing moments (big damage, crits, captures, eliminations).
-- **P5-R4** — **LLM analysis:** narrative debrief of the opponent's (and optionally the human's) key decisions, mistakes, and alternatives, grounded in the logged state — not hallucinated. Optionally surface engine-computed "what-if" deltas at flagged decision points (e.g., EV of the move taken vs. the top alternative).
-- **P5-R5** — Export the log (JSON) for external analysis; optionally push a summary to the user's notes/issue tracker.
+- **P6-R1** — Persist a complete, ordered **game log**: every action, roll (with seed), state delta, and VP event — sufficient to fully reconstruct the game.
+- **P6-R2** — **Replay:** step forward/back through the game; render the board at any point.
+- **P6-R3** — **Summary:** final VP breakdown, turn count, per-figure outcome (survived / eliminated / captured), key swing moments (big damage, crits, captures, eliminations).
+- **P6-R4** — **LLM analysis:** narrative debrief of the opponent's (and optionally the human's) key decisions, mistakes, and alternatives, grounded in the logged state — not hallucinated. Optionally surface engine-computed "what-if" deltas at flagged decision points (e.g., EV of the move taken vs. the top alternative).
+- **P6-R5** — Export the log (JSON) for external analysis; optionally push a summary to the user's notes/issue tracker.
 
 ---
 
