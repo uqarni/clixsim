@@ -71,13 +71,28 @@ def _fig_brief(db: FigureDB, f: FigureDef) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Draft/sealed pool scope
+# --------------------------------------------------------------------------- #
+# Sets eligible for pools. Lancers joins once the engine + client fully
+# support mounted double bases (docs/lancers-plan.md rollout order) — until
+# then the DB carries the figures but pools don't offer them.
+POOL_EXPANSIONS: set[str] = {"Rebellion"}
+
+
+def pool_figures(db: FigureDB) -> list[FigureDef]:
+    """The draftable roster: every figure from a pool-enabled expansion."""
+    return [f for f in db.all_figures()
+            if getattr(f, "expansion", "Rebellion") in POOL_EXPANSIONS]
+
+
+# --------------------------------------------------------------------------- #
 # Sealed pool sampling (non-canonical approximation, OQ-3)
 # --------------------------------------------------------------------------- #
 def sample_sealed_pool(db: FigureDB, seed: int, boosters: int = 4, per_booster: int = 5) -> list[int]:
     """Open ``boosters`` packs of ``per_booster`` figures, weighted by rarity
     (rarity 1 = common .. 6 = rare). Returns figure ids (with duplicates)."""
     rng = random.Random(seed)
-    figs = db.all_figures()
+    figs = pool_figures(db)
     weights = [max(1, 7 - int(f.rarity or 3)) for f in figs]
     pool: list[int] = []
     for _ in range(boosters * per_booster):
@@ -99,7 +114,7 @@ def _affordable(
     ``candidate_ids`` None => whole roster (preconstructed). ``pool_counts`` limits
     sealed picks to remaining pulled copies."""
     if candidate_ids is None:
-        ids = [f.id for f in db.all_figures()]
+        ids = [f.id for f in pool_figures(db)]
     else:
         ids = sorted(set(candidate_ids))
     out = []
@@ -178,7 +193,7 @@ def heuristic_army(
         if pool_counts is not None:
             pool_counts[pick.id] -= 1
     if not ids:  # guarantee non-empty
-        cheapest = min(db.all_figures(), key=lambda f: f.points)
+        cheapest = min(pool_figures(db), key=lambda f: f.points)
         ids = [cheapest.id]
     return Army(name=f"{owner}-army", owner=owner, figure_ids=ids)
 

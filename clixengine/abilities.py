@@ -19,12 +19,15 @@ AQUATIC = 86
 BATTLE_ARMOR = 87
 BATTLE_FURY = 88
 BERSERK = 89
+BOUND = 90
+CHARGE = 91
 COMMAND = 92
 DEFEND = 94
 DEMORALIZED = 95
 FLAME_LIGHTNING = 97
 FLIGHT = 98
 HEALING = 100
+INVULNERABILITY = 101
 MAGIC_BLAST = 103
 MAGIC_ENHANCEMENT = 105
 MAGIC_HEALING = 107
@@ -54,6 +57,9 @@ TERRAIN_DEPENDENT_IDS: set[int] = set()
 # Whole effect depends on the capture subsystem (FUT-CAP), which is out of scope:
 # reported separately so coverage isn't overstated.
 CAPTURE_PENDING_IDS: set[int] = {BATTLE_FURY}
+# Lancers trio, implementation staged in docs/lancers-plan.md P4 — flagged (not
+# silently ignored) until then; move to IMPLEMENTED_ABILITY_IDS when they land.
+FLAGGED_ABILITY_IDS: set[int] = {BOUND, CHARGE, INVULNERABILITY}
 
 # Abilities that grant free (non-formation) movement: pass through figure bases,
 # only fail break-away on a natural 1 (§Flight / §Aquatic).
@@ -72,10 +78,10 @@ def has(figure, ability_id: int) -> bool:
 
 
 def is_mounted(figure) -> bool:
-    """Mounted (cavalry) figures use a peanut base and do not grant a free spin
-    when they move into contact (§Free Spin / §Breaking Away). The Rebellion seed
-    roster has no mounted figures (D5(d)/OQ-6), so this is False today — kept as a
-    guard so the rule stays encoded if a mounted figure is ever added."""
+    """Mounted (cavalry) figures use a double 'peanut' base (P5-R1): two equal
+    circles joined along the facing axis, position = the FRONT circle's center
+    dot. They never receive a free spin (P5-R6), break away only failing on a 1
+    (P5-R3), and deal Shake Off damage on success (P5-R5). 54 Lancers figures."""
     return bool(getattr(figure.definition, "mounted", False))
 
 

@@ -1,8 +1,9 @@
 """Figure & ability data loading (§9 Data Pipeline, DP5).
 
-Content is data, not code. This module normalises ``stats/rebellion.json`` and
-``stats/special_abilities.json`` into immutable definition objects the engine
-instantiates in-play figures from.
+Content is data, not code. This module normalises every roster file in
+``stats/`` (rebellion.json, lancers.json — any JSON with an ``expansion`` +
+``figures`` header) plus ``stats/special_abilities.json`` into immutable
+definition objects the engine instantiates in-play figures from.
 
 Arc convention (OQ-5, RESOLVED): ``arc_raw`` is the TOTAL front-arc angle in
 degrees — 90 is the standard quarter-circle clix front arc (facing +/- 45), and
@@ -43,6 +44,7 @@ class AbilityDef:
     symbol: str
     description: str
     used_in_rebellion: bool
+    used_in_lancers: bool = False
 
 
 @dataclass(frozen=True)
@@ -77,6 +79,10 @@ class FigureDef:
     starting_click: int
     dial: tuple[ClickStats, ...]
     seed_v1: bool = True
+    # Plain defaults below are load-bearing: pre-Lancers pickled sessions carry
+    # FigureDefs without these attributes and fall back to the class attribute.
+    expansion: str = "Rebellion"
+    mounted: bool = False  # double "peanut" base (P5-R1); horseshoe speed symbol
 
     @property
     def arc_half_angle(self) -> float:
@@ -176,7 +182,7 @@ def _parse_ability_refs(raw_abilities: dict) -> tuple[AbilityRef, ...]:
     return tuple(refs)
 
 
-def _parse_figure(raw: dict) -> FigureDef:
+def _parse_figure(raw: dict, expansion: str = "Rebellion") -> FigureDef:
     dial = tuple(
         ClickStats(
             index=int(c["click"]),
@@ -203,19 +209,30 @@ def _parse_figure(raw: dict) -> FigureDef:
         starting_click=int(raw.get("starting_click", 0)),
         dial=dial,
         seed_v1=bool(raw.get("seed_v1", True)),
+        expansion=expansion,
+        mounted=bool(raw.get("mounted", False)),
     )
 
 
 @lru_cache(maxsize=1)
 def load_db(data_dir: str | None = None) -> FigureDB:
     base = Path(data_dir) if data_dir else _DATA_DIR
-    fig_raw = json.loads((base / "rebellion.json").read_text())
     abil_raw = json.loads((base / "special_abilities.json").read_text())
 
-    figures = {}
-    for raw in fig_raw["figures"]:
-        fig = _parse_figure(raw)
-        figures[fig.id] = fig
+    figures: dict[int, FigureDef] = {}
+    for path in sorted(base.glob("*.json")):
+        raw = json.loads(path.read_text())
+        if "expansion" not in raw or "figures" not in raw:
+            continue  # not a roster file (e.g. special_abilities.json)
+        expansion = raw["expansion"]
+        for fig_raw in raw["figures"]:
+            fig = _parse_figure(fig_raw, expansion=expansion)
+            if fig.id in figures:  # cross-set id collision would corrupt replays
+                raise ValueError(
+                    f"figure id {fig.id} in {expansion} collides with "
+                    f"{figures[fig.id].expansion}/{figures[fig.id].name}"
+                )
+            figures[fig.id] = fig
 
     abilities = {}
     for a in abil_raw["abilities"]:
@@ -228,6 +245,7 @@ def load_db(data_dir: str | None = None) -> FigureDB:
             symbol=a.get("symbol", ""),
             description=a.get("description", ""),
             used_in_rebellion=bool(a.get("used_in_rebellion", False)),
+            used_in_lancers=bool(a.get("used_in_lancers", False)),
         )
         abilities[ability.id] = ability
 

@@ -210,7 +210,10 @@ def test_planning_digest_counts_flying_shooters_for_ranged_formations(db):
     must never name a MOVEMENT formation for it."""
     from clixengine.build import _planning_digest, _heuristic_plan
 
-    draconum = [f for f in db.all_figures() if f.faction == "Draconum"]
+    # Rebellion Draconum only: the premise is an ALL-flying faction, and the
+    # four grounded Lancers Draconum would (correctly) unlock movement formations.
+    draconum = [f for f in db.all_figures()
+                if f.faction == "Draconum" and f.expansion == "Rebellion"]
     digest = {d["faction"]: d for d in _planning_digest(db, draconum)}
     d = digest["Draconum"]
     assert d["ranged_formation_capable"] >= 3, "flying Draconum shooters miscounted"

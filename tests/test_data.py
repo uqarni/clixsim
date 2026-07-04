@@ -1,9 +1,14 @@
 from clixengine.data import load_db
 
 
+def _rebellion(db):
+    return [f for f in db.all_figures() if f.expansion == "Rebellion"]
+
+
 def test_roster_counts(db):
     figs = db.all_figures()
-    assert len(figs) == 160
+    assert len(figs) == 302  # 160 Rebellion + 142 Lancers core
+    assert len(_rebellion(db)) == 160
     factions = db.factions()
     assert len(factions) == 8
 
@@ -18,23 +23,38 @@ def test_abilities_loaded(db):
 def test_used_in_rebellion_flag_matches_dials(db):
     flagged = {a.id for a in db.all_abilities() if a.used_in_rebellion}
     used = set()
-    for f in db.all_figures():
+    for f in _rebellion(db):
         used |= f.all_ability_ids()
     assert used == flagged
     assert len(used) == 24
 
 
+def test_used_in_lancers_flag_matches_dials(db):
+    flagged = {a.id for a in db.all_abilities() if a.used_in_lancers}
+    used = set()
+    for f in db.all_figures():
+        if f.expansion == "Lancers":
+            used |= f.all_ability_ids()
+    assert used == flagged
+    assert len(used) == 26
+
+
 def test_points_range(db):
-    pts = [f.points for f in db.all_figures()]
+    pts = [f.points for f in _rebellion(db)]
     assert min(pts) == 5
     assert max(pts) == 145
+    all_pts = [f.points for f in db.all_figures()]
+    assert max(all_pts) == 202  # Techun On Dragonfly Mount (Lancers Unique)
 
 
 def test_ranged_targets_parse(db):
-    ranged = db.filter(ranged=True)
+    ranged = [f for f in _rebellion(db) if f.is_ranged]
     assert len(ranged) == 78
-    multi = [f for f in db.all_figures() if f.targets > 1]
+    multi = [f for f in _rebellion(db) if f.targets > 1]
     assert len(multi) == 7
+    lancers_multi = [f for f in db.all_figures()
+                     if f.expansion == "Lancers" and f.targets > 1]
+    assert len(lancers_multi) == 4
 
 
 def test_load_db_cached():

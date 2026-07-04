@@ -34,6 +34,7 @@ from .build import (
     _fig_brief,
     _role,
     heuristic_army,
+    pool_figures,
     sample_sealed_pool,
 )
 from .candidates import generate_candidates, generate_formation_candidates
@@ -591,7 +592,8 @@ def chat(req: ChatReq):
 def roster():
     """Full drafting roster (all set pieces) for the preconstructed builder."""
     db = SESSION.db
-    figs = sorted(db.all_figures(), key=lambda f: (f.faction, -f.points, f.short_name))
+    figs = sorted(pool_figures(db),
+                  key=lambda f: (f.faction, -f.points, f.short_name))
     return {"figures": [_fig_brief(db, f) for f in figs]}
 
 
