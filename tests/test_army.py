@@ -202,3 +202,61 @@ def test_plan_steers_the_heuristic_fallback_first_pick(db):
         pytest.skip("faction not affordable in roster")
     fig, _reason, used_llm = b.pick(db, cands, [], 200, 200, seed=1)
     assert not used_llm and fig.faction == "Necropolis Sect"
+
+
+def test_planning_digest_counts_flying_shooters_for_ranged_formations(db):
+    """Ranged formations have no Flight bar — an all-flying ranged faction
+    (Draconum) must report ranged_formation_capable > 0, and the heuristic plan
+    must never name a MOVEMENT formation for it."""
+    from clixengine.build import _planning_digest, _heuristic_plan
+
+    draconum = [f for f in db.all_figures() if f.faction == "Draconum"]
+    digest = {d["faction"]: d for d in _planning_digest(db, draconum)}
+    d = digest["Draconum"]
+    assert d["ranged_formation_capable"] >= 3, "flying Draconum shooters miscounted"
+    assert d["movement_formation_capable"] == 0, "Draconum all fly — no movement formation"
+    plan = _heuristic_plan(db, draconum, "x")
+    assert plan["primary_faction"] == "Draconum"
+    assert "movement" not in plan["formation_plan"], plan["formation_plan"]
+
+
+def test_make_plan_falls_back_on_non_dict_llm_output(db, monkeypatch):
+    """A valid-JSON non-dict (or a keyless dict) from the model must route to the
+    heuristic plan, never crash the pick loop with an AttributeError."""
+    from clixengine.build import ArmyBuilder, sample_sealed_pool
+
+    pool = [db.get(i) for i in sorted(set(sample_sealed_pool(db, 3)))]
+    b = ArmyBuilder.__new__(ArmyBuilder)
+    b.available = True
+    b.plan = {}
+    b.doctrine = "x"
+    b.model = "m"
+    b.effort = "low"
+    b.last_error = ""
+
+    class _Blk:
+        type = "text"
+        def __init__(self, t): self.text = t
+    class _Resp:
+        def __init__(self, t): self.content = [_Blk(t)]
+    class _Msgs:
+        def __init__(self, t): self._t = t
+        def create(self, **kw): return _Resp(self._t)
+    class _Client:
+        def __init__(self, t): self.messages = _Msgs(t)
+
+    for bad in ("[1, 2, 3]", "42", '{"unexpected": "keys"}'):
+        b._client = _Client(bad)
+        b.plan = {}
+        plan = b.make_plan(db, pool, 200)
+        assert isinstance(plan, dict)
+        # A usable plan (heuristic fallback) or empty — never a list/scalar.
+        assert plan == {} or plan.get("primary_faction")
+        # And pick() must not raise on it.
+        from clixengine.build import _affordable
+        cands = _affordable(db, [f.id for f in pool], 200, set(),
+                            {f.id: 1 for f in pool})
+        b.available = False  # force the fallback pick path that reads self.plan
+        fig, _r, _u = b.pick(db, cands, [], 200, 200, seed=1)
+        assert fig is not None
+        b.available = True

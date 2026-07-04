@@ -268,21 +268,24 @@ _HEAL_IDS = {ab.HEALING, ab.MAGIC_HEALING, ab.NECROMANCY}
 
 def _planning_digest(db: FigureDB, figs: list[FigureDef]) -> list[dict]:
     """Compact by-faction stock-take of the available pool for the planning
-    pass: how many formation-capable figures each faction has, whether it holds
-    a healer, and its strongest few pieces."""
+    pass. MOVEMENT formations bar Flight/Aquatic/Quickness (and Mage Spawn);
+    RANGED formations bar only Mage Spawn — flying shooters CAN volley together,
+    so they must be counted for the ranged option (the old code derived the
+    ranged count from the movement-capable set and hid every flying gunline)."""
     by_fac: dict[str, list[FigureDef]] = {}
     for f in figs:
         by_fac.setdefault(f.faction, []).append(f)
     out = []
     for fac, members in sorted(by_fac.items(), key=lambda kv: -len(kv[1])):
-        cap = [m for m in members if _formation_capable(m)]
-        ranged_cap = [m for m in cap if m.is_ranged]
+        move_cap = sum(1 for m in members if _formation_capable(m))
+        ranged_cap = 0 if fac == "Mage Spawn" else sum(1 for m in members if m.is_ranged)
         top = sorted(members, key=lambda m: -m.points)[:4]
         out.append({
             "faction": fac,
             "distinct_figures": len(members),
-            "formation_capable": len(cap),
-            "ranged_formation_capable": len(ranged_cap),
+            "movement_formation_capable": move_cap,
+            "ranged_formation_capable": ranged_cap,
+            "formation_capable": max(move_cap, ranged_cap),  # best formation potential
             "has_healer": any(m.all_ability_ids() & _HEAL_IDS for m in members),
             "top_pieces": [{"name": m.short_name, "points": m.points, "role": _role(m)}
                            for m in top],
@@ -291,20 +294,31 @@ def _planning_digest(db: FigureDB, figs: list[FigureDef]) -> list[dict]:
 
 
 def _heuristic_plan(db: FigureDB, figs: list[FigureDef], doctrine: str) -> dict:
-    """Deterministic plan for the key-less / heuristic path: concentrate on the
-    faction with the most formation-capable figures."""
+    """Deterministic plan for the key-less / heuristic path: pick the faction
+    with the best FEASIBLE formation and name the RIGHT kind (never advertise a
+    movement formation for an all-flying faction like Draconum)."""
     digest = _planning_digest(db, figs)
-    formable = [d for d in digest if d["formation_capable"] >= 3] or digest
-    if not formable:
+    if not digest:
         return {}
-    best = max(formable, key=lambda d: (d["formation_capable"], d["distinct_figures"]))
-    kind = "ranged" if best["ranged_formation_capable"] >= 3 else "movement"
+
+    def feasible(d):
+        r, m = d["ranged_formation_capable"], d["movement_formation_capable"]
+        if r >= 3 or m >= 3:
+            return ("ranged", r) if r >= m else ("movement", m)
+        return (None, max(r, m))
+
+    scored = [(d, feasible(d)) for d in digest]
+    formable = [(d, f) for d, f in scored if f[0] is not None]
+    best, (kind, size) = max(formable or scored, key=lambda x: x[1][1])
+    if kind is None:  # no 3+ formation anywhere — still concentrate the biggest
+        kind = ("ranged" if best["ranged_formation_capable"]
+                >= best["movement_formation_capable"] else "movement")
+        size = best["distinct_figures"]
     return {
         "strategy": f"Concentrate on {best['faction']} for a {kind} formation, add a "
                     f"healer if available, and round out with the strongest affordable pieces.",
         "primary_faction": best["faction"],
-        "formation_plan": f"{max(3, min(5, best['formation_capable']))} {best['faction']} "
-                          f"figures for a {kind} formation",
+        "formation_plan": f"{max(3, min(5, size))} {best['faction']} figures for a {kind} formation",
         "must_grab": [p["name"] for p in best["top_pieces"][:2]],
     }
 
@@ -371,7 +385,14 @@ class ArmyBuilder:
                 messages=[{"role": "user", "content": json.dumps(payload)}],
             )
             text = next((b.text for b in resp.content if getattr(b, "type", "") == "text"), "")
-            self.plan = json.loads(text)
+            data = json.loads(text)
+            # A well-formed non-dict (array/scalar) or a dict missing the plan's
+            # load-bearing keys parses cleanly but would crash the pick loop /
+            # server; route anything unusable through the same heuristic fallback.
+            if isinstance(data, dict) and data.get("primary_faction") and data.get("strategy"):
+                self.plan = data
+            else:
+                self.plan = _heuristic_plan(db, available, self.doctrine)
         except Exception as e:
             self.last_error = f"plan error: {e}"
             self.plan = _heuristic_plan(db, available, self.doctrine)
