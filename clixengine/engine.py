@@ -313,19 +313,22 @@ class Engine:
         if f is None or not f.is_alive or f.owner != owner:
             return Rejection("bad_figure", "not your figure")
         p = Vec(*pos)
-        r = f.base_radius
         b = self.state.board
         lo, hi = self._deploy_band(owner)
-        if not (r <= p.x <= b.width - r):
-            return Rejection("off_board", "figure would leave the board")
-        if not (lo + r <= p.y <= hi - r):
-            return Rejection("out_of_area", 'figures deploy within your 3" starting area')
+        # The WHOLE footprint (both circles of a mounted base) must sit inside
+        # the board and the 3" band (P5-R11) — facing swings the rear circle.
+        circles = f.circles(p, float(facing))
+        for c, r in circles:
+            if not (r <= c.x <= b.width - r):
+                return Rejection("off_board", "figure would leave the board")
+            if not (lo + r <= c.y <= hi - r):
+                return Rejection("out_of_area", 'figures deploy within your 3" starting area')
         for o in self.state.living():
             if o.uid == uid:
                 continue
-            if distance(p, o.position) < r + o.base_radius - CONTACT_TOLERANCE:
+            if circles_overlap(circles, o.circles()):
                 return Rejection("overlap", f"would overlap {o.short_name}")
-        if self.state.terrain and terr.base_in_blocking(self.state.terrain, p, r):
+        if self.state.terrain and terr.footprint_in_blocking(self.state.terrain, circles):
             return Rejection("in_blocking", "cannot deploy in blocking terrain")
         f.position = p
         f.facing = float(facing)
@@ -467,7 +470,7 @@ class Engine:
             return {"ok": False, "reason": "pushed_out",
                     "detail": f"{f.short_name} cannot act a third consecutive turn"}
         d = Vec(*dest)
-        rej = self._validate_move(f, d)
+        rej = self._validate_move(f, d, facing if facing is not None else f.facing)
         if rej is not None:
             return {"ok": False, "reason": rej.reason, "detail": rej.detail}
         # Legal. Report whether the move triggers a break-away roll, and its odds.
@@ -717,9 +720,9 @@ class Engine:
     def _newly_contacted_opponents(self, mover: Figure, before_uids: set[int]) -> list[Figure]:
         """Opposing figures the ``mover`` has just entered base contact with (were
         not in contact before the move). These defenders are entitled to a free
-        spin (P4-R9) — unless the mover is mounted, which grants none."""
-        if ab.is_mounted(mover):
-            return []
+        spin (P4-R9). The printed exception is DEFENDER-side only: a mounted
+        figure never spins (P5-R6), but a mounted MOVER still grants standard
+        defenders their spins — an earlier reading wrongly muted them."""
         out = []
         for o in self.state.opposing_contacts(mover):
             if o.uid not in before_uids and not ab.is_mounted(o):
@@ -869,15 +872,21 @@ class Engine:
         return Result("pass", [ev], f"{f.short_name} passes")
 
     # -- Move --------------------------------------------------------------
-    def _validate_move(self, f: Figure, dest: Vec) -> Rejection | None:
+    def _validate_move(self, f: Figure, dest: Vec, facing: float | None = None) -> Rejection | None:
         """Shared move legality (bounds, speed, demoralized, path). Returns a
-        Rejection or None if legal."""
-        if not self.state.board.contains(dest, f.base_radius):
+        Rejection or None if legal. ``facing`` is the FINAL facing — load-bearing
+        for mounted figures, whose rear circle swings with it (P5-R7: the double
+        base may not rest off-board, on another base, or in blocking terrain)."""
+        if facing is None:
+            facing = f.facing
+        end_circles = f.circles(dest, facing)
+        if not self.state.board.contains_circles(end_circles):
             return Rejection("off_board", "destination is off the board")
         flies = ab.ignores_figure_bases(f)  # Flight/Aquatic pass through bases & terrain
         pieces = self.state.terrain
-        # Speed may be halved by starting in hindering terrain (§Hindering; fliers exempt).
-        eff_speed = f.speed if flies else terr.effective_speed(pieces, f.speed, f.position, f.base_radius)
+        # Speed may be halved by starting in hindering terrain (§Hindering: any
+        # part of the base touching; fliers exempt).
+        eff_speed = f.speed if flies else terr.footprint_effective_speed(pieces, f.speed, f.circles())
         dist = distance(f.position, dest)
         if dist > eff_speed + 1e-9:
             extra = " (halved by hindering)" if eff_speed < f.speed else ""
@@ -885,17 +894,18 @@ class Engine:
         # Blocking terrain / deep water: non-fliers can't cross it or end in it;
         # a flier soars over it but may not END its move there (§Flight card text).
         if pieces:
-            if terr.base_in_blocking(pieces, dest, f.base_radius):
+            if terr.footprint_in_blocking(pieces, end_circles):
                 return Rejection("in_blocking", "destination is in impassable terrain")
             if not flies:
                 # Escape hatch: a figure that somehow overlaps blocking terrain
                 # (a legacy/bug state — never reachable by legal play) may still
                 # walk OUT; only the destination legality is enforced for it.
-                stuck = terr.base_in_blocking(pieces, f.position, f.base_radius)
+                stuck = terr.footprint_in_blocking(pieces, f.circles())
                 if not stuck and dist > 1e-9:
-                    if terr.blocking_between(pieces, f.position, dest, f.base_radius):
+                    if terr.footprint_blocking_between(pieces, f.circles(), end_circles):
                         return Rejection("path_blocked", "path crosses impassable terrain")
-                    hv = terr.hindering_entry_violation(pieces, f.position, dest, f.base_radius)
+                    hv = terr.footprint_hindering_entry_violation(
+                        pieces, f.circles(), end_circles)
                     if hv is not None:
                         what = "the low wall" if hv.low_wall else "hindering terrain"
                         return Rejection(
@@ -907,7 +917,7 @@ class Engine:
             for opp in self.state.opponents_of(f):
                 if opp.uid in already:
                     continue
-                if in_base_contact(dest, f.base_radius, opp.position, opp.base_radius):
+                if figures_in_base_contact(f, opp, a_pos=dest, a_facing=facing):
                     return Rejection(
                         "demoralized_contact",
                         f"{f.short_name} is demoralized and may not move into contact",
@@ -915,14 +925,16 @@ class Engine:
         for other in self.state.living():
             if other.uid == f.uid:
                 continue
-            if dist > 1e-9 and not flies and segment_circle_intersects(
-                f.position, dest, other.position, other.base_radius
+            # The path is the ruler LINE from the front dot (P5-R10); a mounted
+            # blocker blocks with both circles.
+            if dist > 1e-9 and not flies and segment_hits_circles(
+                f.position, dest, other.circles()
             ):
                 return Rejection("path_blocked", f"path crosses {other.short_name}'s base")
             # NOBODY may END overlapping another base — touching is the closest
             # legal stop. (The path check treats the mover as a point, so without
             # this a walker could legally land half-on-top of a neighbour.)
-            if distance(dest, other.position) < f.base_radius + other.base_radius - CONTACT_TOLERANCE:
+            if circles_overlap(end_circles, other.circles()):
                 return Rejection("end_on_base",
                                  f"would end overlapping {other.short_name}'s base")
         return None
@@ -939,7 +951,7 @@ class Engine:
             return Rejection("pushed_out", f"{f.short_name} cannot act a third consecutive turn")
 
         dest = Vec(*intent.dest)
-        rej = self._validate_move(f, dest)
+        rej = self._validate_move(f, dest, intent.facing)
         if rej is not None:
             return rej
 
@@ -947,10 +959,17 @@ class Engine:
         pushing = self._consume_nonpass(f, free=intent.free)
 
         # Break-away if in base contact with an opposing figure (P4-R8); Flight /
-        # Aquatic only fail on a natural 1 (§Flight / §Aquatic).
+        # Aquatic and MOUNTED warriors only fail on a natural 1 (§Flight /
+        # §Aquatic / P5-R3).
         dist = distance(f.position, dest)
         contacts = self.state.opposing_contacts(f)
         before_contacts = {c.uid for c in contacts}
+        # Shake Off snapshot (P5-R5): the opposing figures in contact OUTSIDE the
+        # mounted mover's front arc, classified BEFORE anything moves.
+        shake_targets = (
+            [c for c in contacts if contact_is_rear(f, c)]
+            if ab.is_mounted(f) and dist > 1e-9 else []
+        )
         broke_away = True
         if contacts and dist > 1e-9:
             d1 = self.rng.d6("break_away", f"{f.short_name} breaking away")
@@ -959,6 +978,20 @@ class Engine:
                 "break_away", figure=f.uid, roll=d1, success=broke_away,
                 opponents=[c.uid for c in contacts],
             ))
+            # Shake Off (P5-R5): a mounted warrior that successfully breaks away
+            # deals 1 click to each opposing figure that was in base contact
+            # outside his front arc; reducible by Toughness (and Invulnerability).
+            # Ram's card text suppresses it — dormant, no Rebellion/Lancers unit
+            # carries Ram, but the gate is encoded so a future set can't miss it.
+            if broke_away and shake_targets and not ab.has(f, ab.RAM):
+                for c in shake_targets:
+                    dmg = self._deal_combat_damage(c, 1, source_type="ability")
+                    events.append(self.log.emit(
+                        "shake_off", figure=f.uid, target=c.uid, clicks=dmg,
+                        eliminated=c.eliminated,
+                    ))
+                    if c.eliminated:
+                        self._on_eliminated(c, events)
 
         start = f.position
         if broke_away:
@@ -969,7 +1002,11 @@ class Engine:
             if prev is None:
                 prev = self._prev_positions = {}
             prev[f.uid] = (start.x, start.y)
-        f.facing = intent.facing  # re-face allowed even on a failed break-away
+            f.facing = intent.facing
+        elif not ab.is_mounted(f):
+            # Failed break-away: re-face in place is allowed (P4-R8) — except for
+            # mounted warriors, who may not rotate to a new facing (P5-R4).
+            f.facing = intent.facing
         events.append(self.log.emit(
             "move", figure=f.uid, frm=[start.x, start.y],
             to=[f.position.x, f.position.y], facing=f.facing, moved=broke_away, free=intent.free,
@@ -1425,8 +1462,7 @@ class Engine:
             events.append(self.log.emit("necromancy_fail", necromancer=f.uid,
                           target=dead.uid, clicks=clicks))
         else:
-            dead.position = self._free_contact_position(f, dead.base_radius)
-            dead.facing = f.facing
+            dead.position, dead.facing = self._free_contact_position(f, dead)
             dead.action_tokens = 0
             dead.begin_owner_turn()  # fresh turn state; §Necromancy places no bar on the
             # returned figure being given an action later this turn.
@@ -1455,12 +1491,15 @@ class Engine:
         dest = Vec(*intent.dest)
         if distance(t.position, dest) > 10 + 1e-9:
             return Rejection("too_far", "Magic Levitation moves a figure up to 10 units")
-        if not self.state.board.contains(dest, t.base_radius):
+        # Final placement legality for the whole footprint (P5-R7 for mounted;
+        # the caster decides the facing, so it's part of the drop).
+        drop_circles = t.circles(dest, intent.facing)
+        if not self.state.board.contains_circles(drop_circles):
             return Rejection("off_board", "destination is off the board")
         for o in self.state.living():
             if o.uid == t.uid:
                 continue
-            if distance(dest, o.position) < t.base_radius + o.base_radius - CONTACT_TOLERANCE:
+            if circles_overlap(drop_circles, o.circles()):
                 return Rejection("end_on_base", "levitated figure may not end on a base")
         events: list[dict] = []
         pushing = self._consume_nonpass(f)
@@ -1472,23 +1511,35 @@ class Engine:
         return self._finish_action(f, events, pushing, "levitate",
                                    f"{f.short_name} levitates {t.short_name}")
 
-    def _free_contact_position(self, anchor: Figure, radius: float) -> Vec:
-        # Exact touch with the anchor (edge gap 0 => base contact); reject only
-        # spots that would *overlap* another figure (touching others is fine).
-        gap = anchor.base_radius + radius
-        for k in range(16):
-            ang = 2 * math.pi * k / 16
-            p = Vec(anchor.position.x + gap * math.cos(ang),
-                    anchor.position.y + gap * math.sin(ang))
-            if not self.state.board.contains(p, radius):
-                continue
-            if not any(
-                o.uid != anchor.uid
-                and distance(p, o.position) < radius + o.base_radius - CONTACT_TOLERANCE
-                for o in self.state.living()
-            ):
-                return p
-        return Vec(anchor.position.x, anchor.position.y + gap)
+    def _free_contact_position(self, anchor: Figure, fig: Figure) -> tuple[Vec, float]:
+        """A legal (position, facing) touching the anchor for a returning figure
+        (§Necromancy). Probes 16 bearings around EACH of the anchor's circles;
+        the placed figure faces outward, so a mounted revenant's rear circle
+        trails back toward the anchor's far side and gets the full legality
+        check (bounds/overlap — touching others is fine, overlap is not)."""
+        for ac, ar in anchor.circles():
+            gap = ar + fig.base_radius
+            for k in range(16):
+                ang = 2 * math.pi * k / 16
+                p = Vec(ac.x + gap * math.cos(ang), ac.y + gap * math.sin(ang))
+                facing = ang  # outward
+                circles = fig.circles(p, facing)
+                if not self.state.board.contains_circles(circles):
+                    continue
+                if any(
+                    o.uid not in (anchor.uid, fig.uid)
+                    and circles_overlap(circles, o.circles())
+                    for o in self.state.living()
+                ) or circles_overlap(circles, anchor.circles()):
+                    continue
+                if self.state.terrain and terr.footprint_in_blocking(
+                    self.state.terrain, circles
+                ):
+                    continue
+                return p, facing
+        fallback = Vec(anchor.position.x,
+                       anchor.position.y + anchor.base_radius + fig.base_radius)
+        return fallback, math.pi / 2
 
     # ------------------------------------------------------------------ #
     # Formations (P4-R11..R16, R29)

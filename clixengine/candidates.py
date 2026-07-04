@@ -20,12 +20,13 @@ from .geometry import (
     CONTACT_TOLERANCE,
     Vec,
     angle_to,
+    circles_overlap,
     distance,
     in_base_contact,
-    segment_hits_circles,
     in_front_arc,
     in_rear_arc,
     segment_circle_intersects,
+    segment_hits_circles,
 )
 from .probability import hit_probability
 from .intents import (
@@ -401,35 +402,40 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
     flies = ab.ignores_figure_bases(figure)
     # The engine validates against the hindering-halved speed (§Hindering), so
     # candidates must budget with it too or every proposal comes back "too_far".
-    eff_speed = figure.speed if flies else terr.effective_speed(
-        pieces, figure.speed, figure.position, figure.base_radius)
+    eff_speed = figure.speed if flies else terr.footprint_effective_speed(
+        pieces, figure.speed, figure.circles())
 
-    stuck = bool(pieces) and not flies and terr.base_in_blocking(
-        pieces, figure.position, figure.base_radius)
+    stuck = bool(pieces) and not flies and terr.footprint_in_blocking(
+        pieces, figure.circles())
 
-    def _move_illegal(dest: Vec) -> bool:
+    def _move_illegal(dest: Vec, facing: float | None = None) -> bool:
         """Mirror of the engine's _validate_move geometry (figure bases + terrain:
         blocking, flier landings, hindering entry-stop) so we never propose a move
-        the engine would reject."""
+        the engine would reject. Capsule-aware: for a mounted mover the final
+        facing places the rear circle, so callers pass the candidate's facing
+        (probes without one approximate with the current facing)."""
+        end_circles = figure.circles(dest, facing)
+        if not engine.state.board.contains_circles(end_circles):
+            return True
         moving = distance(figure.position, dest) > 1e-9
         for other in engine.state.living():
             if other.uid == figure.uid:
                 continue
-            if moving and not flies and segment_circle_intersects(
-                figure.position, dest, other.position, other.base_radius
+            if moving and not flies and segment_hits_circles(
+                figure.position, dest, other.circles()
             ):
                 return True
             # Nobody may END overlapping another base (engine end_on_base rule).
-            if distance(dest, other.position) < figure.base_radius + other.base_radius - CONTACT_TOLERANCE:
+            if circles_overlap(end_circles, other.circles()):
                 return True
         if pieces:
-            if terr.base_in_blocking(pieces, dest, figure.base_radius):
+            if terr.footprint_in_blocking(pieces, end_circles):
                 return True  # nobody (flier included) may END in blocking / deep water
             if not flies and not stuck and moving:
-                if terr.blocking_between(pieces, figure.position, dest, figure.base_radius):
+                if terr.footprint_blocking_between(pieces, figure.circles(), end_circles):
                     return True
-                if terr.hindering_entry_violation(
-                    pieces, figure.position, dest, figure.base_radius
+                if terr.footprint_hindering_entry_violation(
+                    pieces, figure.circles(), end_circles
                 ) is not None:
                     return True
         return False
@@ -448,7 +454,7 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
     def add_move(dest: Vec, facing: float, label: str, extra: dict) -> bool:
         dest = _clamp_to_board(engine, dest, figure.base_radius)
         key = (round(dest.x, 2), round(dest.y, 2), round(facing, 2))
-        if key in move_seen or _move_illegal(dest):
+        if key in move_seen or _move_illegal(dest, facing):
             return False
         move_seen.add(key)
         danger_after = threat_score(engine, figure, dest)
@@ -754,7 +760,9 @@ def _formation_translation(engine: Engine, cluster: list[Figure], off: Vec,
     dests, facings = [], []
     for f in cluster:
         nd = Vec(f.position.x + off.x, f.position.y + off.y)
-        if not board.contains(nd, f.base_radius):
+        fac = _facing_toward(nd, face_at)
+        end_circles = f.circles(nd, fac)  # final facing places a mounted rear
+        if not board.contains_circles(end_circles):
             return None
         # Don't propose a formation move whose members cross / land on a
         # non-member base or blocking terrain (the engine rejects it).
@@ -763,17 +771,26 @@ def _formation_translation(engine: Engine, cluster: list[Figure], off: Vec,
                 continue
             if segment_hits_circles(f.position, nd, other.circles()):
                 return None
-            if distance(nd, other.position) < f.base_radius + other.base_radius - CONTACT_TOLERANCE:
+            if circles_overlap(end_circles, other.circles()):
                 return None
         if pieces:
-            if terr.base_in_blocking(pieces, nd, f.base_radius):
+            if terr.footprint_in_blocking(pieces, end_circles):
                 return None
-            if terr.blocking_between(pieces, f.position, nd, f.base_radius):
+            if terr.footprint_blocking_between(pieces, f.circles(), end_circles):
                 return None
-            if terr.hindering_entry_violation(pieces, f.position, nd, f.base_radius) is not None:
+            if terr.footprint_hindering_entry_violation(
+                pieces, f.circles(), end_circles
+            ) is not None:
                 return None
         dests.append((nd.x, nd.y))
-        facings.append(_facing_toward(nd, face_at))
+        facings.append(fac)
+    # Rigid translation preserves front-dot geometry, but the re-facing at the
+    # destination swings mounted rear circles — re-check end cohesion so the
+    # engine never rejects a proposal we made (mirror of _apply_formation_move).
+    if not engine._positions_cohesive([
+        f.circles(Vec(*d), fc) for f, d, fc in zip(cluster, dests, facings)
+    ]):
+        return None
     return dests, facings
 
 
@@ -794,7 +811,7 @@ def _make_formation_move(engine: Engine, cluster: list[Figure]) -> Candidate | N
     centroid = Vec(cx, cy)
     pieces = engine.state.terrain
     # Slowest member sets the pace (P4-R13), with hindering halving applied.
-    speed = min(terr.effective_speed(pieces, f.speed, f.position, f.base_radius)
+    speed = min(terr.footprint_effective_speed(pieces, f.speed, f.circles())
                 for f in cluster)
     by_dist = sorted(enemies, key=lambda e: distance(centroid, e.position))
     for tgt in by_dist[:3]:

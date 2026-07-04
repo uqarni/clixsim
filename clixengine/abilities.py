@@ -36,6 +36,7 @@ MAGIC_LEVITATION = 109
 NECROMANCY = 111
 POLE_ARM = 114
 QUICKNESS = 115
+RAM = 116  # not on any Rebellion/Lancers dial — referenced by the Shake Off gate
 REGENERATION = 117
 SHOCKWAVE = 118
 STEALTH = 121
@@ -91,8 +92,9 @@ def _magic_immune(figure) -> bool:
 
 # --- break-away ------------------------------------------------------------
 def break_away_min(figure) -> int:
-    """Minimum d6 needed to break away: normally 4; Flight/Aquatic fail only on 1."""
-    if figure.active_ability_ids() & FREE_MOVEMENT_IDS:
+    """Minimum d6 needed to break away: normally 4; Flight/Aquatic (card text)
+    and mounted warriors (P5-R3) fail only on a 1."""
+    if is_mounted(figure) or figure.active_ability_ids() & FREE_MOVEMENT_IDS:
         return 2
     return 4
 

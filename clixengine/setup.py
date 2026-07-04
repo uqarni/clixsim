@@ -22,8 +22,13 @@ def _deploy_positions(n: int, board: Board, edge: str) -> list[Vec]:
     Adjacent figures start in base contact (edge gap 0) so same-faction armies
     begin cohesive and can use movement/ranged formations immediately (players
     legitimately deploy a formation together). If they don't all fit touching,
-    fall back to an even spread."""
-    band = 1.5  # centre line of the 3"-deep starting band
+    fall back to an even spread.
+
+    The line sits at 1.75" from the owner's edge: deep enough that a MOUNTED
+    figure facing the enemy keeps its whole trailing rear circle inside the
+    band (front dot must be >= 3r = 1.65 from the edge, P5-R11) while any
+    figure's front circle still clears the band's far side (<= 2.45)."""
+    band = 1.75
     y = band if edge == "bottom" else board.height - band
     if n == 1:
         return [Vec(board.width / 2, y)]
@@ -75,6 +80,16 @@ def build_game(
             )
             state.figures[uid] = fig
             uid += 1
+
+    # Every constructed placement must be legal for its whole footprint — a
+    # regression in the row math above would otherwise silently start a game
+    # with a mounted rear circle off the board (deploy-less games never pass
+    # through deploy_figure's checks).
+    for fig in state.figures.values():
+        if not board.contains_circles(fig.circles()):
+            raise ValueError(
+                f"illegal deploy: {fig.short_name} (uid {fig.uid}) footprint off-board"
+            )
 
     # First player: opposed 2d6 (P3-R2), re-roll ties.
     engine = Engine(state, db=db, seed=seed)

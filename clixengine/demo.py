@@ -17,8 +17,16 @@ def _pick_army(
     import random
 
     rng = random.Random(seed)
-    ranged = sorted(db.filter(ranged=True, faction=faction), key=lambda f: f.points)
-    melee = sorted(db.filter(ranged=False, faction=faction), key=lambda f: f.points)
+    # Same pool gate as build.py: sets outside POOL_EXPANSIONS (Lancers until
+    # the capsule stack fully ships) stay out of demo/self-play armies too.
+    from .build import POOL_EXPANSIONS
+
+    def _pool(ranged_flag: bool) -> list:
+        return [f for f in db.filter(ranged=ranged_flag, faction=faction)
+                if getattr(f, "expansion", "Rebellion") in POOL_EXPANSIONS]
+
+    ranged = sorted(_pool(True), key=lambda f: f.points)
+    melee = sorted(_pool(False), key=lambda f: f.points)
     # Focus on affordable, non-trivial figures.
     lo, hi = max(5, build_total // 8), max(20, build_total // 2)
     ranged = [f for f in ranged if lo <= f.points <= hi]
