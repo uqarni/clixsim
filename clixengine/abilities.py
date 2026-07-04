@@ -140,19 +140,22 @@ def damage_after_defenses(target, raw: int, source_type: str, is_magic: bool) ->
 
 
 def ranged_damage_bonus(state, attacker, target) -> int:
-    """Magic Enhancement: +1 damage to figures hit by a ranged attack from a
-    figure in base contact with the enhancer. A Magic Immune figure neither
-    *receives* nor *inflicts* the extra click (ability 108)."""
+    """Magic Enhancement: +1 damage per enhancer in base contact with the
+    attacker when it makes a ranged combat attack. STACKS — each enhancer is
+    its own warrior granting "1 extra click" (the classic Demi-Magus battery:
+    four in contact = +4). A Magic Immune figure neither *receives* nor
+    *inflicts* the extra clicks (ability 108)."""
     if _magic_immune(target) or _magic_immune(attacker):
         return 0
     from .geometry import in_base_contact
 
+    bonus = 0
     for friend in state.friends_of(attacker, include_self=False):
         if has(friend, MAGIC_ENHANCEMENT) and in_base_contact(
             attacker.position, attacker.base_radius, friend.position, friend.base_radius
         ):
-            return 1
-    return 0
+            bonus += 1
+    return bonus
 
 
 def vampirism_heal(attacker) -> int:

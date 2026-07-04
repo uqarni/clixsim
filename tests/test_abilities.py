@@ -514,3 +514,73 @@ def test_battle_fury_reported_as_capture_pending(db):
     cov = e.ability_coverage()
     assert any(a["id"] == 88 for a in cov["capture_pending"])   # Battle Fury
     assert all(a["id"] != 88 for a in cov["implemented"])       # not overstated
+
+
+def test_magic_enhancement_stacks_per_enhancer(db):
+    """Four Demi-Magi touching the attacker = +4 (each enhancer is its own
+    warrior granting '1 extra click' — the classic battery; the engine used
+    to cap the bonus at +1)."""
+    import math
+    from clixengine import abilities as ab
+    from .conftest import build_engine
+
+    demi = next(f for f in db.all_figures()
+                if ab.MAGIC_ENHANCEMENT in f.all_ability_ids() and not f.is_unique)
+    shooter = next(f for f in db.all_figures()
+                   if f.range >= 8 and ab.MAGIC_IMMUNITY not in f.all_ability_ids()
+                   and ab.MAGIC_ENHANCEMENT not in f.all_ability_ids())
+    e = build_engine(db, [
+        ("human", shooter.id, (10, 10), math.pi / 2, 0),
+        ("human", demi.id, (10, 8.9), math.pi / 2, 0),
+        ("human", demi.id, (10, 11.1), math.pi / 2, 0),
+        ("human", demi.id, (8.9, 10), math.pi / 2, 0),
+        ("human", demi.id, (11.1, 10), math.pi / 2, 0),
+        ("llm", "Werebear", (10, 16), -math.pi / 2, 0),
+    ], active="human")
+    a, t = e.state.figure(0), e.state.figure(5)
+    if ab.MAGIC_ENHANCEMENT not in e.state.figure(1).active_ability_ids():
+        import pytest
+        pytest.skip("enhancement not on starting click")
+    assert ab.ranged_damage_bonus(e.state, a, t) == 4
+
+
+def test_magic_blast_receives_enhancement(db):
+    """Magic Blast is given as a ranged combat action — the battery's extra
+    clicks apply to it (they never did before this fix)."""
+    import math
+    from clixengine import abilities as ab
+    from clixengine.intents import RangedIntent
+    from .conftest import build_engine
+
+    blaster = next(f for f in db.all_figures()
+                   if ab.MAGIC_BLAST in f.all_ability_ids() and f.range >= 8
+                   and ab.MAGIC_ENHANCEMENT not in f.all_ability_ids())
+    demi = next(f for f in db.all_figures()
+                if ab.MAGIC_ENHANCEMENT in f.all_ability_ids() and not f.is_unique)
+    e = build_engine(db, [
+        ("human", blaster.id, (10, 10), math.pi / 2, 0),
+        ("human", demi.id, (10, 8.9), math.pi / 2, 0),
+        ("human", demi.id, (8.9, 10), math.pi / 2, 0),
+        ("llm", "Werebear", (10, 16), -math.pi / 2, 0),
+    ], active="human")
+    f = e.state.figure(0)
+    if ab.MAGIC_BLAST not in f.active_ability_ids():
+        import pytest
+        pytest.skip("blast not on starting click")
+    t = e.state.figure(3)
+    before = t.current_click
+    # Roll until a hit lands (deterministic rng; a few attempts suffice).
+    for _ in range(8):
+        r = e.apply(RangedIntent(0, (3,), variant="magic_blast"))
+        assert r.ok
+        ev = next(x for x in r.events if x["type"] == "magic_blast")
+        if ev["result"] in ("hit", "crit_hit"):
+            # d6 roll + (crit?) + 2 enhancers -> clicks dealt >= 1+2 = 3
+            assert ev["clicks"] >= 3 or t.eliminated
+            break
+        e.state.figure(0).action_tokens = 0  # keep swinging without pushes
+        e._acted_uids.clear()
+        e._actions_spent = 0
+    else:
+        import pytest
+        pytest.skip("no hit landed in 8 tries")

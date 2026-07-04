@@ -263,11 +263,13 @@ def _ranged_candidates(engine, figure, enemies, cands, aids):
             # the resolver (raw effective defense, no hindering/height bonus).
             hit = hit_probability(
                 figure.attack, ab.effective_defense(engine.state, t, "ranged", 0))
+            enh = ab.ranged_damage_bonus(engine.state, figure, t)  # Magus battery
             cands.append(Candidate(
                 RangedIntent(figure.uid, (t.uid,), variant="magic_blast"), "magic_blast",
-                f"Magic Blast {t.short_name}",
+                f"Magic Blast {t.short_name}" + (f" (+{enh} enhanced)" if enh else ""),
                 {"target": t.uid, "target_name": t.short_name, "hit_odds": round(hit, 3),
-                 "expected_clicks": round(hit * D6_AVG, 2), "unblockable": True},
+                 "expected_clicks": round(hit * (D6_AVG + enh), 2), "unblockable": True,
+                 **({"enhancement_bonus": enh} if enh else {})},
             ))
     # Flame/Lightning: splash to figures touching the target (damage reduced to 1).
     if ab.FLAME_LIGHTNING in aids:

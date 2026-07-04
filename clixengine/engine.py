@@ -1214,6 +1214,9 @@ class Engine:
         if res in ("hit", "crit_hit"):
             roll = self.rng.d6("magic_blast_damage")
             raw = roll + (1 if res == "crit_hit" else 0)
+            # Magic Blast is GIVEN as a ranged combat action, so Magic
+            # Enhancement's extra clicks apply (the Magus-battery combo).
+            raw += ab.ranged_damage_bonus(self.state, f, t)
             dmg = self._deal_combat_damage(t, raw, source_type="ranged", is_magic=True)
             events.append(self.log.emit("magic_blast", attacker=f.uid, target=t.uid,
                           dice=[d1, d2], result=res, roll=roll, clicks=dmg,
