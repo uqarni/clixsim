@@ -37,7 +37,14 @@ export default function Construction({
   const readyView = useRef<GameView | null>(null);
 
   useEffect(() => {
-    const url = newGameStreamUrl(config.mode, config.points, config.opponent, config.seed, humanIds);
+    const url = newGameStreamUrl(
+      config.mode,
+      config.points,
+      config.opponent,
+      config.seed,
+      humanIds,
+      config.expansions,
+    );
     const es = new EventSource(url);
     es.onmessage = (m) => {
       const e = JSON.parse(m.data) as ConstructEvent;

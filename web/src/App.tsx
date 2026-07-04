@@ -31,7 +31,14 @@ import NewGame, { type GameConfig } from "./components/NewGame";
 import OpponentPanel from "./components/OpponentPanel";
 import TerrainPlacement from "./components/TerrainPlacement";
 import TurnHud from "./components/TurnHud";
-import { effectiveSpeed, moveBlockReason, pointToSegment, snapToContactRing } from "./terrainGeom";
+import {
+  centersAt,
+  effectiveSpeed,
+  figureCenters,
+  moveBlockReason,
+  pointToSegment,
+  snapToContactRing,
+} from "./terrainGeom";
 
 interface MoveGhost {
   dest: [number, number];
@@ -46,11 +53,29 @@ interface PendingMove {
 }
 
 const MAX_LOG = 200;
-const CLOSE_KINDS = ["close", "weapon_master"];
-const RANGED_KINDS = ["ranged", "magic_blast", "flame_lightning", "shockwave"];
+// charge_strike / bound_shot are the free Charge/Bound rider follow-ups (P5).
+const CLOSE_KINDS = ["close", "weapon_master", "charge_strike"];
+const RANGED_KINDS = ["ranged", "magic_blast", "flame_lightning", "shockwave", "bound_shot"];
 
 function facingToward(from: [number, number], to: [number, number]): number {
   return Math.atan2(to[1] - from[1], to[0] - from[0]);
+}
+
+// The mover's base-circle centre nearest to `from` — a mounted mover that made
+// contact with its REAR circle should have spin handles/facing defaults aim at
+// the actual threat, not a front centre a full base-length away.
+function nearestCenterOf(mover: FigureView, from: [number, number]): [number, number] {
+  const cs = figureCenters(mover);
+  let best = cs[0];
+  let bd = Infinity;
+  for (const c of cs) {
+    const d = Math.hypot(c[0] - from[0], c[1] - from[1]);
+    if (d < bd) {
+      bd = d;
+      best = c;
+    }
+  }
+  return best as [number, number];
 }
 function annTarget(c: Candidate): number | null {
   const a = c.annotation;
@@ -71,7 +96,13 @@ const GREEN = "#5bd68a";
 function deriveFx(events: GameEvent[], view: GameView): Fx[] {
   const pos = (uid: unknown): [number, number] | null => {
     const f = view.figures.find((x) => x.uid === uid);
-    return f ? f.pos : null;
+    if (!f) return null;
+    // Anchor fx at the CAPSULE midpoint for mounted figures so a kill on the
+    // rear circle doesn't float off the body.
+    const cs = figureCenters(f);
+    return cs.length > 1
+      ? [(cs[0][0] + cs[1][0]) / 2, (cs[0][1] + cs[1][1]) / 2]
+      : f.pos;
   };
   const num = (v: unknown) => (typeof v === "number" ? v : 0);
   const out: Fx[] = [];
@@ -140,6 +171,9 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [oppThoughts, setOppThoughts] = useState<{ summary: string; reasoning: string; fallback: boolean }[]>([]);
   const [freeSpin, setFreeSpin] = useState<{ spinners: number[]; idx: number; by: number | null; facing: number } | null>(null);
+  // Charge/Bound rider (P5): "Skip" hides the offer locally without sending
+  // anything — the engine expires it when any other intent arrives.
+  const [riderSkipped, setRiderSkipped] = useState(false);
   // Interactive formation move (P4-R14): members are placed ONE AT A TIME with the
   // normal drag/facing UX; the whole arrangement submits as a single MoveIntent.
   const [formationStage, setFormationStage] = useState<{
@@ -154,7 +188,14 @@ export default function App() {
   const [rigidMove, setRigidMove] = useState<{
     uids: number[];
     speed: number; // slowest member's hindering-halved speed (P4-R13)
-    origin: { uid: number; pos: [number, number]; facing: number; radius: number; name: string }[];
+    origin: {
+      uid: number;
+      pos: [number, number];
+      facing: number;
+      radius: number;
+      name: string;
+      mounted: boolean; // double-base member: rear circle checked/rendered too
+    }[];
     centroid: [number, number];
     offset: [number, number]; // pivot displacement from the original centroid
     theta: number; // rotation about the pivot (radians)
@@ -233,14 +274,28 @@ export default function App() {
         setView(e.view);
         viewRef.current = e.view;
         finish(); // close this stream; we re-open it to resume once spinning is done
-        const uid = e.spinners[0];
-        const fig = e.view.figures.find((f) => f.uid === uid);
-        const mover = e.by != null ? e.view.figures.find((f) => f.uid === e.by) : null;
-        if (fig) {
-          const facing = mover ? facingToward(fig.pos, mover.pos) : (fig.facing_deg * Math.PI) / 180;
+        // Mounted figures never get a free spin (P5-R6) — filter defensively;
+        // a stale server list must not soft-lock the banner on a figure that
+        // can't spin. Drop unknown/eliminated uids for the same reason.
+        const spinners = e.spinners.filter((u) => {
+          const f = e.view.figures.find((x) => x.uid === u);
+          return !!f && !f.eliminated && !f.mounted;
+        });
+        const uid = spinners[0];
+        const fig = uid != null ? e.view.figures.find((f) => f.uid === uid) : undefined;
+        if (uid != null && fig) {
+          const mover = e.by != null ? e.view.figures.find((f) => f.uid === e.by) : null;
+          const facing = mover
+            ? facingToward(fig.pos, nearestCenterOf(mover, fig.pos))
+            : (fig.facing_deg * Math.PI) / 180;
           setSelectedUid(uid);
-          setFreeSpin({ spinners: e.spinners, idx: 0, by: e.by, facing });
+          setFreeSpin({ spinners, idx: 0, by: e.by, facing });
           log([{ type: "info", summary: "Free spin — an enemy reached your line; re-face for free." }]);
+        } else {
+          // No spinner armed (all filtered out, uid unknown, or figure gone) —
+          // RESUME the opponent's stream on EVERY fall-through, or its turn
+          // stays paused forever.
+          runOpponentStream();
         }
       } else if (e.type === "done") {
         setView(e.view);
@@ -281,7 +336,11 @@ export default function App() {
         const nu = freeSpin.spinners[nextIdx];
         const fig = v.figures.find((f) => f.uid === nu);
         const mover = freeSpin.by != null ? v.figures.find((f) => f.uid === freeSpin.by) : null;
-        const facing = fig ? (mover ? facingToward(fig.pos, mover.pos) : (fig.facing_deg * Math.PI) / 180) : 0;
+        const facing = fig
+          ? mover
+            ? facingToward(fig.pos, nearestCenterOf(mover, fig.pos))
+            : (fig.facing_deg * Math.PI) / 180
+          : 0;
         setSelectedUid(nu);
         setFreeSpin({ ...freeSpin, idx: nextIdx, facing });
       } else {
@@ -306,6 +365,30 @@ export default function App() {
     () => (freeSpin && view ? view.figures.find((f) => f.uid === freeSpin.spinners[freeSpin.idx]) ?? null : null),
     [freeSpin, view],
   );
+
+  // Charge/Bound rider offer (P5): the engine armed a FREE follow-up attack
+  // for this figure after its <=1x move (meta.pending_rider). Derived from the
+  // view, so it auto-clears the moment the server reports it gone.
+  const pendingRider = useMemo(() => {
+    const pr = view?.meta.pending_rider;
+    if (!view || !pr || riderSkipped || view.meta.ended || view.meta.active_player !== "human") {
+      return null;
+    }
+    const f = view.figures.find((x) => x.uid === pr.uid);
+    if (!f || f.owner !== "human" || f.eliminated) return null;
+    return { uid: pr.uid, kind: pr.kind, fig: f };
+  }, [view, riderSkipped]);
+
+  // A fresh offer resets the local skip and selects the striker so its rider
+  // candidates (charge_strike / bound_shot) load into the Actions panel.
+  const riderUid = view?.meta.pending_rider?.uid ?? null;
+  useEffect(() => {
+    setRiderSkipped(false);
+    if (riderUid != null) {
+      const f = viewRef.current?.figures.find((x) => x.uid === riderUid);
+      if (f && f.owner === "human" && !f.eliminated) setSelectedUid(riderUid);
+    }
+  }, [riderUid]);
 
   // Selected figure's legal candidates.
   useEffect(() => {
@@ -473,16 +556,24 @@ export default function App() {
   );
 
   const ghostFor = useCallback(
-    (fig: FigureView, dest: [number, number], faceUid?: number): MoveGhost => {
+    (fig: FigureView, dest: [number, number], faceUid?: number, facingOverride?: number): MoveGhost => {
       const dist = Math.hypot(dest[0] - fig.pos[0], dest[1] - fig.pos[1]);
       // Face the figure we snapped onto when it's an ENEMY (that's a charge);
-      // otherwise face the nearest enemy from the destination.
+      // otherwise face the nearest enemy from the destination. An explicit
+      // facingOverride (the aim step re-checking a chosen facing) wins.
       const snapTarget =
         faceUid != null
           ? view?.figures.find((f) => f.uid === faceUid && f.owner !== fig.owner && !f.eliminated)
           : undefined;
       const enemy = snapTarget ?? nearestEnemy(dest, fig.owner);
-      const facing = enemy ? facingToward(dest, [enemy.pos[0], enemy.pos[1]]) : (fig.facing_deg * Math.PI) / 180;
+      const facing =
+        facingOverride ??
+        (enemy ? facingToward(dest, [enemy.pos[0], enemy.pos[1]]) : (fig.facing_deg * Math.PI) / 180);
+      // Every legality check below runs on the FULL capsule at this facing —
+      // for a mounted figure the rear circle swings with it.
+      const mounted = !!fig.mounted;
+      const destCenters = centersAt(dest, facing, fig.base_radius, mounted);
+      const startCenters = figureCenters(fig);
       const inEnemyContact =
         !!view &&
         fig.in_base_contact_with.some((uid) => {
@@ -493,41 +584,83 @@ export default function App() {
       // hindering-halved speed, blocking endpoints/paths, the entry-stop rule.
       const terrain = view?.terrain ?? [];
       const flies = fig.active_abilities.some((a) => a.name === "Flight" || a.name === "Aquatic");
+      // Charge/Bound (P5): forgoing the rider strike doubles the speed budget;
+      // the 2x applies BEFORE hindering halving. The drag allows the full 2x —
+      // the engine arms the rider only for <=1x moves. (Charge/Bound-active
+      // figures can't join formations, so no interaction with staging.)
+      const chargeBound =
+        !formationStage &&
+        fig.active_abilities.some((a) => a.name === "Charge" || a.name === "Bound");
+      const budget = chargeBound ? fig.speed * 2 : fig.speed;
       const eff = formationStage
         ? formationStage.speed // whole formation paces to the slowest member (P4-R13)
         : flies
-          ? fig.speed
-          : effectiveSpeed(fig.speed, fig.pos, fig.base_radius, terrain);
+          ? budget
+          : effectiveSpeed(budget, startCenters, fig.base_radius, terrain);
       let reason: string | undefined;
-      if (dist > eff + 1e-6) {
-        reason = eff < fig.speed ? `too far — formation/hindering speed ${eff}″` : `too far — speed ${eff}″`;
-      } else {
-        reason = moveBlockReason(fig.pos, dest, fig.base_radius, terrain, flies && !formationStage) ?? undefined;
+      // Board bounds for BOTH circles: the drag clamp only guarantees the
+      // front dot; a rear circle can hang off the edge at some facings.
+      if (view) {
+        const r = fig.base_radius;
+        const { width, height } = view.meta.board;
+        for (const c of destCenters) {
+          if (c[0] < r - 1e-9 || c[0] > width - r + 1e-9 || c[1] < r - 1e-9 || c[1] > height - r + 1e-9) {
+            reason = "would leave the board";
+            break;
+          }
+        }
       }
-      // Nobody may end overlapping another base (mirror of end_on_base).
+      if (!reason && dist > eff + 1e-6) {
+        reason = chargeBound
+          ? `too far — 2× speed ${eff}″`
+          : eff < fig.speed
+            ? `too far — formation/hindering speed ${eff}″`
+            : `too far — speed ${eff}″`;
+      } else if (!reason) {
+        reason =
+          moveBlockReason(
+            fig.pos,
+            dest,
+            fig.base_radius,
+            terrain,
+            flies && !formationStage,
+            mounted ? { from: startCenters[1], dest: destCenters[1] } : null,
+          ) ?? undefined;
+      }
+      // Nobody may end overlapping another base — min over circle pairs, both
+      // sides capsule-aware (mirror of end_on_base).
       if (!reason && view) {
         for (const o of view.figures) {
           if (o.eliminated || o.uid === fig.uid) continue;
           if (formationStage?.placed.some((p) => p.uid === o.uid)) continue; // staged elsewhere
-          if (Math.hypot(dest[0] - o.pos[0], dest[1] - o.pos[1]) < fig.base_radius + o.base_radius - 0.02) {
+          const oCs = figureCenters(o);
+          const lim = fig.base_radius + o.base_radius - 0.02;
+          if (destCenters.some((mc) => oCs.some((oc) => Math.hypot(mc[0] - oc[0], mc[1] - oc[1]) < lim))) {
             reason = `overlaps ${o.short_name}'s base`;
             break;
           }
         }
       }
       // Formation cohesion, live: from the 2nd member on, each placement must end
-      // in base contact with an already-placed member (P4-R14) and not on top of one.
+      // in base contact with an already-placed member (P4-R14) and not on top of
+      // one. Staged members' circles derive from their STAGED dest+facing.
       if (!reason && formationStage && formationStage.placed.length > 0) {
-        const touching = formationStage.placed.some((p) => {
-          const pf = view?.figures.find((f) => f.uid === p.uid);
-          if (!pf) return false;
-          const d = Math.hypot(dest[0] - p.dest[0], dest[1] - p.dest[1]);
-          return d <= fig.base_radius + pf.base_radius + 0.02;
-        });
-        const overlapping = formationStage.placed.some((p) => {
-          const pf = view?.figures.find((f) => f.uid === p.uid);
-          return pf && Math.hypot(dest[0] - p.dest[0], dest[1] - p.dest[1]) < fig.base_radius + pf.base_radius - 0.02;
-        });
+        const placedCircles = formationStage.placed
+          .map((p) => {
+            const pf = view?.figures.find((f) => f.uid === p.uid);
+            return pf
+              ? { cs: centersAt(p.dest, p.facing, pf.base_radius, !!pf.mounted), r: pf.base_radius }
+              : null;
+          })
+          .filter((x): x is { cs: [number, number][]; r: number } => x !== null);
+        const gapTo = (pc: { cs: [number, number][]; r: number }) =>
+          Math.min(
+            ...destCenters.flatMap((mc) =>
+              pc.cs.map((oc) => Math.hypot(mc[0] - oc[0], mc[1] - oc[1]) - (fig.base_radius + pc.r)),
+            ),
+          );
+        const touching = placedCircles.some((pc) => gapTo(pc) <= 0.02);
+        const overlapping = placedCircles.some((pc) => gapTo(pc) < -0.02);
         if (overlapping) reason = "overlaps a placed member";
         else if (!touching) reason = "must end touching the formation";
       }
@@ -543,10 +676,24 @@ export default function App() {
   const snapToBase = useCallback(
     (fig: FigureView, dest: [number, number]): { point: [number, number]; uid: number }[] => {
       if (!view) return [];
-      const stagedByUid = new Map((formationStage?.placed ?? []).map((p) => [p.uid, p.dest]));
-      const targets = view.figures
-        .filter((nf) => !nf.eliminated && nf.uid !== fig.uid)
-        .map((nf) => ({ pos: stagedByUid.get(nf.uid) ?? nf.pos, radius: nf.base_radius, uid: nf.uid }));
+      const stagedByUid = new Map((formationStage?.placed ?? []).map((p) => [p.uid, p]));
+      // Mounted targets contribute BOTH circles with DISTINCT keys — the snap
+      // filter must never exempt a figure's sibling circle (waist-overlap
+      // bug); the figure-level uid is preserved for pockets and faceUid.
+      // A staged member's circles derive from its STAGED dest+facing. The
+      // MOVER snaps by its front circle (charge face-first); ghostFor then
+      // legality-checks its rear.
+      const targets: { pos: [number, number]; radius: number; uid: number; key: string }[] = [];
+      for (const nf of view.figures) {
+        if (nf.eliminated || nf.uid === fig.uid) continue;
+        const st = stagedByUid.get(nf.uid);
+        const cs = st
+          ? centersAt(st.dest, st.facing, nf.base_radius, !!nf.mounted)
+          : figureCenters(nf);
+        cs.forEach((c, i) =>
+          targets.push({ pos: c as [number, number], radius: nf.base_radius, uid: nf.uid, key: `${nf.uid}:${i}` }),
+        );
+      }
       const isEnemy = (uid: number) =>
         view.figures.some((f) => f.uid === uid && f.owner !== fig.owner && !f.eliminated);
       // Ranked candidates (pockets touching two bases first when the cursor says
@@ -580,37 +727,74 @@ export default function App() {
       const dest: [number, number] = [pivot[0] + rx * cos - ry * sin, pivot[1] + rx * sin + ry * cos];
       const facing = m.facing + theta;
       const dist = Math.hypot(dest[0] - m.pos[0], dest[1] - m.pos[1]);
+      // Mounted members: rear circles derive from the STAGED facings (start
+      // facing at the origin, rotated facing at the destination).
+      const startCs = centersAt(m.pos, m.facing, m.radius, m.mounted);
+      const destCs = centersAt(dest, facing, m.radius, m.mounted);
       let bad: string | null = null;
-      if (dest[0] < m.radius || dest[0] > width - m.radius || dest[1] < m.radius || dest[1] > height - m.radius) {
+      if (
+        destCs.some(
+          (c) => c[0] < m.radius || c[0] > width - m.radius || c[1] < m.radius || c[1] > height - m.radius,
+        )
+      ) {
         bad = `${m.name} would leave the board`;
       } else if (dist > speed + 1e-9) {
         bad = `${m.name} exceeds formation speed ${speed}″`;
       } else {
-        const t = moveBlockReason(m.pos, dest, m.radius, view.terrain, false);
+        const t = moveBlockReason(
+          m.pos,
+          dest,
+          m.radius,
+          view.terrain,
+          false,
+          m.mounted ? { from: startCs[1], dest: destCs[1] } : null,
+        );
         if (t) bad = `${m.name}: ${t}`;
       }
       if (!bad) {
+        // Both mover sweep segments (front + rear) vs every OBSTACLE CIRCLE —
+        // a mounted bystander blocks with both halves. Approximation of the
+        // rotating capsule's true swept region; the engine re-validates.
+        const sweeps: [[number, number], [number, number]][] = [];
+        if (dist > 1e-9) sweeps.push([m.pos, dest]);
+        if (m.mounted && Math.hypot(destCs[1][0] - startCs[1][0], destCs[1][1] - startCs[1][1]) > 1e-9) {
+          sweeps.push([startCs[1] as [number, number], destCs[1] as [number, number]]);
+        }
         for (const o of others) {
-          if (Math.hypot(dest[0] - o.pos[0], dest[1] - o.pos[1]) < m.radius + o.base_radius - 0.02) {
+          const oCs = figureCenters(o);
+          const lim = m.radius + o.base_radius - 0.02;
+          if (destCs.some((mc) => oCs.some((oc) => Math.hypot(mc[0] - oc[0], mc[1] - oc[1]) < lim))) {
             bad = `${m.name} would end on ${o.short_name}'s base`;
             break;
           }
-          if (dist > 1e-9 && pointToSegment(o.pos, m.pos, dest) <= o.base_radius + 1e-6) {
+          if (
+            sweeps.length &&
+            oCs.some((oc) =>
+              sweeps.some(([s0, s1]) => pointToSegment(oc as [number, number], s0, s1) <= o.base_radius + 1e-6),
+            )
+          ) {
             bad = `${m.name}'s path crosses ${o.short_name}'s base`;
             break;
           }
         }
       }
       if (bad && !reason) reason = bad;
-      return { uid: m.uid, dest, facing, radius: m.radius, ok: !bad };
+      return { uid: m.uid, dest, facing, radius: m.radius, mounted: m.mounted, ok: !bad };
     });
     // End cohesion on the EXACT numbers we submit: rigidity preserves true
     // distances, but the view rounds positions to 3 decimals — a pair whose
     // real gap sits a hair under the 0.02" touching tolerance can round to
     // just over it, and the engine checks cohesion on the submitted dests.
     if (!reason && members.length > 1) {
-      const touch = (a: (typeof members)[0], b: (typeof members)[0]) =>
-        Math.hypot(a.dest[0] - b.dest[0], a.dest[1] - b.dest[1]) <= a.radius + b.radius + 0.02;
+      // Cohesion touch = min over circle pairs of the members' CAPSULES at
+      // their staged dest+facing.
+      const touch = (a: (typeof members)[0], b: (typeof members)[0]) => {
+        const aCs = centersAt(a.dest, a.facing, a.radius, a.mounted);
+        const bCs = centersAt(b.dest, b.facing, b.radius, b.mounted);
+        return aCs.some((ac) =>
+          bCs.some((bc) => Math.hypot(ac[0] - bc[0], ac[1] - bc[1]) <= a.radius + b.radius + 0.02),
+        );
+      };
       const seen = new Set<number>([0]);
       const stack = [0];
       while (stack.length) {
@@ -695,10 +879,29 @@ export default function App() {
     [view, activeUid, ghostFor, snapToBase, log, rigidMove, onRigidDrag],
   );
 
+  // Formation staging aim step: live legality of the pending member at its
+  // AIMED facing — "Confirm member" greys out (with the reason) when the
+  // handle swings a rear circle somewhere illegal.
+  const stagingPendingBad = useMemo(() => {
+    if (!formationStage || !pendingMove || !view || stagingUid == null) return null;
+    const fig = view.figures.find((f) => f.uid === stagingUid);
+    if (!fig) return null;
+    const g = ghostFor(fig, pendingMove.dest, undefined, pendingMove.facing);
+    return g.ok ? null : g.reason ?? "illegal placement";
+  }, [formationStage, pendingMove, view, stagingUid, ghostFor]);
+
   const confirmMove = useCallback(async () => {
     const fig = view?.figures.find((f) => f.uid === activeUid);
     if (!fig || !pendingMove || busy) return;
     if (formationStage) {
+      // The aim step is legality-bearing for capsules: the handle can swing a
+      // rear circle into a member/wall/off-board AFTER the drop was green —
+      // re-run the ghost check with the AIMED facing before staging.
+      const g = ghostFor(fig, pendingMove.dest, undefined, pendingMove.facing);
+      if (!g.ok) {
+        log([{ type: "rejected", summary: `Can't confirm ${fig.short_name} here — ${g.reason ?? "illegal placement"}. Re-aim or re-place.` }]);
+        return;
+      }
       // Stage this member locally; the engine validates the whole formation at submit.
       const { dest, facing } = pendingMove;
       setPendingMove(null);
@@ -713,7 +916,8 @@ export default function App() {
       const check = await validateMove(fig.uid, pendingMove.dest, pendingMove.facing);
       if (!check.ok) {
         log([{ type: "rejected", summary: `Rejected: ${check.reason ?? "illegal move"}${check.detail ? ` — ${check.detail}` : ""}` }]);
-        setPendingMove(null);
+        // KEEP pendingMove: with capsules an aim-time facing is often the
+        // problem — let the user re-aim instead of destroying the placement.
         return;
       }
       handleApply(
@@ -724,7 +928,7 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  }, [view, activeUid, pendingMove, busy, formationStage, handleApply, log]);
+  }, [view, activeUid, pendingMove, busy, formationStage, ghostFor, handleApply, log]);
 
   // --- interactive formation move (P4-R14: members placed one at a time) ----
   const startFormationStaging = useCallback(
@@ -738,7 +942,7 @@ export default function App() {
         log([{ type: "rejected", summary: "That formation is no longer available — a member has already acted." }]);
         return;
       }
-      const speeds = figs.map((f) => effectiveSpeed(f!.speed, f!.pos, f!.base_radius, view.terrain));
+      const speeds = figs.map((f) => effectiveSpeed(f!.speed, figureCenters(f!), f!.base_radius, view.terrain));
       setArmed(null);
       setMoveGhost(null);
       setPendingMove(null);
@@ -784,7 +988,9 @@ export default function App() {
         (f) =>
           !f.eliminated &&
           f.owner === "human" &&
-          f.pos[0] >= x0 && f.pos[0] <= x1 && f.pos[1] >= y0 && f.pos[1] <= y1,
+          // EITHER circle centre inside the box selects a mounted figure — a
+          // box over the horse's back half must not come up empty.
+          figureCenters(f).some(([px, py]) => px >= x0 && px <= x1 && py >= y0 && py <= y1),
       )
       .sort((p, q) => p.pos[0] - q.pos[0] || p.pos[1] - q.pos[1])
       .map((f) => f.uid);
@@ -802,8 +1008,12 @@ export default function App() {
       .filter((f): f is FigureView => !!f && !f.eliminated);
     if (figs.length < 2) return null;
     const names = figs.map((f) => f.short_name);
+    // Charge/Bound-active figures may not join ANY formation (P5) — same
+    // cancel-the-optional-ability escape hatch as Flight/Aquatic/Quickness.
     const barredOf = (f: FigureView) =>
-      f.active_abilities.find((x) => ["Flight", "Aquatic", "Quickness"].includes(x.name));
+      f.active_abilities.find((x) =>
+        ["Flight", "Aquatic", "Quickness", "Charge", "Bound"].includes(x.name),
+      );
     let reason: string | null = null;
     if (figs.length < 3 || figs.length > 5) {
       reason = `movement formations are 3–5 figures (${figs.length} selected)`;
@@ -828,14 +1038,26 @@ export default function App() {
         const adj = new Map(figs.map((f) => [f.uid, f.in_base_contact_with.filter((u) => ids.has(u))]));
         const loner = figs.find((f) => (adj.get(f.uid) ?? []).length === 0);
         if (loner) {
+          // Gap readout = min over circle pairs — a mounted loner touching via
+          // its rear circle must not read "0.55″ short" while the engine's
+          // contact truth (in_base_contact_with, above) says it's touching.
+          const lonerCs = figureCenters(loner);
           const gap = Math.min(
             ...figs
               .filter((o) => o.uid !== loner.uid)
-              .map(
-                (o) =>
-                  Math.hypot(loner.pos[0] - o.pos[0], loner.pos[1] - o.pos[1]) -
-                  (loner.base_radius + o.base_radius),
-              ),
+              .map((o) => {
+                const oCs = figureCenters(o);
+                let best = Infinity;
+                for (const lc of lonerCs) {
+                  for (const oc of oCs) {
+                    best = Math.min(
+                      best,
+                      Math.hypot(lc[0] - oc[0], lc[1] - oc[1]) - (loner.base_radius + o.base_radius),
+                    );
+                  }
+                }
+                return best;
+              }),
           );
           reason = `${loner.short_name} isn't touching the group — it's ${Math.max(0, gap).toFixed(2)}″ short. Drag it next to a member (it snaps).`;
         }
@@ -927,6 +1149,7 @@ export default function App() {
         facing: (f.facing_deg * Math.PI) / 180,
         radius: f.base_radius,
         name: f.short_name,
+        mounted: !!f.mounted,
       };
     });
     const centroid: [number, number] = [
@@ -1006,7 +1229,9 @@ export default function App() {
     const uid = formationStage.uids[formationStage.placed.length];
     const f = view.figures.find((x) => x.uid === uid);
     if (!f) return;
-    const g = ghostFor(f, f.pos); // staying put must still satisfy cohesion
+    // Staying put keeps the CURRENT facing (that's what gets staged below), so
+    // validate with it — the auto-aim facing would swing a mounted rear.
+    const g = ghostFor(f, f.pos, undefined, (f.facing_deg * Math.PI) / 180);
     if (!g.ok) {
       log([{ type: "rejected", summary: `Can't leave ${f.short_name} here — ${g.reason ?? "breaks the formation"}.` }]);
       return;
@@ -1222,13 +1447,18 @@ export default function App() {
                       radius: m.radius,
                       ok: m.ok,
                       uid: m.uid,
+                      mounted: m.mounted,
                     }))
                   : formationStage
-                    ? formationStage.placed.map((p) => ({
-                        dest: p.dest,
-                        facing: p.facing,
-                        radius: view.figures.find((f) => f.uid === p.uid)?.base_radius ?? 0.55,
-                      }))
+                    ? formationStage.placed.map((p) => {
+                        const pf = view.figures.find((f) => f.uid === p.uid);
+                        return {
+                          dest: p.dest,
+                          facing: p.facing,
+                          radius: pf?.base_radius ?? 0.55,
+                          mounted: !!pf?.mounted,
+                        };
+                      })
                     : null
               }
               dimUids={
@@ -1271,6 +1501,23 @@ export default function App() {
                 </div>
               </div>
             )}
+            {pendingRider && !freeSpin && (
+              <div className="spin-banner rider-banner">
+                <div className="spin-banner-title">
+                  {pendingRider.kind === "close" ? "Charge" : "Bound"} — strike now (free)
+                </div>
+                <div className="spin-banner-body">
+                  <strong>{pendingRider.fig.short_name}</strong> may make a free{" "}
+                  {pendingRider.kind === "close" ? "close attack" : "ranged attack"} right now — pick a
+                  target in the Actions panel. Any other action forfeits it.
+                </div>
+                <div className="spin-banner-btns">
+                  <button className="btn" type="button" onClick={() => setRiderSkipped(true)}>
+                    Skip
+                  </button>
+                </div>
+              </div>
+            )}
             <ActionPanel
               view={view}
               selectedFig={selectedFig}
@@ -1295,12 +1542,19 @@ export default function App() {
                         view.figures.find((f) => f.uid === stagingUid)?.short_name ?? null,
                       speed: formationStage.speed,
                       canDefer: formationStage.placed.length < formationStage.uids.length - 1,
+                      pendingBad: stagingPendingBad,
                     }
                   : null
               }
               group={groupInfo}
               assist={assistOptions}
               onAssist={onAssistAttack}
+              rider={
+                pendingRider && selectedUid === pendingRider.uid
+                  ? { kind: pendingRider.kind, name: pendingRider.fig.short_name }
+                  : null
+              }
+              onRiderSkip={() => setRiderSkipped(true)}
               onFormationRigid={startRigidMove}
               rigidPanel={
                 rigidMove && rigidGhost

@@ -29,7 +29,12 @@ export default function FigCard({ fig, selected, onSelect }: Props) {
   return (
     <button className={cls} onClick={() => onSelect(fig.uid)} type="button">
       <div className="fig-card-top">
-        <span className="fig-name">{fig.name}</span>
+        <span className="fig-name">
+          {fig.mounted && (
+            <span title="Mounted — double base (cavalry)" aria-label="mounted">🐴 </span>
+          )}
+          {fig.name}
+        </span>
         <span className="fig-sub">{fig.points} pts</span>
       </div>
 

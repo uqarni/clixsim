@@ -98,9 +98,10 @@ export default function Draft({
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    (isSealed ? getSealedPacks(config.seed).then(setPacks) : getRoster().then(setRoster)).finally(() =>
-      setLoading(false),
-    );
+    (isSealed
+      ? getSealedPacks(config.seed, config.expansions).then(setPacks)
+      : getRoster(config.expansions).then(setRoster)
+    ).finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -252,7 +253,12 @@ export default function Draft({
                       title={f.abilities.join(", ")}
                     >
                       <div className="cand-top">
-                        <span className="cand-name">{f.name}</span>
+                        <span className="cand-name">
+                          {f.mounted && (
+                            <span title="Mounted — double base (cavalry)" aria-label="mounted">🐴 </span>
+                          )}
+                          {f.name}
+                        </span>
                         <RankBadge rank={f.rank} />
                         <span className="cand-pts">{f.points}</span>
                       </div>

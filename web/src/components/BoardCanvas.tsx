@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type PointerEvent as RPE, type WheelEvent as RWE } from "react";
 import type { FigureView, GameView } from "../api";
-import { effectiveSpeed, lofBlocker } from "../terrainGeom";
+import { centersAt, effectiveSpeed, figureCenters, lofBlocker, pointToSegment, rearCenter } from "../terrainGeom";
 
 // A terrain shape being dragged during the placement phase (world coords).
 export interface PlacingGhost {
@@ -72,7 +72,16 @@ interface Props {
   // formation speed that overrides the active figure's reach ring (P4-R13).
   // `ok` colors a ghost green (legal) / red (can't land there); undefined keeps
   // the neutral staged blue.
-  staged?: { dest: [number, number]; facing: number; radius: number; ok?: boolean; uid?: number }[] | null;
+  staged?: {
+    dest: [number, number];
+    facing: number;
+    radius: number;
+    ok?: boolean;
+    uid?: number;
+    // Mounted (double-base) member — the ghost renders as a capsule whose rear
+    // circle derives from the STAGED facing.
+    mounted?: boolean;
+  }[] | null;
   dimUids?: number[];
   reachOverride?: number | null;
   // Rigid formation move: drag ANY member to translate the whole block; once
@@ -151,6 +160,25 @@ function toRad(deg: number): number {
   return (deg * Math.PI) / 180;
 }
 
+// Two-arc capsule (stadium) path in SCREEN coords: the front cap bulges toward
+// the facing, the rear cap closes the far end. One path, so fill/stroke/alpha
+// behave exactly like the single-circle ctx.arc it replaces; called with a
+// bigger radius it draws the OFFSET capsule (halos, reticles, member rings).
+function capsulePath(
+  ctx: CanvasRenderingContext2D,
+  fx: number,
+  fy: number,
+  rx: number,
+  ry: number,
+  r: number,
+) {
+  const sf = Math.atan2(fy - ry, fx - rx); // screen-space rear->front angle
+  ctx.beginPath();
+  ctx.arc(fx, fy, r, sf - Math.PI / 2, sf + Math.PI / 2);
+  ctx.arc(rx, ry, r, sf + Math.PI / 2, sf + (3 * Math.PI) / 2);
+  ctx.closePath();
+}
+
 function drawFigure(
   ctx: CanvasRenderingContext2D,
   t: Transform,
@@ -163,12 +191,17 @@ function drawFigure(
   const r = Math.max(6, f.base_radius * t.scale);
   const hue = f.owner === "human" ? COLORS.human : COLORS.llm;
   const soft = f.owner === "human" ? COLORS.humanSoft : COLORS.llmSoft;
+  // Mounted (double-base) figures render as a capsule; the rear-circle centre
+  // is server-provided when available (figureCenters prefers rear_pos).
+  const cs = figureCenters(f);
+  const rsp = cs.length > 1 ? worldToScreen(t, cs[1][0], cs[1][1]) : null;
 
   ctx.save();
   if (dimmed) ctx.globalAlpha = 0.5;
 
   // Front-arc wedge. facing_deg is a world angle (+y up); negate for the flipped
-  // canvas so the wedge points the right way on screen.
+  // canvas so the wedge points the right way on screen. The arc — like the
+  // health ring and token pips — lives on the FRONT circle.
   const wedgeR = r * 2.4;
   const sf = toRad(-f.facing_deg);
   const ha = toRad(f.arc_deg);
@@ -179,9 +212,13 @@ function drawFigure(
   ctx.fillStyle = soft;
   ctx.fill();
 
-  // Base.
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  // Base: capsule silhouette for mounted, circle otherwise.
+  if (rsp) {
+    capsulePath(ctx, cx, cy, rsp[0], rsp[1], r);
+  } else {
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  }
   ctx.fillStyle = hue;
   ctx.fill();
   ctx.lineWidth = 1.5;
@@ -242,8 +279,14 @@ function drawFigure(
   }
 
   if (selected || hovered) {
-    ctx.beginPath();
-    ctx.arc(cx, cy, ringR + 4, 0, Math.PI * 2);
+    // The halo strokes the OFFSET capsule for mounted figures (a bigger-radius
+    // capsule on the same centres), so selection wraps the whole base.
+    if (rsp) {
+      capsulePath(ctx, cx, cy, rsp[0], rsp[1], ringR + 4);
+    } else {
+      ctx.beginPath();
+      ctx.arc(cx, cy, ringR + 4, 0, Math.PI * 2);
+    }
     ctx.strokeStyle = selected ? COLORS.select : "rgba(255,255,255,0.5)";
     ctx.lineWidth = selected ? 2 : 1.5;
     ctx.stroke();
@@ -255,11 +298,14 @@ function drawFigure(
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
     const tw = ctx.measureText(label).width;
-    const ly = cy + ringR + 6;
+    // Below the CAPSULE's screen bbox (a rear circle pointing at the viewer
+    // would otherwise sit on the label), centred on the capsule midpoint.
+    const lx = rsp ? (cx + rsp[0]) / 2 : cx;
+    const ly = (rsp ? Math.max(cy, rsp[1]) : cy) + ringR + 6;
     ctx.fillStyle = "rgba(10,16,14,0.72)";
-    ctx.fillRect(cx - tw / 2 - 4, ly - 2, tw + 8, 16);
+    ctx.fillRect(lx - tw / 2 - 4, ly - 2, tw + 8, 16);
     ctx.fillStyle = COLORS.text;
-    ctx.fillText(label, cx, ly);
+    ctx.fillText(label, lx, ly);
   }
 
   ctx.restore();
@@ -281,6 +327,8 @@ function inArcFrom(
 
 // While placing/aiming a move next to enemies, ring each ADJACENT enemy green
 // (in the front arc = attackable after this move) or red (behind you — not).
+// Touching = min over mover-circles x enemy-circles: the mover's rear circle
+// derives from the PREVIEWED facing, and a mounted enemy's rear circle counts.
 function drawAdjacencyArcs(
   ctx: CanvasRenderingContext2D,
   t: Transform,
@@ -289,17 +337,41 @@ function drawAdjacencyArcs(
   dest: [number, number],
   facingRad: number,
 ) {
+  const moverCs = centersAt(dest, facingRad, active.base_radius, !!active.mounted);
   for (const o of live) {
     if (o.owner === active.owner || o.uid === active.uid) continue;
-    const touching =
-      Math.hypot(dest[0] - o.pos[0], dest[1] - o.pos[1]) <= active.base_radius + o.base_radius + 0.05;
-    if (!touching) continue;
-    const ok = inArcFrom(dest, facingRad, active.arc_deg, o.pos);
+    const oCs = figureCenters(o);
+    let best = Infinity;
+    let viaRear = false;
+    let nearO: [number, number] = o.pos;
+    moverCs.forEach((mc, mi) => {
+      for (const oc of oCs) {
+        const d = Math.hypot(mc[0] - oc[0], mc[1] - oc[1]);
+        if (d < best) {
+          best = d;
+          viaRear = mi === 1;
+          nearO = oc as [number, number];
+        }
+      }
+    });
+    if (best > active.base_radius + o.base_radius + 0.05) continue;
+    // Arc truth mirrors the engine's contact_arc (P5-R9): contact through the
+    // mover's own REAR circle is behind it for a <=180° total arc; otherwise
+    // the angular test at the front dot vs the enemy's nearest circle centre.
+    const ok =
+      viaRear && active.arc_deg <= 90 + 1e-9
+        ? false
+        : inArcFrom(dest, facingRad, active.arc_deg, nearO);
     const [ox, oy] = worldToScreen(t, o.pos[0], o.pos[1]);
     const rr = Math.max(6, o.base_radius * t.scale) + 5;
     ctx.save();
-    ctx.beginPath();
-    ctx.arc(ox, oy, rr, 0, Math.PI * 2);
+    if (oCs.length > 1) {
+      const [orx, ory] = worldToScreen(t, oCs[1][0], oCs[1][1]);
+      capsulePath(ctx, ox, oy, orx, ory, rr);
+    } else {
+      ctx.beginPath();
+      ctx.arc(ox, oy, rr, 0, Math.PI * 2);
+    }
     ctx.strokeStyle = ok ? COLORS.good : COLORS.bad;
     ctx.lineWidth = 2.5;
     ctx.stroke();
@@ -307,7 +379,8 @@ function drawAdjacencyArcs(
     ctx.font = "600 10px system-ui, sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "bottom";
-    ctx.fillText(ok ? "⚔ attackable" : "behind you", ox, oy - rr - 2);
+    const topY = oCs.length > 1 ? Math.min(oy, worldToScreen(t, oCs[1][0], oCs[1][1])[1]) : oy;
+    ctx.fillText(ok ? "⚔ attackable" : "behind you", ox, topY - rr - 2);
     ctx.restore();
   }
 }
@@ -548,7 +621,10 @@ export default function BoardCanvas({
   const [marquee, setMarquee] = useState<{ a: [number, number]; b: [number, number] } | null>(null);
   const marqueeRef = useRef(false);
   const transformRef = useRef<Transform | null>(null);
-  const dragRef = useRef<{ moved: boolean; uid?: number } | null>(null);
+  // `off` preserves the grab offset (figure front dot − cursor at grab time):
+  // the cursor CARRIES the front dot, so grabbing a mounted figure's rump must
+  // not make it jump 2r to put the front centre under the pointer.
+  const dragRef = useRef<{ moved: boolean; uid?: number; off?: [number, number] } | null>(null);
   const faceRef = useRef<boolean>(false);
 
   useEffect(() => {
@@ -646,13 +722,15 @@ export default function BoardCanvas({
     }
     if (active && active.speed > 0) {
       const [cx, cy] = worldToScreen(t, active.pos[0], active.pos[1]);
-      // The reach ring reflects the hindering-halved speed (fliers exempt).
+      // The reach ring reflects the hindering-halved speed (fliers exempt);
+      // EITHER circle of a mounted figure starting in hindering halves it.
       const activeFlies = active.active_abilities.some(
         (a) => a.name === "Flight" || a.name === "Aquatic",
       );
+      const activeCenters = figureCenters(active);
       const reach = reachOverride ?? (activeFlies
         ? active.speed
-        : effectiveSpeed(active.speed, active.pos, active.base_radius, view.terrain));
+        : effectiveSpeed(active.speed, activeCenters, active.base_radius, view.terrain));
       dashedRing(ctx, cx, cy, reach * t.scale, "rgba(91,214,138,0.5)");
       if (reach < active.speed) {
         ctx.save();
@@ -661,6 +739,28 @@ export default function BoardCanvas({
         ctx.textAlign = "center";
         ctx.fillText(`speed halved: ${reach}″`, cx, cy - reach * t.scale - 5);
         ctx.restore();
+      }
+      // Charge/Bound fork (P5): skipping the rider strike doubles the speed
+      // budget (2x applied BEFORE hindering halving). Show BOTH radii — the
+      // 1x ring solid-ish above, this 2x ring fainter and labeled — so the
+      // trade-off is visible while dragging. Formations bar Charge/Bound, so
+      // skip under a reachOverride.
+      const hasChargeBound = active.active_abilities.some(
+        (a) => a.name === "Charge" || a.name === "Bound",
+      );
+      if (reachOverride == null && hasChargeBound) {
+        const reach2 = activeFlies
+          ? active.speed * 2
+          : effectiveSpeed(active.speed * 2, activeCenters, active.base_radius, view.terrain);
+        if (reach2 > reach) {
+          dashedRing(ctx, cx, cy, reach2 * t.scale, "rgba(91,214,138,0.22)");
+          ctx.save();
+          ctx.fillStyle = "rgba(91,214,138,0.55)";
+          ctx.font = "500 11px system-ui, sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText(`2×: ${reach2}″ (forfeits the strike)`, cx, cy - reach2 * t.scale - 5);
+          ctx.restore();
+        }
       }
     }
 
@@ -695,9 +795,17 @@ export default function BoardCanvas({
         if (verdict.figUid != null) {
           const bf = live.find((f) => f.uid === verdict.figUid);
           if (bf) {
+            // Blocker/screener highlight rings the whole CAPSULE for mounted.
             const [fx2, fy2] = worldToScreen(t, bf.pos[0], bf.pos[1]);
-            ctx.beginPath();
-            ctx.arc(fx2, fy2, Math.max(6, bf.base_radius * t.scale) + 5, 0, Math.PI * 2);
+            const bCs = figureCenters(bf);
+            const brr = Math.max(6, bf.base_radius * t.scale) + 5;
+            if (bCs.length > 1) {
+              const [brx, bry] = worldToScreen(t, bCs[1][0], bCs[1][1]);
+              capsulePath(ctx, fx2, fy2, brx, bry, brr);
+            } else {
+              ctx.beginPath();
+              ctx.arc(fx2, fy2, brr, 0, Math.PI * 2);
+            }
             ctx.strokeStyle = "rgba(224,90,90,0.95)";
             ctx.lineWidth = 2.5;
             ctx.stroke();
@@ -734,8 +842,16 @@ export default function BoardCanvas({
       ctx.stroke();
       ctx.setLineDash([]);
       const gr = Math.max(6, active.base_radius * t.scale);
-      ctx.beginPath();
-      ctx.arc(gx, gy, gr, 0, Math.PI * 2);
+      // The ghost renders the full capsule at the PREVIEWED facing so the rear
+      // circle's swing is visible mid-drag.
+      if (active.mounted) {
+        const rw = rearCenter(moveGhost.dest, moveGhost.facing, active.base_radius);
+        const [grx, gry] = worldToScreen(t, rw[0], rw[1]);
+        capsulePath(ctx, gx, gy, grx, gry, gr);
+      } else {
+        ctx.beginPath();
+        ctx.arc(gx, gy, gr, 0, Math.PI * 2);
+      }
       ctx.fillStyle = moveGhost.ok ? "rgba(91,214,138,0.28)" : "rgba(224,90,90,0.28)";
       ctx.fill();
       ctx.strokeStyle = col;
@@ -776,8 +892,16 @@ export default function BoardCanvas({
       ctx.closePath();
       ctx.fillStyle = "rgba(124,156,255,0.18)";
       ctx.fill();
-      ctx.beginPath();
-      ctx.arc(gx, gy, r, 0, Math.PI * 2);
+      // Capsule body at the AIMED facing — dragging the handle visibly swings
+      // the rear circle (the "rotation has consequences" affordance).
+      if (active.mounted) {
+        const rw = rearCenter(pendingMove.dest, pendingMove.facing, active.base_radius);
+        const [prx, pry] = worldToScreen(t, rw[0], rw[1]);
+        capsulePath(ctx, gx, gy, prx, pry, r);
+      } else {
+        ctx.beginPath();
+        ctx.arc(gx, gy, r, 0, Math.PI * 2);
+      }
       ctx.fillStyle = "rgba(124,156,255,0.5)";
       ctx.fill();
       ctx.strokeStyle = COLORS.select;
@@ -801,7 +925,9 @@ export default function BoardCanvas({
     }
 
     // Free spin: an amber facing handle on the contacted figure being re-faced.
-    if (spin) {
+    // Mounted figures never get a free spin (P5-R6) — defensive skip in case a
+    // stale upstream list slips one through.
+    if (spin && !live.find((f) => f.uid === spin.uid)?.mounted) {
       const sf0 = live.find((f) => f.uid === spin.uid);
       const [gx, gy] = worldToScreen(t, spin.pos[0], spin.pos[1]);
       const r = Math.max(6, (sf0?.base_radius ?? 0.55) * t.scale);
@@ -869,12 +995,23 @@ export default function BoardCanvas({
     const dimSet = new Set(dimUids);
     for (const f of live) {
       drawFigure(ctx, t, f, f.uid === selectedUid, f.uid === hoverUid, dimSet.has(f.uid));
+      if (!armedSet.has(f.uid) && !memberSet.has(f.uid)) continue;
       const [cx, cy] = worldToScreen(t, f.pos[0], f.pos[1]);
       const rr = Math.max(6, f.base_radius * t.scale) + 7;
+      // Reticle/member halos stroke the OFFSET capsule for mounted figures.
+      const fCs = figureCenters(f);
+      const ringPath = () => {
+        if (fCs.length > 1) {
+          const [rx2, ry2] = worldToScreen(t, fCs[1][0], fCs[1][1]);
+          capsulePath(ctx, cx, cy, rx2, ry2, rr);
+        } else {
+          ctx.beginPath();
+          ctx.arc(cx, cy, rr, 0, Math.PI * 2);
+        }
+      };
       if (armedSet.has(f.uid)) {
         ctx.save();
-        ctx.beginPath();
-        ctx.arc(cx, cy, rr, 0, Math.PI * 2);
+        ringPath();
         ctx.strokeStyle = COLORS.bad;
         ctx.lineWidth = 2;
         ctx.stroke();
@@ -883,8 +1020,7 @@ export default function BoardCanvas({
       if (memberSet.has(f.uid)) {
         ctx.save();
         ctx.setLineDash([3, 3]);
-        ctx.beginPath();
-        ctx.arc(cx, cy, rr, 0, Math.PI * 2);
+        ringPath();
         ctx.strokeStyle = COLORS.select;
         ctx.lineWidth = 2;
         ctx.stroke();
@@ -904,21 +1040,58 @@ export default function BoardCanvas({
           drawnPairs.add(key);
           const o = live.find((x) => x.uid === u);
           if (!o) continue;
-          const dx = o.pos[0] - f.pos[0];
-          const dy = o.pos[1] - f.pos[1];
-          const L = Math.hypot(dx, dy) || 1e-9;
+          // The dot sits at the CLOSEST circle-pair's tangency point (either
+          // figure may be a capsule) — a rear-circle contact must not float a
+          // dot on the front-to-front line ~1" from the real touch.
+          const fCs = figureCenters(f);
+          const oCs = figureCenters(o);
+          let bestD = Infinity;
+          let bf: [number, number] = f.pos;
+          let bo: [number, number] = o.pos;
+          for (const fc of fCs) {
+            for (const oc of oCs) {
+              const d = Math.hypot(oc[0] - fc[0], oc[1] - fc[1]);
+              if (d < bestD) {
+                bestD = d;
+                bf = fc as [number, number];
+                bo = oc as [number, number];
+              }
+            }
+          }
+          const L = bestD || 1e-9;
           const [sx, sy] = worldToScreen(
             t,
-            f.pos[0] + (dx / L) * f.base_radius,
-            f.pos[1] + (dy / L) * f.base_radius,
+            bf[0] + ((bo[0] - bf[0]) / L) * f.base_radius,
+            bf[1] + ((bo[1] - bf[1]) / L) * f.base_radius,
           );
           // For the SELECTED figure's enemy contacts, the dot tells arc truth:
           // green = in its front arc (close attack legal), red = behind it.
+          // Mirrors contact_arc (P5-R9): contact via MY rear circle is behind
+          // me for a <=180° arc; otherwise the angular test at my front dot vs
+          // the enemy's nearest circle centre.
           let fill = o.owner !== f.owner ? "rgba(224,192,74,0.95)" : "rgba(255,255,255,0.85)";
           if (o.owner !== f.owner && (f.uid === selectedUid || o.uid === selectedUid)) {
             const me = f.uid === selectedUid ? f : o;
             const them = f.uid === selectedUid ? o : f;
-            const ok = inArcFrom(me.pos, (me.facing_deg * Math.PI) / 180, me.arc_deg, them.pos);
+            const meCs = figureCenters(me);
+            const themCs = figureCenters(them);
+            let b2 = Infinity;
+            let meViaRear = false;
+            let nearThem: [number, number] = them.pos;
+            meCs.forEach((mc, mi) => {
+              for (const tc of themCs) {
+                const d = Math.hypot(tc[0] - mc[0], tc[1] - mc[1]);
+                if (d < b2) {
+                  b2 = d;
+                  meViaRear = mi === 1;
+                  nearThem = tc as [number, number];
+                }
+              }
+            });
+            const ok =
+              meViaRear && me.arc_deg <= 90 + 1e-9
+                ? false
+                : inArcFrom(me.pos, (me.facing_deg * Math.PI) / 180, me.arc_deg, nearThem);
             fill = ok ? "rgba(91,214,138,0.95)" : "rgba(224,90,90,0.95)";
           }
           ctx.save();
@@ -958,8 +1131,16 @@ export default function BoardCanvas({
         const sr = Math.max(6, s.radius * t.scale);
         const sf = -s.facing;
         ctx.save();
-        ctx.beginPath();
-        ctx.arc(sx, sy, sr, 0, Math.PI * 2);
+        // Mounted members ghost as capsules; the rear derives from the STAGED
+        // facing (not the live figure's).
+        if (s.mounted) {
+          const rw = rearCenter(s.dest, s.facing, s.radius);
+          const [srx, sry] = worldToScreen(t, rw[0], rw[1]);
+          capsulePath(ctx, sx, sy, srx, sry, sr);
+        } else {
+          ctx.beginPath();
+          ctx.arc(sx, sy, sr, 0, Math.PI * 2);
+        }
         // ok=true/false → live green/red legality (rigid move); undefined keeps
         // the neutral staged blue (place-one-at-a-time ghosts).
         ctx.fillStyle =
@@ -1100,7 +1281,13 @@ export default function BoardCanvas({
     let best: { uid: number; d: number } | null = null;
     for (const f of view.figures) {
       if (f.eliminated) continue;
-      const d = Math.hypot(wx - f.pos[0], wy - f.pos[1]);
+      // Capsule hit-test for mounted (exact for a stadium): distance to the
+      // front-rear segment — clicking the horse's rump selects it too.
+      const cs = figureCenters(f);
+      const d =
+        cs.length > 1
+          ? pointToSegment([wx, wy], cs[0], cs[1])
+          : Math.hypot(wx - f.pos[0], wy - f.pos[1]);
       if (d <= f.base_radius && (best === null || d < best.d)) best = { uid: f.uid, d };
     }
     return best?.uid ?? null;
@@ -1123,9 +1310,13 @@ export default function BoardCanvas({
     const uidForR = dragRef.current?.uid ?? activeUid;
     const r = view.figures.find((f) => f.uid === uidForR)?.base_radius ?? 0.55;
     const { width, height } = view.meta.board;
+    // Clamp the DERIVED FRONT DOT (cursor + grab offset), not the raw pointer.
+    // The rear circle is left loose on purpose: ghostFor's both-circles bounds
+    // check carries the red instead of a sticky facing-dependent clamp.
+    const off = dragRef.current?.off ?? [0, 0];
     return [
-      Math.max(r, Math.min(width - r, wx)),
-      Math.max(r, Math.min(height - r, wy)),
+      Math.max(r, Math.min(width - r, wx + off[0])),
+      Math.max(r, Math.min(height - r, wy + off[1])),
     ];
   }
 
@@ -1189,18 +1380,31 @@ export default function BoardCanvas({
     // moved, re-dragging it from where it now appears is the natural gesture.
     if (rigid != null && staged) {
       const w = worldPoint(e.clientX, e.clientY);
-      const g = staged.find(
-        (s) => s.uid != null && Math.hypot(w[0] - s.dest[0], w[1] - s.dest[1]) <= s.radius + 0.1,
-      );
+      // Mounted staged ghosts re-grab by the capsule (rear from staged facing).
+      const g = staged.find((s) => {
+        if (s.uid == null) return false;
+        if (s.mounted) {
+          return pointToSegment(w, s.dest, rearCenter(s.dest, s.facing, s.radius)) <= s.radius + 0.1;
+        }
+        return Math.hypot(w[0] - s.dest[0], w[1] - s.dest[1]) <= s.radius + 0.1;
+      });
       if (g) {
-        dragRef.current = { moved: false, uid: g.uid };
+        dragRef.current = { moved: false, uid: g.uid, off: [g.dest[0] - w[0], g.dest[1] - w[1]] };
         (e.target as Element).setPointerCapture?.(e.pointerId);
         return;
       }
     }
     const hit = hitTest(e.clientX, e.clientY);
     if (hit != null && (hit === activeUid || (rigid != null && rigid.uids.includes(hit)))) {
-      dragRef.current = { moved: false, uid: hit };
+      // Preserve the grab offset so the figure doesn't jump when grabbed
+      // anywhere but the front dot (a mounted rump grab would jump 2r).
+      const w = worldPoint(e.clientX, e.clientY);
+      const fp = view.figures.find((f) => f.uid === hit);
+      dragRef.current = {
+        moved: false,
+        uid: hit,
+        off: fp ? [fp.pos[0] - w[0], fp.pos[1] - w[1]] : [0, 0],
+      };
       (e.target as Element).setPointerCapture?.(e.pointerId);
     } else if (hit == null && e.button === 0 && onMarquee) {
       // Drag on empty felt = marquee selection box (StarCraft-style).

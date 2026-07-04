@@ -77,6 +77,15 @@ export interface FigureView {
   optional_abilities?: { id: number; name: string; disabled: boolean }[];
   in_base_contact_with: number[];
   dial: DialClick[];
+
+  // Lancers (P5): mounted figures sit on a double "peanut" base — two equal
+  // circles of base_radius whose centres are 2r apart along the facing axis;
+  // `pos` is the FRONT-circle centre dot. Both optional (absent = on foot).
+  mounted?: boolean;
+  // Server-computed rear-circle centre (mounted only). Prefer this over
+  // deriving from facing_deg — the view rounds facing to 0.1°, which can
+  // drift a client-derived rear ~0.002" from the engine's.
+  rear_pos?: [number, number];
 }
 
 export interface AttackExplain {
@@ -103,6 +112,10 @@ export interface GameMeta {
   victory_points: { human: number; llm: number };
   board: { width: number; height: number };
   ability_coverage?: unknown;
+  // Charge/Bound (P5): an armed FREE follow-up attack for that figure —
+  // resolved by POSTing the normal close/ranged intent with `rider: true`.
+  // It expires if any other intent is sent. Optional for older payloads/mock.
+  pending_rider?: { uid: number; kind: "close" | "ranged" } | null;
 }
 
 // A placed terrain piece: world-space polygon + rule flags (client picks colours).
@@ -201,12 +214,13 @@ export async function getState(): Promise<GameView> {
   return req<GameView>("/api/state");
 }
 
-// POST /api/new_game
-export async function newGame(points: number, seed: number): Promise<GameView> {
+// POST /api/new_game — `expansions` picks the card sets in play (per-set
+// checkboxes; a server that ignores the field is fine while it's being wired).
+export async function newGame(points: number, seed: number, expansions?: string[]): Promise<GameView> {
   if (USE_MOCK) return clone(MOCK_VIEW);
   return req<GameView>("/api/new_game", {
     method: "POST",
-    body: JSON.stringify({ points, seed }),
+    body: JSON.stringify({ points, seed, ...(expansions && expansions.length ? { expansions } : {}) }),
   });
 }
 
@@ -298,6 +312,8 @@ export interface ConstructFigure {
   abilities: string[];
   stats?: FigureStats;
   clicks?: number;
+  // Lancers (P5): cavalry on a double base (roster/sealed/construction payloads).
+  mounted?: boolean;
 }
 export interface DraftPlan {
   strategy: string;
@@ -324,22 +340,28 @@ export function newGameStreamUrl(
   opponent: "llm" | "heuristic",
   seed: number,
   humanIds?: number[],
+  expansions?: string[],
 ): string {
   const p = new URLSearchParams({ mode, points: String(points), opponent, seed: String(seed) });
   if (humanIds && humanIds.length) p.set("human_ids", humanIds.join(","));
+  if (expansions && expansions.length) p.set("expansions", expansions.join(","));
   return `/api/new_game_stream?${p.toString()}`;
 }
 
-// GET /api/roster — full drafting roster (preconstructed).
-export async function getRoster(): Promise<ConstructFigure[]> {
+// GET /api/roster — full drafting roster (preconstructed). `expansions`
+// filters the pool by set (a server that ignores it is fine for now).
+export async function getRoster(expansions?: string[]): Promise<ConstructFigure[]> {
   if (USE_MOCK) return [];
-  return (await req<{ figures: ConstructFigure[] }>("/api/roster")).figures;
+  const q = expansions && expansions.length ? `?expansions=${encodeURIComponent(expansions.join(","))}` : "";
+  return (await req<{ figures: ConstructFigure[] }>(`/api/roster${q}`)).figures;
 }
 
 // GET /api/sealed_packs — the human's four booster packs to open.
-export async function getSealedPacks(seed: number): Promise<ConstructFigure[][]> {
+export async function getSealedPacks(seed: number, expansions?: string[]): Promise<ConstructFigure[][]> {
   if (USE_MOCK) return [];
-  return (await req<{ packs: ConstructFigure[][] }>(`/api/sealed_packs?seed=${seed}`)).packs;
+  const q =
+    expansions && expansions.length ? `&expansions=${encodeURIComponent(expansions.join(","))}` : "";
+  return (await req<{ packs: ConstructFigure[][] }>(`/api/sealed_packs?seed=${seed}${q}`)).packs;
 }
 
 // --- terrain placement (setup phase) ---------------------------------------
@@ -435,7 +457,9 @@ export async function toggleAbility(
   return applyIntent({ kind: "toggle_ability", figure_uid: figureUid, ability_id: abilityId, off });
 }
 
-// POST /api/intent
+// POST /api/intent. Close/ranged intents may additionally carry `rider: true`
+// to resolve a pending Charge/Bound follow-up strike (meta.pending_rider)
+// without consuming an action; any OTHER intent expires the offer server-side.
 export async function applyIntent(intent: unknown): Promise<ApplyResult> {
   if (USE_MOCK) {
     return {

@@ -5,14 +5,26 @@ export interface GameConfig {
   points: number;
   opponent: "llm" | "heuristic";
   seed: number;
+  // Card sets in play — posted as `expansions` with the new-game request and
+  // used to filter the draft/sealed pools. Unchecking Rebellion gives a
+  // Lancers-only cavalry game.
+  expansions: string[];
 }
 
 const CAPS = [100, 200, 300, 400, 500];
+const SETS = ["Rebellion", "Lancers"];
 
 export default function NewGame({ onStart, onResume }: { onStart: (c: GameConfig) => void; onResume: () => void }) {
   const [mode, setMode] = useState<"preconstructed" | "sealed">("preconstructed");
   const [points, setPoints] = useState(200);
   const [opponent, setOpponent] = useState<"llm" | "heuristic">("llm");
+  const [expansions, setExpansions] = useState<string[]>([...SETS]);
+
+  // Toggle a set, keeping the canonical SETS order in the posted list.
+  const toggleSet = (s: string) =>
+    setExpansions((xs) =>
+      xs.includes(s) ? xs.filter((x) => x !== s) : SETS.filter((k) => xs.includes(k) || k === s),
+    );
 
   const start = () =>
     onStart({
@@ -20,6 +32,7 @@ export default function NewGame({ onStart, onResume }: { onStart: (c: GameConfig
       points: mode === "sealed" ? 200 : points,
       opponent,
       seed: Math.floor(Math.random() * 1_000_000),
+      expansions,
     });
 
   return (
@@ -66,6 +79,26 @@ export default function NewGame({ onStart, onResume }: { onStart: (c: GameConfig
           </>
         )}
 
+        <div className="menu-section-label">Sets</div>
+        <div className="pill-row">
+          {SETS.map((s) => (
+            <button
+              key={s}
+              className={`pill${expansions.includes(s) ? " on" : ""}`}
+              onClick={() => toggleSet(s)}
+              type="button"
+              title={s === "Lancers" ? "Adds 142 units incl. 54 mounted (double-base) cavalry" : "The base set"}
+            >
+              {expansions.includes(s) ? "✓ " : ""}{s}
+            </button>
+          ))}
+        </div>
+        <p className="menu-sub" style={{ marginTop: 4 }}>
+          {expansions.length === 0
+            ? "Pick at least one set."
+            : "Uncheck Rebellion for a Lancers-only cavalry game."}
+        </p>
+
         <div className="menu-section-label">Opponent</div>
         <div className="pill-row">
           <button className={`pill${opponent === "llm" ? " on" : ""}`} onClick={() => setOpponent("llm")} type="button">
@@ -76,7 +109,12 @@ export default function NewGame({ onStart, onResume }: { onStart: (c: GameConfig
           </button>
         </div>
 
-        <button className="btn primary menu-start" onClick={start} type="button">
+        <button
+          className="btn primary menu-start"
+          onClick={start}
+          type="button"
+          disabled={expansions.length === 0}
+        >
           Build armies →
         </button>
         <button className="btn menu-resume" onClick={onResume} type="button">

@@ -316,7 +316,12 @@ export default function TerrainPlacement({ initialView, onDone, onCancel }: Prop
               {myFigs.map((f) => (
                 <div className="tp-fig" key={f.uid}>
                   <div className="tp-fig-top">
-                    <span className="tp-fig-name">{f.short_name}</span>
+                    <span className="tp-fig-name">
+                      {f.mounted && (
+                        <span title="Mounted — double base; leave wide corridors" aria-label="mounted">🐴 </span>
+                      )}
+                      {f.short_name}
+                    </span>
                     <span className={`tp-fig-role ${f.is_ranged ? "ranged" : "melee"}`}>
                       {f.is_ranged ? `➶ R${f.range}` : "⚔"}
                     </span>

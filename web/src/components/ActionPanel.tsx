@@ -110,6 +110,9 @@ interface Props {
     currentName: string | null;
     speed: number;
     canDefer: boolean;
+    // Why the pending member can't be confirmed at its AIMED facing (capsule
+    // rears swing with the handle) — non-null greys out "Confirm member".
+    pendingBad: string | null;
   } | null;
   onFormationStart: (c: Candidate) => void;
   onFormationBack: () => void;
@@ -131,6 +134,11 @@ interface Props {
   // Assist attacks (combat formations) for the selected group — engine-computed.
   assist: AssistOption[];
   onAssist: (o: AssistOption) => void;
+  // Charge/Bound rider (P5): a FREE follow-up strike is armed for the selected
+  // figure — its charge_strike/bound_shot candidates get a prominent offer.
+  // Skip clears the local offer UI only (nothing is sent).
+  rider: { kind: "close" | "ranged"; name: string } | null;
+  onRiderSkip: () => void;
 }
 
 const ATTACK_KINDS = new Set([
@@ -140,7 +148,13 @@ const ATTACK_KINDS = new Set([
   "magic_blast",
   "flame_lightning",
   "shockwave",
+  "charge_strike",
+  "bound_shot",
 ]);
+
+// The free Charge/Bound follow-up kinds (annotated with target/hit_odds/
+// expected_clicks like any attack candidate).
+const RIDER_KINDS = new Set(["charge_strike", "bound_shot"]);
 
 // Assist attacks (P4-R29): legal pooled attacks as buttons, sorted by expected
 // damage; illegal ones greyed with the ENGINE's own rejection reason (deduped —
@@ -206,6 +220,10 @@ function variantName(kind: string): string {
       return "Flame / Lightning";
     case "shockwave":
       return "Shockwave";
+    case "charge_strike":
+      return "Charge — strike (free)";
+    case "bound_shot":
+      return "Bound — shot (free)";
     default:
       return kind;
   }
@@ -304,6 +322,8 @@ export default function ActionPanel({
   onGroupClear,
   assist,
   onAssist,
+  rider,
+  onRiderSkip,
   onFormationRigid,
   rigidPanel,
   onRigidConfirm,
@@ -333,8 +353,13 @@ export default function ActionPanel({
   const nameOf = (uid: number | null) =>
     uid == null ? "" : view.figures.find((f) => f.uid === uid)?.short_name ?? `#${uid}`;
 
+  // Charge/Bound rider offer: pull its candidates out for a prominent section;
+  // when no offer is active they fall through to the normal Attack grouping.
+  const riderCands = rider ? candidates.filter((c) => RIDER_KINDS.has(c.kind)) : [];
   // Group the selected figure's attack candidates by target for the variant chooser.
-  const attacks = candidates.filter((c) => ATTACK_KINDS.has(c.kind));
+  const attacks = candidates.filter(
+    (c) => ATTACK_KINDS.has(c.kind) && !(rider && RIDER_KINDS.has(c.kind)),
+  );
   const supports = candidates.filter((c) => ["heal", "regenerate", "necromancy", "levitate"].includes(c.kind));
   const moves = candidates.filter((c) => c.kind === "move");
   const passes = candidates.filter((c) => c.kind === "pass");
@@ -355,7 +380,14 @@ export default function ActionPanel({
     <div className="action-panel" ref={rootRef} style={style}>
       <div className="action-head" {...headProps}>
         <span><span className="drag-grip">⠿</span>Actions</span>
-        {selectedFig && <span className="fig-sub">{selectedFig.short_name}</span>}
+        {selectedFig && (
+          <span className="fig-sub">
+            {selectedFig.mounted && (
+              <span title="Mounted — double base" aria-label="mounted">🐴 </span>
+            )}
+            {selectedFig.short_name}
+          </span>
+        )}
       </div>
 
       {/* Rigid formation move: drag the whole block, drop, pivot, confirm. */}
@@ -407,10 +439,18 @@ export default function ActionPanel({
                 {pendingMove ? ", aim the handle, then confirm" : ". It snaps to nearby bases"}
                 {formation.placedCount > 0 ? "; it must end touching a placed member." : "."}
               </div>
+              {pendingMove && formation.pendingBad && (
+                <div className="group-reason">✕ {formation.pendingBad} — re-aim the handle</div>
+              )}
               <div className="armed-btns">
                 {pendingMove ? (
                   <>
-                    <button className="btn primary" onClick={onConfirmMove} disabled={busy}>
+                    <button
+                      className="btn primary"
+                      onClick={onConfirmMove}
+                      disabled={busy || !!formation.pendingBad}
+                      title={formation.pendingBad ?? ""}
+                    >
                       Confirm member
                     </button>
                     <button className="btn" onClick={onCancelMove} disabled={busy}>Re-place</button>
@@ -453,6 +493,37 @@ export default function ActionPanel({
               </div>
             </>
           )}
+        </div>
+      )}
+
+      {/* Charge/Bound rider (P5): the free follow-up strike, offered
+          prominently above everything else while it's armed. */}
+      {!formation && !rigidPanel && !pendingMove && !armed && rider && (
+        <div className="armed rider-offer">
+          <div className="armed-title">
+            ⚡ {rider.kind === "close" ? "Charge — strike now (free)" : "Bound — shoot now (free)"}
+          </div>
+          <div className="armed-stats">
+            {rider.name} may {rider.kind === "close" ? "attack" : "shoot"} without spending an
+            action. Any other action forfeits it.
+          </div>
+          {riderCands.length > 0 ? (
+            riderCands.map((c, i) => (
+              <button className="action-btn" key={i} onClick={() => onArm(c)} disabled={busy} title={c.label}>
+                <span className="action-label">
+                  {variantName(c.kind)} — {nameOf(targetUid(c))}
+                </span>
+                <span className="action-stats">{annLine(c)}</span>
+              </button>
+            ))
+          ) : (
+            <div className="group-reason">✕ no legal target from here</div>
+          )}
+          <div className="armed-btns">
+            <button className="btn" onClick={onRiderSkip} disabled={busy}>
+              Skip
+            </button>
+          </div>
         </div>
       )}
 

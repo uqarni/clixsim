@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { deployFigure, finishDeploy, type FigureView, type GameView } from "../api";
-import { snapToContactRing } from "../terrainGeom";
+import { centersAt, figureCenters, snapToContactRing } from "../terrainGeom";
 import BoardCanvas from "./BoardCanvas";
 
 interface Props {
@@ -14,6 +14,7 @@ interface Ghost {
   facing: number;
   ok: boolean;
   breakAway: boolean;
+  reason?: string;
 }
 
 const BAND = 3.0; // human starting band depth (P3-R5)
@@ -55,31 +56,99 @@ export default function Deploy({ initialView, onDone, onCancel }: Props) {
 
   // Clamp a drop point into the human's starting band, SNAP it onto exact base
   // contact with a nearby figure (formations need legal touching, and the engine's
-  // contact tolerance is far tighter than the eye), then report overlap.
+  // contact tolerance is far tighter than the eye), then report overlap. The
+  // WHOLE capsule of a mounted figure must sit in the band (P5-R11) — every
+  // check below runs at the CURRENT facing, and the rear swings when the
+  // facing handle moves (the pending re-validation catches that).
   const constrain = useCallback(
-    (fig: FigureView, dest: [number, number]): Ghost => {
+    (fig: FigureView, dest: [number, number], facingIn?: number): Ghost => {
       const r = fig.base_radius;
-      let x = Math.max(r, Math.min(W - r, dest[0]));
-      let y = Math.max(r, Math.min(BAND - r, dest[1]));
-      const targets = view.figures
-        .filter((o) => !o.eliminated && o.uid !== fig.uid)
-        .map((o) => ({ pos: o.pos, radius: o.base_radius, uid: o.uid }));
+      const mounted = !!fig.mounted;
+      // Mounted figures default to facing the enemy (+y): the 3" band only
+      // fits the capsule for roughly forward facings.
+      const facing = facingIn ?? (mounted ? Math.PI / 2 : (fig.facing_deg * Math.PI) / 180);
+      // Both circles inside board x band re-expressed as a clamp on the front
+      // dot: rear = front − 2r·(cos f, sin f).
+      const dx = mounted ? 2 * r * Math.cos(facing) : 0;
+      const dy = mounted ? 2 * r * Math.sin(facing) : 0;
+      const xLo = r + Math.max(0, dx);
+      const xHi = W - r + Math.min(0, dx);
+      const yLo = r + Math.max(0, dy);
+      const yHi = BAND - r + Math.min(0, dy);
+      let reason: string | undefined;
+      let x = dest[0];
+      let y = dest[1];
+      if (xLo > xHi + 1e-9 || yLo > yHi + 1e-9) {
+        // No legal front-dot strip at this facing (the rear can't fit in the
+        // band) — clamp loosely and go red rather than teleporting the ghost.
+        reason = "the rear circle can't fit in the band at this facing";
+        x = Math.max(r, Math.min(W - r, x));
+        y = Math.max(r, Math.min(BAND - r, y));
+      } else {
+        x = Math.max(xLo, Math.min(xHi, x));
+        y = Math.max(yLo, Math.min(yHi, y));
+      }
+      // Mounted neighbours contribute BOTH circles with distinct identity
+      // (same waist-overlap trap as the battle snap).
+      const targets: { pos: [number, number]; radius: number; uid: number; key: string }[] = [];
+      for (const o of view.figures) {
+        if (o.eliminated || o.uid === fig.uid) continue;
+        figureCenters(o).forEach((c, i) =>
+          targets.push({ pos: c as [number, number], radius: o.base_radius, uid: o.uid, key: `${o.uid}:${i}` }),
+        );
+      }
+      const overlapAt = (p: [number, number]): boolean => {
+        const cs = centersAt(p, facing, r, mounted);
+        return targets.some((o) =>
+          cs.some((c) => Math.hypot(c[0] - o.pos[0], c[1] - o.pos[1]) < r + o.radius - 0.02),
+        );
+      };
+      const capsuleFits = (p: [number, number]): boolean =>
+        centersAt(p, facing, r, mounted).every(
+          ([px, py]) =>
+            px >= r - 1e-9 && px <= W - r + 1e-9 && py >= r - 1e-9 && py <= BAND - r + 1e-9,
+        );
       // Candidates are ranked (two-contact pocket first when the cursor is near
-      // the notch); take the first one that stays inside the deploy band.
-      const snapped = snapToContactRing(r, [x, y], targets).find(
-        (c) =>
-          c.point[0] >= r && c.point[0] <= W - r &&
-          c.point[1] >= r && c.point[1] <= BAND - r,
-      );
+      // the notch); take the first whose FULL capsule fits the band and
+      // overlaps nothing — a band-check on the front centre alone would offer
+      // spots the engine then rejects.
+      const snapped = reason
+        ? undefined
+        : snapToContactRing(r, [x, y], targets).find(
+            (c) => capsuleFits(c.point) && !overlapAt(c.point),
+          );
       if (snapped) [x, y] = snapped.point;
-      const overlaps = targets.some(
-        (o) => Math.hypot(x - o.pos[0], y - o.pos[1]) < r + o.radius - 0.02,
-      );
-      const facing = (fig.facing_deg * Math.PI) / 180;
-      return { dest: [x, y], facing, ok: !overlaps, breakAway: false };
+      const overlaps = overlapAt([x, y]);
+      if (!reason && overlaps) reason = "overlaps another figure";
+      return { dest: [x, y], facing, ok: !reason, breakAway: false, reason };
     },
     [view, W],
   );
+
+  // The facing handle swings a mounted rear OUT of the band/board or into a
+  // neighbour AFTER the drop was green — re-validate the pending placement
+  // whenever it changes so Confirm greys out with the reason.
+  const pendingBad = useMemo(() => {
+    if (!pending) return null;
+    const fig = view.figures.find((f) => f.uid === activeUid);
+    if (!fig) return null;
+    const r = fig.base_radius;
+    const cs = centersAt(pending.dest, pending.facing, r, !!fig.mounted);
+    for (const [px, py] of cs) {
+      if (px < r - 1e-9 || px > W - r + 1e-9) return "off the board";
+      if (py < r - 1e-9 || py > BAND - r + 1e-9)
+        return "the whole base must sit inside your starting band";
+    }
+    for (const o of view.figures) {
+      if (o.eliminated || o.uid === fig.uid) continue;
+      const oCs = figureCenters(o);
+      const lim = r + o.base_radius - 0.02;
+      if (cs.some((c) => oCs.some((oc) => Math.hypot(c[0] - oc[0], c[1] - oc[1]) < lim))) {
+        return `overlaps ${o.short_name}'s base`;
+      }
+    }
+    return null;
+  }, [pending, view, activeUid, W]);
 
   const onMoveDrag = useCallback(
     (dest: [number, number]) => {
@@ -96,7 +165,7 @@ export default function Deploy({ initialView, onDone, onCancel }: Props) {
       if (!fig) return;
       const g = constrain(fig, dest);
       if (!g.ok) {
-        setMsg("That spot overlaps another figure.");
+        setMsg(g.reason ?? "That spot overlaps another figure.");
         return;
       }
       setMsg("");
@@ -106,7 +175,7 @@ export default function Deploy({ initialView, onDone, onCancel }: Props) {
   );
 
   const confirm = useCallback(async () => {
-    if (!pending || activeUid == null || busy) return;
+    if (!pending || activeUid == null || busy || pendingBad) return;
     setBusy(true);
     try {
       const res = await deployFigure(activeUid, pending.dest, pending.facing);
@@ -122,7 +191,7 @@ export default function Deploy({ initialView, onDone, onCancel }: Props) {
     } finally {
       setBusy(false);
     }
-  }, [pending, activeUid, busy]);
+  }, [pending, activeUid, busy, pendingBad]);
 
   const start = useCallback(async () => {
     if (busy || !armedStart) return;
@@ -186,8 +255,14 @@ export default function Deploy({ initialView, onDone, onCancel }: Props) {
                   Place at ({pending.dest[0].toFixed(1)}, {pending.dest[1].toFixed(1)})
                 </div>
                 <div className="armed-stats">Drag the handle on the board to aim, then confirm.</div>
+                {pendingBad && <div className="group-reason">✕ {pendingBad} — re-aim the handle</div>}
                 <div className="armed-btns">
-                  <button className="btn primary" onClick={confirm} disabled={busy}>
+                  <button
+                    className="btn primary"
+                    onClick={confirm}
+                    disabled={busy || !!pendingBad}
+                    title={pendingBad ?? ""}
+                  >
                     Confirm
                   </button>
                   <button className="btn" onClick={() => setPending(null)} disabled={busy}>

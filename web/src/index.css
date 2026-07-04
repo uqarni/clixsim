@@ -816,6 +816,21 @@ button {
   margin-top: 8px;
 }
 
+/* Charge/Bound rider offer (P5): the free follow-up strike banner reuses the
+   spin-banner shell but reads as an opportunity, not a warning. */
+.rider-banner {
+  border-color: var(--accent);
+  background: rgba(16, 20, 34, 0.94);
+}
+.rider-banner .spin-banner-title {
+  color: var(--accent);
+}
+
+/* rider offer block in the Actions panel */
+.rider-offer {
+  border-left: 3px solid var(--accent);
+}
+
 /* optional-ability toggle chips */
 .chip.toggle {
   cursor: pointer;

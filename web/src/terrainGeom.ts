@@ -6,6 +6,41 @@ import type { TerrainPiece, TerrainTemplate } from "./api";
 
 export type Pt = [number, number];
 
+// --- double-base (mounted) capsule helpers ----------------------------------
+// A mounted figure's base is two equal circles of `base_radius` whose centres
+// sit 2r apart along the facing axis; `pos` is the FRONT-circle centre dot
+// (P5-R1). These helpers are the one place the rear centre is derived.
+
+export interface CapsuleFig {
+  pos: [number, number];
+  facing_deg: number;
+  base_radius: number;
+  mounted?: boolean;
+  rear_pos?: [number, number];
+}
+
+// Rear-circle centre for a front dot + world facing (radians).
+export function rearCenter(pos: Pt, facingRad: number, r: number): Pt {
+  return [pos[0] - 2 * r * Math.cos(facingRad), pos[1] - 2 * r * Math.sin(facingRad)];
+}
+
+// Circle centres for a HYPOTHETICAL placement (drag ghosts, staged members)
+// where the previewed facing differs from the live figure's.
+export function centersAt(pos: Pt, facingRad: number, r: number, mounted: boolean): Pt[] {
+  return mounted ? [pos, rearCenter(pos, facingRad, r)] : [pos];
+}
+
+// All base-circle centres of a live figure: [front] or [front, rear]. Prefers
+// the server-computed rear_pos (the view rounds facing to 0.1°, so a derived
+// rear can drift ~0.002" from the engine's) and derives only when absent.
+export function figureCenters(f: CapsuleFig): Pt[] {
+  if (!f.mounted) return [f.pos as Pt];
+  const rear: Pt =
+    (f.rear_pos as Pt | undefined) ??
+    rearCenter(f.pos as Pt, (f.facing_deg * Math.PI) / 180, f.base_radius);
+  return [f.pos as Pt, rear];
+}
+
 function rot(p: Pt, a: number): Pt {
   const c = Math.cos(a);
   const s = Math.sin(a);
@@ -121,7 +156,12 @@ function circleTouchesPoly(c: Pt, r: number, poly: Pt[]): boolean {
   return false;
 }
 
-function capsuleCrossesPoly(p0: Pt, p1: Pt, r: number, poly: Pt[]): boolean {
+// A circle of radius r SWEPT along the segment p0->p1 (the path it brushes).
+// NOTE: despite tracing a stadium shape, this is NOT the mounted double-base
+// "capsule" (two discrete circles — see rearCenter/centersAt/figureCenters).
+// It was named capsuleCrossesPoly before real capsule bases existed; renamed
+// to fence off that trap.
+function sweptCircleCrossesPoly(p0: Pt, p1: Pt, r: number, poly: Pt[]): boolean {
   if (circleTouchesPoly(p0, r, poly) || circleTouchesPoly(p1, r, poly)) return true;
   if (pointInPoly(p0, poly) || pointInPoly(p1, poly)) return true;
   for (let i = 0; i < poly.length; i++) {
@@ -132,9 +172,14 @@ function capsuleCrossesPoly(p0: Pt, p1: Pt, r: number, poly: Pt[]): boolean {
   return false;
 }
 
-// Speed for the turn: halved (round up) when starting in speed-halving hindering.
-export function effectiveSpeed(speed: number, pos: Pt, radius: number, terrain: TerrainPiece[]): number {
-  const slowed = terrain.some((t) => halvesSpeed(t) && circleTouchesPoly(pos, radius, t.polygon as Pt[]));
+// Speed for the turn: halved (round up) when starting in speed-halving
+// hindering. `centers` is every base-circle centre of the mover — EITHER
+// circle touching at move start halves a mounted figure's speed ("any part of
+// his base touching", Unl. p.12).
+export function effectiveSpeed(speed: number, centers: Pt[], radius: number, terrain: TerrainPiece[]): number {
+  const slowed = terrain.some(
+    (t) => halvesSpeed(t) && centers.some((c) => circleTouchesPoly(c, radius, t.polygon as Pt[])),
+  );
   return slowed ? Math.max(1, Math.ceil(speed / 2)) : speed;
 }
 
@@ -147,28 +192,40 @@ export function moveBlockReason(
   radius: number,
   terrain: TerrainPiece[],
   flies: boolean,
+  // Mounted movers: the rear circle's own segment. Endpoints are derived from
+  // the START and END facings (P5-R10) — the rotation sweep in between is
+  // approximated by the straight segment; the engine re-validates on submit.
+  rear?: { from: Pt; dest: Pt } | null,
 ): string | null {
+  const startCs: Pt[] = rear ? [from, rear.from] : [from];
+  const destCs: Pt[] = rear ? [dest, rear.dest] : [dest];
+  const sweeps: [Pt, Pt][] = rear ? [[from, dest], [rear.from, rear.dest]] : [[from, dest]];
   for (const t of terrain) {
-    if (blocksMove(t) && circleTouchesPoly(dest, radius, t.polygon as Pt[])) {
+    if (blocksMove(t) && destCs.some((c) => circleTouchesPoly(c, radius, t.polygon as Pt[]))) {
       return t.water === "deep" ? "can't end in deep water" : "can't end in blocking terrain";
     }
   }
   if (flies) return null;
-  const stuck = terrain.some((t) => blocksMove(t) && circleTouchesPoly(from, radius, t.polygon as Pt[]));
+  const stuck = terrain.some(
+    (t) => blocksMove(t) && startCs.some((c) => circleTouchesPoly(c, radius, t.polygon as Pt[])),
+  );
   if (stuck) return null; // escaping an illegal overlap — endpoint check only
-  const moving = Math.hypot(dest[0] - from[0], dest[1] - from[1]) > 1e-9;
+  const moving = sweeps.some(([a, b]) => Math.hypot(b[0] - a[0], b[1] - a[1]) > 1e-9);
   if (!moving) return null;
   for (const t of terrain) {
-    if (blocksMove(t) && capsuleCrossesPoly(from, dest, radius, t.polygon as Pt[])) {
+    if (blocksMove(t) && sweeps.some(([a, b]) => sweptCircleCrossesPoly(a, b, radius, t.polygon as Pt[]))) {
       return t.water === "deep" ? "path crosses deep water" : "path crosses blocking terrain";
     }
   }
   for (const t of terrain) {
     if (!hindersMove(t)) continue;
-    if (circleTouchesPoly(from, radius, t.polygon as Pt[])) continue; // started in it
+    if (startCs.some((c) => circleTouchesPoly(c, radius, t.polygon as Pt[]))) continue; // started in it
+    // Entry-stop mirrors "ends when the base crosses COMPLETELY into" (Unl.
+    // p.12): flag a pass-through only when every circle's sweep crosses and no
+    // circle ends touching — a long base straddling a small feature keeps going.
     if (
-      capsuleCrossesPoly(from, dest, radius, t.polygon as Pt[]) &&
-      !circleTouchesPoly(dest, radius, t.polygon as Pt[])
+      sweeps.every(([a, b]) => sweptCircleCrossesPoly(a, b, radius, t.polygon as Pt[])) &&
+      !destCs.some((c) => circleTouchesPoly(c, radius, t.polygon as Pt[]))
     ) {
       return t.low_wall ? "stop at the low wall" : "entering hindering ends the move — stop inside";
     }
@@ -214,14 +271,21 @@ export interface SnapCandidate {
 export function snapToContactRing(
   moverRadius: number,
   dest: Pt,
-  targets: { pos: Pt; radius: number; uid: number }[],
+  // `key` is the DISTINCT circle identity — a mounted figure contributes two
+  // entries with the same uid but different keys. The overlap filter skips by
+  // key, so a figure's SIBLING circle is never exempted (naive same-uid
+  // entries would offer snaps overlapping the figure's own waist). `uid`
+  // stays figure-level for the pocket same-figure skip and the returned
+  // contact report (faceUid).
+  targets: { pos: Pt; radius: number; uid: number; key?: string }[],
   window = 0.9,
 ): SnapCandidate[] {
-  const clear = (cp: Pt, skipA: number, skipB: number) =>
+  const keyOf = (t: { uid: number; key?: string }) => t.key ?? String(t.uid);
+  const clear = (cp: Pt, skipA: string, skipB: string) =>
     !targets.some(
       (o) =>
-        o.uid !== skipA &&
-        o.uid !== skipB &&
+        keyOf(o) !== skipA &&
+        keyOf(o) !== skipB &&
         Math.hypot(cp[0] - o.pos[0], cp[1] - o.pos[1]) < moverRadius + o.radius - 0.02,
     );
 
@@ -236,13 +300,16 @@ export function snapToContactRing(
     const err = Math.abs(dlen - gap);
     if (err > window) continue;
     const cp: Pt = [t.pos[0] + (dx / dlen) * gap, t.pos[1] + (dy / dlen) * gap];
-    if (clear(cp, t.uid, t.uid)) cands.push({ point: cp, uid: t.uid, err, pocket: false });
+    if (clear(cp, keyOf(t), keyOf(t))) cands.push({ point: cp, uid: t.uid, err, pocket: false });
   }
 
   for (let i = 0; i < targets.length; i++) {
     for (let j = i + 1; j < targets.length; j++) {
       const a = targets[i];
       const b = targets[j];
+      // No self-waist pockets: a mounted figure's own front+rear pair is not a
+      // two-contact notch in v1.
+      if (a.uid === b.uid) continue;
       const ra = moverRadius + a.radius;
       const rb = moverRadius + b.radius;
       const dx = b.pos[0] - a.pos[0];
@@ -258,7 +325,7 @@ export function snapToContactRing(
         const cp: Pt = [mx + s * (-dy / d) * h, my + s * (dx / d) * h];
         const err = Math.hypot(dest[0] - cp[0], dest[1] - cp[1]);
         if (err > window) continue;
-        if (clear(cp, a.uid, b.uid)) cands.push({ point: cp, uid: a.uid, uid2: b.uid, err, pocket: true });
+        if (clear(cp, keyOf(a), keyOf(b))) cands.push({ point: cp, uid: a.uid, uid2: b.uid, err, pocket: true });
       }
     }
   }
@@ -297,6 +364,12 @@ export interface LofFigure {
   eliminated: boolean;
   short_name: string;
   active_abilities?: { name: string }[];
+  // Mounted (double-base) figures: both circles participate in blocking,
+  // screening, and melee-gap tests. facing_deg lets the rear be derived when
+  // the server rear_pos is absent (fail-open: front-only if neither exists).
+  mounted?: boolean;
+  rear_pos?: [number, number];
+  facing_deg?: number;
 }
 
 export interface LofVerdict {
@@ -314,21 +387,55 @@ export function lofBlocker(
 ): LofVerdict {
   const ap = a.pos as Pt;
   const tp = t.pos as Pt;
+  // Sight line + range anchor on the FRONT dots (all measurements from the
+  // front-half centre dot, P5-R2); only SHAPE tests below go capsule-aware.
+  const centersOf = (f: LofFigure): Pt[] => {
+    if (!f.mounted) return [f.pos as Pt];
+    const rear =
+      (f.rear_pos as Pt | undefined) ??
+      (f.facing_deg != null
+        ? rearCenter(f.pos as Pt, (f.facing_deg * Math.PI) / 180, f.base_radius)
+        : null);
+    return rear ? [f.pos as Pt, rear] : [f.pos as Pt];
+  };
   const dist = Math.hypot(tp[0] - ap[0], tp[1] - ap[1]);
   // Front arc (facing_deg is a world +y-up angle; arc_deg is the HALF-angle).
-  const bearing = Math.atan2(tp[1] - ap[1], tp[0] - ap[0]);
   const facing = (a.facing_deg * Math.PI) / 180;
-  let delta = Math.abs(bearing - facing) % (2 * Math.PI);
-  if (delta > Math.PI) delta = 2 * Math.PI - delta;
-  const inArc = delta <= (a.arc_deg * Math.PI) / 180 + 1e-9;
+  const inArcTo = (target: Pt): boolean => {
+    const bearing = Math.atan2(target[1] - ap[1], target[0] - ap[0]);
+    let delta = Math.abs(bearing - facing) % (2 * Math.PI);
+    if (delta > Math.PI) delta = 2 * Math.PI - delta;
+    return delta <= (a.arc_deg * Math.PI) / 180 + 1e-9;
+  };
+  const inArc = inArcTo(tp);
   // MELEE figures get melee verdicts — ranged-LoF reasons (screening, range)
   // are meaningless for a range-0 attacker.
   if (a.range <= 0) {
-    const gap = dist - (a.base_radius + t.base_radius);
+    // Melee gap = min over circle pairs (either capsule may make the contact).
+    const aCs = centersOf(a);
+    const tCs = centersOf(t);
+    let gap = Infinity;
+    let nearT: Pt = tp;
+    let viaRear = false;
+    aCs.forEach((ac, ai) => {
+      for (const tc of tCs) {
+        const g = Math.hypot(tc[0] - ac[0], tc[1] - ac[1]) - (a.base_radius + t.base_radius);
+        if (g < gap) {
+          gap = g;
+          nearT = tc;
+          viaRear = ai === 1;
+        }
+      }
+    });
     if (gap > 0.02) {
       return { clear: false, reason: `melee — not in base contact (${gap.toFixed(1)}″ away)` };
     }
-    return inArc
+    // Arc truth mirrors the engine's contact_arc (P5-R9): contact through the
+    // attacker's own REAR circle is behind him for a <=180° total arc;
+    // otherwise the angular test at the front dot toward the nearest target
+    // circle centre.
+    const inArcContact = viaRear && a.arc_deg <= 90 + 1e-9 ? false : inArcTo(nearT);
+    return inArcContact
       ? { clear: true, reason: "in contact — close attack ⚔" }
       : { clear: false, reason: "in contact but BEHIND you — re-face to attack" };
   }
@@ -348,8 +455,11 @@ export function lofBlocker(
       !o.eliminated &&
       o.owner === a.owner &&
       o.uid !== a.uid &&
-      Math.hypot(tp[0] - (o.pos as Pt)[0], tp[1] - (o.pos as Pt)[1]) <=
-        t.base_radius + o.base_radius + 0.02,
+      centersOf(t).some((tc) =>
+        centersOf(o).some(
+          (oc) => Math.hypot(tc[0] - oc[0], tc[1] - oc[1]) <= t.base_radius + o.base_radius + 0.02,
+        ),
+      ),
   );
   const blastNote = !hasBlast
     ? ""
@@ -375,16 +485,21 @@ export function lofBlocker(
   }
   for (const o of figures) {
     if (o.eliminated || o.uid === a.uid || o.uid === t.uid) continue;
-    const op = o.pos as Pt;
     if (bothElev && o.elevation === 0) continue; // shot passes over ground bases
-    if (segDist(ap, tp, op, op) <= o.base_radius + 1e-6) {
+    // BOTH circles of a mounted blocker can cut the line of fire.
+    if (centersOf(o).some((oc) => segDist(ap, tp, oc, oc) <= o.base_radius + 1e-6)) {
       return { clear: false, reason: `blocked by ${o.short_name}'s base${blastNote}`, figUid: o.uid };
     }
   }
   for (const o of figures) {
     if (o.eliminated || o.owner !== a.owner || o.uid === a.uid) continue;
-    const op = o.pos as Pt;
-    const gap = Math.hypot(tp[0] - op[0], tp[1] - op[1]) - (t.base_radius + o.base_radius);
+    // Screening gap = min over target-circle x screener-circle pairs.
+    let gap = Infinity;
+    for (const tc of centersOf(t)) {
+      for (const oc of centersOf(o)) {
+        gap = Math.min(gap, Math.hypot(tc[0] - oc[0], tc[1] - oc[1]) - (t.base_radius + o.base_radius));
+      }
+    }
     if (gap <= 1e-6) {
       return { clear: false, reason: `${o.short_name} screens the target (P4-R25)`, figUid: o.uid };
     }
