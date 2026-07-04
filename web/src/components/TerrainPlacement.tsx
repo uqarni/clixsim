@@ -48,13 +48,35 @@ export default function TerrainPlacement({ initialView, onDone, onCancel }: Prop
   const myBudget = view.meta.terrain_budget.human ?? 0;
   const llmBudget = view.meta.terrain_budget.llm ?? 0;
 
+  // Retry the terrain-types fetch a few times before giving up — a one-shot
+  // fetch that races a backend restart (or any transient blip) used to strand
+  // the whole placement screen with no way to recover but a manual refresh.
   useEffect(() => {
-    getTerrainTypes()
-      .then((ts) => {
-        setTypes(ts);
-        setSelKey((k) => k ?? (ts[0]?.key ?? null));
-      })
-      .catch(() => setMsg("Could not load terrain types."));
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const attempt = (n: number) => {
+      getTerrainTypes()
+        .then((ts) => {
+          if (!alive) return;
+          setTypes(ts);
+          setSelKey((k) => k ?? (ts[0]?.key ?? null));
+          setMsg((m) => (m === "Could not load terrain types." ? "" : m));
+        })
+        .catch(() => {
+          if (!alive) return;
+          if (n < 5) {
+            setMsg(`Loading terrain types… (retrying ${n + 1}/5)`);
+            timer = setTimeout(() => attempt(n + 1), Math.min(2000, 300 * 2 ** n));
+          } else {
+            setMsg("Could not load terrain types — check the connection and reopen.");
+          }
+        });
+    };
+    attempt(0);
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+    };
   }, []);
 
   const selected = useMemo(() => types.find((t) => t.key === selKey) ?? null, [types, selKey]);
