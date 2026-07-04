@@ -80,10 +80,10 @@ def _fig_brief(db: FigureDB, f: FigureDef) -> dict:
 # Draft/sealed pool scope
 # --------------------------------------------------------------------------- #
 # Sets known to the pool system, and the ACTIVE selection (mutated per game by
-# set_pool_expansions from the New Game screen's checkboxes). Lancers joins the
-# default once the capsule stack fully ships (docs/lancers-plan.md rollout).
+# set_pool_expansions from the New Game screen's checkboxes). Both sets pool by
+# default (decision recorded in docs/lancers-plan.md §7).
 KNOWN_EXPANSIONS: tuple[str, ...] = ("Rebellion", "Lancers")
-DEFAULT_POOL_EXPANSIONS: frozenset[str] = frozenset({"Rebellion"})
+DEFAULT_POOL_EXPANSIONS: frozenset[str] = frozenset({"Rebellion", "Lancers"})
 POOL_EXPANSIONS: set[str] = set(DEFAULT_POOL_EXPANSIONS)
 
 

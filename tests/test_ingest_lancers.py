@@ -92,11 +92,21 @@ def test_ability_coverage(db):
     assert {ab.BOUND, ab.CHARGE, ab.INVULNERABILITY} <= used
 
 
-def test_pool_gate_until_full_support(db):
-    """Lancers figures stay out of draft pools until the capsule stack lands
-    (flip POOL_EXPANSIONS when docs/lancers-plan.md P6 completes)."""
-    pooled = {f.expansion for f in pool_figures(db)}
-    assert pooled <= POOL_EXPANSIONS
+def test_pool_scoping(db):
+    """Pools honour the active expansion selection; the default (both sets)
+    offers all 302 figures, and a Rebellion-only scope excludes cavalry."""
+    from clixengine.build import set_pool_expansions
+    try:
+        set_pool_expansions(None)
+        assert {f.expansion for f in pool_figures(db)} == POOL_EXPANSIONS
+        assert len(pool_figures(db)) == 302
+        set_pool_expansions(["Rebellion"])
+        assert len(pool_figures(db)) == 160
+        set_pool_expansions(["Lancers"])
+        assert len(pool_figures(db)) == 142
+        assert all(f.expansion == "Lancers" for f in pool_figures(db))
+    finally:
+        set_pool_expansions(None)  # restore the default for other tests
 
 
 def test_used_in_lancers_flags():

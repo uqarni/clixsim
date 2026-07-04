@@ -19,7 +19,9 @@ def test_deploy_phase_opens_without_terrain():
 
 def test_deploy_figure_within_band_and_rejections(db):
     e = _game(with_deploy=True)
-    uid = next(f.uid for f in e.state.living("human"))
+    # Single-base semantics: pick a non-mounted figure (mounted band fit has
+    # its own test in test_mounted_rules.py).
+    uid = next(f.uid for f in e.state.living("human") if not f.mounted)
     other = next(f.uid for f in e.state.living("human") if f.uid != uid)
     r = e.state.figure(uid).base_radius
 
