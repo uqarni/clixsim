@@ -1843,6 +1843,23 @@ class Engine:
                         entry["pushes"] = True
                         entry["pushing_members"] = pushers
                 out.append(entry)
+        # Magic Blast confusion: a group of casters who can each blast a target
+        # individually (unblockable LoF) will see their volley rejected on
+        # normal LoF/range grounds and reasonably cry "bug". Explain the ruling
+        # once: Magic Blast is a solo ranged combat action and can't be pooled.
+        if 3 <= len(uids) <= 5 \
+                and any(e["kind"] == "ranged_formation" and not e.get("ok") for e in out) \
+                and any(ab.has(f, ab.MAGIC_BLAST) for f in figs):
+            out.append({
+                "kind": "ranged_formation", "target": -1, "target_name": "-",
+                "primary": primary.uid, "primary_name": primary.short_name,
+                "members": list(uids), "ok": False,
+                "reason": "note: Magic Blast can't be combined into a volley - "
+                          "it's a solo ranged combat action, and a volley uses "
+                          "normal lines of fire and printed range. Blast "
+                          "individually instead: each caster ignores terrain "
+                          "and rolls its own d6.",
+            })
         return out
 
     # ------------------------------------------------------------------ #

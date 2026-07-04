@@ -321,3 +321,28 @@ def test_formation_attack_options_gated_on_phase_and_ended(db):
     e.state.phase = "battle"
     e.state.ended = True
     assert e.formation_attack_options([0, 1, 2]) == []
+
+
+def test_assist_options_explain_magic_blast_cannot_volley(db):
+    """Three casters who can each Magic Blast a target individually see their
+    volley rejected on normal-LoF grounds — the options must include the
+    'blast individually' ruling note so it doesn't read as a bug."""
+    e = build_engine(
+        db,
+        [
+            ("human", "Amazon Queen", (16.9, 5), math.pi / 2, 0),  # Magic Blast @ click 0
+            ("human", "Amazon Queen", (18, 5), math.pi / 2, 0),
+            ("human", "Amazon Queen", (19.1, 5), math.pi / 2, 0),
+            ("llm", "Werebear", (18, 9), -math.pi / 2, 0),   # blocker on the line
+            ("llm", "Werebear", (18, 13), -math.pi / 2, 0),  # intended target
+        ],
+    )
+    opts = e.formation_attack_options([0, 1, 2])
+    rejected = [o for o in opts if o["kind"] == "ranged_formation"
+                and o["target"] == 4 and not o["ok"]]
+    assert rejected  # the volley itself is illegal (middle shooter's LoF blocked)
+    note = [o for o in opts if o["target"] == -1 and "Magic Blast" in o["reason"]]
+    assert len(note) == 1 and "individually" in note[0]["reason"]
+    # ...and each caster's solo blast is indeed legal.
+    r = e.apply(RangedIntent(0, (4,), variant="magic_blast"))
+    assert r.ok and any(x["type"] == "magic_blast" for x in r.events)
