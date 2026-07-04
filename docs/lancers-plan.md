@@ -88,7 +88,8 @@ list is pinned in the ingest test.
 - `stats/special_abilities.json`: add `used_in_lancers` flags (28 ability ids appear on
   Lancers live clicks; all 28 already exist in the file).
 - New-game config: per-set checkboxes (Rebellion ✓ / Lancers ✓ default) filtering
-  draft/sealed pools on `expansion`.
+  draft/sealed pools on `expansion`, plus a **Lancers-only preset** (uncheck Rebellion)
+  for cavalry-heavy games. [DECIDED 2026-07-04]
 
 ## 2. The mounted ruleset
 
@@ -390,10 +391,9 @@ game-preserving deploy. PRD gains §5 (P5-R1…R11) + P4-R35 coverage update. Or
 data → geometry helpers + contact-swap sweep → engine rules → Charge/Bound/Invuln →
 AI → client → polish; each phase lands with its test batch.
 
-## 7. Open questions for Uzair
+## 7. Decisions (resolved 2026-07-04)
 
-1. **Draft pool default**: combined Rebellion+Lancers pool with per-set checkboxes
-   (both on)? Or also a Lancers-only mode?
-2. **Formations scope**: plan is faithful (mounted may join; capsule cohesion + rigid
-   client work included). Cheap alternative: bar mounted from formations in v1 (like
-   Mage Spawn) and cut that work — engine + client both simplify meaningfully.
+1. **Draft pool**: combined pool with per-set checkboxes, both on by default, plus a
+   Lancers-only preset.
+2. **Formations**: FAITHFUL — mounted figures may join formations (capsule cohesion +
+   rigid-move client work in scope); only Charge/Bound-active figures are barred.
