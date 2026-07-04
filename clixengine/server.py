@@ -407,6 +407,7 @@ class NewGameReq(BaseModel):
     board: float = 36.0
     opponent: str = "llm"  # "llm" | "heuristic"
     single_faction: bool = False  # same-faction armies (enables formations)
+    expansions: list[str] | None = None  # draft-pool sets; None = default (all)
 
 
 class ValidateMoveReq(BaseModel):
@@ -433,6 +434,7 @@ class ChatReq(BaseModel):
 # ------------------------------------------------------------------ #
 @app.post("/api/new_game")
 def new_game(req: NewGameReq):
+    set_pool_expansions(req.expansions)  # scope demo_armies' pool to the request
     eng = SESSION.new_game(req.points, req.seed, req.board, req.opponent, req.single_faction)
     return game_view(eng)
 
@@ -603,20 +605,29 @@ def chat(req: ChatReq):
 @app.get("/api/roster")
 def roster(expansions: str = ""):
     """Full drafting roster for the preconstructed builder, scoped to the
-    requested sets (comma-separated; empty = the current default)."""
+    requested sets (comma-separated; empty = the current default). Filters
+    LOCALLY — a read-only browse must not mutate the shared pool selection
+    under an in-flight construction stream."""
+    from .build import DEFAULT_POOL_EXPANSIONS, KNOWN_EXPANSIONS
     db = SESSION.db
-    exps = [e.strip() for e in expansions.split(",") if e.strip()] or None
-    set_pool_expansions(exps)
-    figs = sorted(pool_figures(db),
-                  key=lambda f: (f.faction, -f.points, f.short_name))
+    exps = {e.strip() for e in expansions.split(",")
+            if e.strip() and e.strip() in KNOWN_EXPANSIONS} or set(DEFAULT_POOL_EXPANSIONS)
+    figs = sorted(
+        (f for f in db.all_figures()
+         if getattr(f, "expansion", "Rebellion") in exps),
+        key=lambda f: (f.faction, -f.points, f.short_name))
     return {"figures": [_fig_brief(db, f) for f in figs]}
 
 
 @app.get("/api/sealed_packs")
-def sealed_packs(seed: int = 1):
+def sealed_packs(seed: int = 1, expansions: str = ""):
     """The human's 4 booster packs (5 figures each) to open one at a time. Uses
-    the same seed derivation the construction endpoint validates the draft against."""
+    the same seed derivation AND the same expansion scope the construction
+    endpoint validates the draft against — a mismatch dead-ends the flow with
+    'army uses figures not in your pool'."""
     db = SESSION.db
+    exps = [e.strip() for e in expansions.split(",") if e.strip()] or None
+    set_pool_expansions(exps)
     pool = sample_sealed_pool(db, seed * 7 + 1)
     packs = [[_brief(i) for i in pool[k * 5:(k + 1) * 5]] for k in range(4)]
     return {"packs": packs}

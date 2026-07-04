@@ -28,6 +28,7 @@ from .geometry import (
     in_base_contact,
     in_front_arc,
     in_rear_arc,
+    normalize_angle,
     polygon_area,
     polygon_extent,
     polygon_is_simple,
@@ -145,9 +146,11 @@ class Engine:
         Returns (clear, reason)."""
         a = self.state.figure(attacker_uid)
         t = self.state.figure(target_uid)
-        # Arc/range/LoF all anchor on front dots (P5-R2); a mounted target's
-        # nearest circle decides the arc bearing.
-        if not in_front_arc(a.position, a.facing, arc_target_point(a, t), a.arc_half_angle):
+        # Arc/range/LoF ALL anchor on the front dots (P5-R2): the line of fire
+        # is drawn centre-dot to centre-dot and must pass through the firer's
+        # front arc — so the arc test uses the same point the segment uses.
+        # (arc_target_point / nearest-circle anchoring is for CLOSE contact.)
+        if not in_front_arc(a.position, a.facing, t.position, a.arc_half_angle):
             return False, "target not in firer's front arc"
         if distance(a.position, t.position) > a.range + 1e-9:
             return False, "target beyond range"
@@ -480,8 +483,13 @@ class Engine:
         rej = self._validate_move(f, d, facing if facing is not None else f.facing)
         if rej is not None:
             return {"ok": False, "reason": rej.reason, "detail": rej.detail}
-        # Legal. Report whether the move triggers a break-away roll, and its odds.
-        moving = distance(f.position, d) > 1e-9
+        # Legal. Report whether the move triggers a break-away roll, and its
+        # odds — for a MOUNTED figure a pure facing change is also repositioning
+        # (the rear circle swings), mirroring _apply_move.
+        moving = distance(f.position, d) > 1e-9 or (
+            ab.is_mounted(f) and facing is not None
+            and abs(normalize_angle(facing - f.facing)) > 1e-9
+        )
         contacts = self.state.opposing_contacts(f)
         result: dict = {"ok": True}
         if moving and contacts:
@@ -495,6 +503,12 @@ class Engine:
     # Legal-action generation
     # ------------------------------------------------------------------ #
     def can_act(self, figure: Figure) -> bool:
+        # An armed Charge/Bound rider keeps its figure actionable even though
+        # it already acted — the free follow-up is part of its move action.
+        pr = getattr(self, "_pending_rider", None)
+        if (pr is not None and pr["uid"] == figure.uid and figure.is_alive
+                and figure.owner == self.state.active_player):
+            return True
         return (
             figure.is_alive
             and figure.owner == self.state.active_player
@@ -504,17 +518,11 @@ class Engine:
 
     def actionable_figures(self) -> list[Figure]:
         can = [f for f in self.state.living(self.state.active_player) if self.can_act(f)]
-        # An armed Charge/Bound rider keeps its figure actionable even though it
-        # already acted (and even at zero budget) — the follow-up attack is free.
         pr = getattr(self, "_pending_rider", None)
-        if pr is not None:
-            rf = self.state.figures.get(pr["uid"])
-            if rf is not None and rf.is_alive and rf.owner == self.state.active_player:
-                can = can + [rf] if rf not in can else can
         if self._actions_remaining() > 0:
             return can
         # No budget left, but Quickness figures may still take a free move —
-        # and an armed rider still strikes.
+        # and an armed Charge/Bound rider still strikes (can_act covers it).
         return [f for f in can
                 if ab.has(f, ab.QUICKNESS) or (pr is not None and f.uid == pr["uid"])]
 
@@ -709,19 +717,34 @@ class Engine:
     def apply(self, intent: Intent) -> Result | Rejection:
         if self.state.ended:
             return Rejection("game_over", "the game has already ended")
+        # Battle intents only resolve in the battle phase — setup mutations flow
+        # through the dedicated deploy_figure/place_terrain/finish_deploy entry
+        # points. Without this gate a client could act during setup (out of the
+        # deploy band, and for free: begin_first_turn resets the counters).
+        if self.state.phase != "battle":
+            return Rejection("not_battle", "the battle has not started yet")
         # A new resolving action expires any un-redeemed free-spin offers (P4-R9 is
         # a reaction to a *just-made* contact); free-spin and (non-action) ability
         # toggles don't expire it.
         if not isinstance(intent, (FreeSpinIntent, ToggleAbilityIntent)):
             self._pending_free_spins.clear()
-        # An unredeemed Charge/Bound rider expires the moment anything OTHER
-        # than the rider itself or the interposed free spin resolves — it is
-        # part of the move action, not a banked attack.
-        if getattr(self, "_pending_rider", None) is not None and not (
-            isinstance(intent, (FreeSpinIntent, ToggleAbilityIntent))
-            or getattr(intent, "rider", False)
-        ):
-            self._pending_rider = None
+        rider_before = getattr(self, "_pending_rider", None)
+        result = self._dispatch(intent)
+        # An unredeemed Charge/Bound rider expires when anything OTHER than the
+        # rider itself or the interposed free spin RESOLVES — it is part of the
+        # move action, not a banked attack. Expiry happens after dispatch so a
+        # merely-REJECTED intent (no state change) cannot burn the free strike,
+        # and only a rider that PRE-DATED this intent expires (the arming move
+        # itself must not discard what it just armed). The deferred pushing
+        # click from the move half lands on expiry.
+        if (rider_before is not None and result.ok
+                and getattr(self, "_pending_rider", None) is rider_before
+                and not (isinstance(intent, (FreeSpinIntent, ToggleAbilityIntent))
+                         or getattr(intent, "rider", False))):
+            self._expire_rider(result.events)
+        return result
+
+    def _dispatch(self, intent: Intent) -> Result | Rejection:
         if isinstance(intent, PassIntent):
             return self._apply_pass(intent)
         if isinstance(intent, MoveIntent):
@@ -741,6 +764,19 @@ class Engine:
         if isinstance(intent, ToggleAbilityIntent):
             return self._apply_toggle_ability(intent)
         return Rejection("unknown_intent", type(intent).__name__)
+
+    def _expire_rider(self, events: list[dict]) -> None:
+        """Discard the armed Charge/Bound rider and land the move half's
+        DEFERRED pushing click (P4-R4 applies pushing 'after the current action
+        resolves' — the action isn't over while the rider is live)."""
+        pr = getattr(self, "_pending_rider", None)
+        self._pending_rider = None
+        if not pr or not pr.get("pushing"):
+            return
+        f = self.state.figures.get(pr["uid"])
+        if f is not None and f.is_alive:
+            self._apply_pushing_damage(f, events)
+            self._check_victory(events)
 
     def _newly_contacted_opponents(self, mover: Figure, before_uids: set[int]) -> list[Figure]:
         """Opposing figures the ``mover`` has just entered base contact with (were
@@ -814,7 +850,8 @@ class Engine:
         a = self.state.figure(attacker_uid)
         t = self.state.figure(target_uid)
         base_def = t.defense
-        ba = 2 if (attack_type == "ranged" and ab.has(t, ab.BATTLE_ARMOR)) else 0
+        ba = 2 if (attack_type == "ranged"
+                   and (ab.has(t, ab.BATTLE_ARMOR) or ab.has(t, ab.INVULNERABILITY))) else 0
         best_share = 0
         for fr in self.state.friends_of(t):
             if ab.has(fr, ab.DEFEND) and figures_in_base_contact(t, fr):
@@ -1007,20 +1044,37 @@ class Engine:
         events: list[dict] = []
         pushing = self._consume_nonpass(f, free=intent.free)
 
+        # Pre-move snapshots: the rider's eligibility (Charge/Bound showing, 1x
+        # speed cap) is judged at MOVE time — Pole Arm / pushing clicks landing
+        # later in this action must not retro-deny the card-granted attack.
+        start = f.position
+        start_facing = f.facing
+        start_circles = f.circles()  # pre-move footprint (hindering start-halving)
+        rider_kind = ab.charge_bound_kind(f)
+        flies = ab.ignores_figure_bases(f)
+        normal_speed = f.speed if flies else terr.footprint_effective_speed(
+            self.state.terrain, f.speed, start_circles)
+
         # Break-away if in base contact with an opposing figure (P4-R8); Flight /
         # Aquatic and MOUNTED warriors only fail on a natural 1 (§Flight /
-        # §Aquatic / P5-R3).
+        # §Aquatic / P5-R3). For a MOUNTED figure a pure facing change is also
+        # movement — the rotation swings the rear circle, so it can break (or
+        # make) contact and must roll like any repositioning (a zero-distance
+        # re-face used to slip every gate below and disengage with certainty).
         dist = distance(f.position, dest)
+        rotating = ab.is_mounted(f) and abs(
+            normalize_angle(intent.facing - f.facing)) > 1e-9
+        repositioning = dist > 1e-9 or rotating
         contacts = self.state.opposing_contacts(f)
         before_contacts = {c.uid for c in contacts}
         # Shake Off snapshot (P5-R5): the opposing figures in contact OUTSIDE the
         # mounted mover's front arc, classified BEFORE anything moves.
         shake_targets = (
             [c for c in contacts if contact_is_rear(f, c)]
-            if ab.is_mounted(f) and dist > 1e-9 else []
+            if ab.is_mounted(f) and repositioning else []
         )
         broke_away = True
-        if contacts and dist > 1e-9:
+        if contacts and repositioning:
             d1 = self.rng.d6("break_away", f"{f.short_name} breaking away")
             broke_away = d1 >= ab.break_away_min(f)
             events.append(self.log.emit(
@@ -1042,8 +1096,6 @@ class Engine:
                     if c.eliminated:
                         self._on_eliminated(c, events)
 
-        start = f.position
-        start_circles = f.circles()  # pre-move footprint (hindering start-halving)
         if broke_away:
             f.position = dest
             # Anti-thrash memory (plan 2.6): remember where the figure came
@@ -1063,41 +1115,47 @@ class Engine:
         ))
 
         # Pole Arm: an enemy whose front arc the mover now sits in deals 1 click.
-        if broke_away and dist > 1e-9:
+        if broke_away and repositioning:
             self._apply_pole_arm(f, events)
 
-        # Free spin (P4-R9): opposing figures the mover just contacted may re-face.
-        if broke_away and dist > 1e-9 and f.is_alive:
+        # Free spin (P4-R9): opposing figures the mover just contacted may re-face
+        # (incl. contacts made by a mounted rear circle swinging on a rotation).
+        if broke_away and repositioning and f.is_alive:
             newly = self._newly_contacted_opponents(f, before_contacts)
             if newly:
                 self._pending_free_spins.update(o.uid for o in newly)
                 events.append(self.log.emit(
                     "free_spin_offer", by=f.uid, spinners=[o.uid for o in newly]))
 
-        if pushing and f.is_alive:
+        # Charge/Bound rider (P5 §2.1): arm the free follow-up attack when the
+        # figure moved at most its NORMAL speed (judged from the pre-move dial)
+        # and did not start the turn in enemy contact. It resolves as a separate
+        # intent AFTER the free-spin window — the defender's spin legally
+        # interposes before the strike.
+        rider_armed = False
+        if (rider_kind and broke_away and f.is_alive and not self.state.ended
+                and f.uid not in getattr(self, "_turn_start_contacted", set())
+                and dist <= normal_speed + 1e-9):
+            rider_armed = True
+            # Pushing is DEFERRED while the rider is live: the rulebook applies
+            # the pushing click after the whole action resolves (P4-R4 / attack
+            # sequence step 10), and the move+strike is ONE action. It lands
+            # when the rider resolves or expires (_expire_rider).
+            self._pending_rider = {"uid": f.uid, "kind": rider_kind,
+                                   "pushing": bool(pushing)}
+            events.append(self.log.emit(
+                "rider_armed", figure=f.uid, kind=rider_kind,
+                ability="Charge" if rider_kind == "close" else "Bound"))
+
+        if pushing and not rider_armed and f.is_alive:
             self._apply_pushing_damage(f, events)
         self._check_victory(events)
-
-        # Charge/Bound rider (P5 §2.1): arm the free follow-up attack when the
-        # figure moved at most its NORMAL speed and did not start the turn in
-        # enemy contact. It resolves as a separate intent AFTER the free-spin
-        # window — the defender's spin legally interposes before the strike.
-        kind = ab.charge_bound_kind(f)
-        if (kind and broke_away and f.is_alive and not self.state.ended
-                and f.uid not in getattr(self, "_turn_start_contacted", set())):
-            flies = ab.ignores_figure_bases(f)
-            normal_speed = f.speed if flies else terr.footprint_effective_speed(
-                self.state.terrain, f.speed, start_circles)
-            if dist <= normal_speed + 1e-9:
-                self._pending_rider = {"uid": f.uid, "kind": kind}
-                events.append(self.log.emit(
-                    "rider_armed", figure=f.uid, kind=kind,
-                    ability="Charge" if kind == "close" else "Bound"))
 
         summary = (
             f"{f.short_name} moves to ({f.position.x:.1f},{f.position.y:.1f})"
             if broke_away
-            else f"{f.short_name} fails to break away, re-faces"
+            else f"{f.short_name} fails to break away"
+            + (", re-faces" if not ab.is_mounted(f) else "")
         )
         return Result("move", events, summary)
 
@@ -1135,12 +1193,13 @@ class Engine:
             # move. "As if he had been given a ranged combat action" — every
             # normal gate below applies (incl. P4-R23: bounding INTO contact
             # forfeits the shot). Skips _precheck (the figure already acted).
+            # The rider is consumed AFTER the gates pass (below), so a rejected
+            # target pick can be retried instead of burning the free shot.
             if intent.variant != "normal":
                 return Rejection("bad_rider", "a Bound rider is a normal ranged attack")
             f = self._rider_precheck(intent.attacker_uid, "ranged")
             if isinstance(f, Rejection):
                 return f
-            self._pending_rider = None  # consumed, hit or miss
         else:
             f = self._precheck(intent.attacker_uid)
             if isinstance(f, Rejection):
@@ -1190,9 +1249,14 @@ class Engine:
                 return Rejection("no_lof", reason)
 
         events: list[dict] = []
-        # A rider consumes no action/token and never re-pushes — the move half
-        # of the same action already did all the bookkeeping.
-        pushing = False if rider else self._consume_nonpass(f)
+        # A rider consumes no action/token — the move half of the same action
+        # did the bookkeeping — but the move's DEFERRED pushing click (if any)
+        # lands with the rider's resolution (_finish_action applies it).
+        if rider:
+            pushing = bool(self._pending_rider and self._pending_rider.get("pushing"))
+            self._pending_rider = None  # consumed, hit or miss (gates all passed)
+        else:
+            pushing = self._consume_nonpass(f)
         d1, d2, total = self.rng.roll_2d6("attack", f"{f.short_name} ranged")
         multi = len(targets) > 1
         for t in targets:
@@ -1228,12 +1292,13 @@ class Engine:
             # Charge (P5 §2.1): the free follow-up strike from the just-resolved
             # move, "as if he had been given a close combat action" — normal
             # gates apply (front-arc contact, demoralized). Skips _precheck.
+            # Consumed only after the gates pass, so a bad target pick can be
+            # retried instead of burning the free strike.
             if intent.variant != "normal":
                 return Rejection("bad_rider", "a Charge rider is a normal close attack")
             f = self._rider_precheck(intent.attacker_uid, "close")
             if isinstance(f, Rejection):
                 return f
-            self._pending_rider = None  # consumed, hit or miss
         else:
             f = self._precheck(intent.attacker_uid)
             if isinstance(f, Rejection):
@@ -1257,9 +1322,14 @@ class Engine:
             return Rejection("out_of_arc", "target not in attacker's front arc (P4-R27)")
 
         events: list[dict] = []
-        # A rider consumes no action/token and never re-pushes — the move half
-        # of the same action already did all the bookkeeping.
-        pushing = False if rider else self._consume_nonpass(f)
+        # A rider consumes no action/token — the move half of the same action
+        # did the bookkeeping — but the move's DEFERRED pushing click (if any)
+        # lands with the rider's resolution (_finish_action applies it).
+        if rider:
+            pushing = bool(self._pending_rider and self._pending_rider.get("pushing"))
+            self._pending_rider = None  # consumed, hit or miss (gates all passed)
+        else:
+            pushing = self._consume_nonpass(f)
 
         rear = contact_is_rear(t, f)
         atk = f.attack + (1 if rear else 0)
@@ -1338,7 +1408,7 @@ class Engine:
         t = self.state.figures.get(intent.target_uids[0])
         if t is None or not t.is_alive or t.owner == f.owner:
             return Rejection("bad_target", "target must be a living opponent")
-        if not in_front_arc(f.position, f.facing, arc_target_point(f, t), f.arc_half_angle):
+        if not in_front_arc(f.position, f.facing, t.position, f.arc_half_angle):
             return Rejection("out_of_arc", "target not in firer's front arc")
         if distance(f.position, t.position) > f.range + 1e-9:
             return Rejection("out_of_range", "target beyond range")
@@ -1462,7 +1532,7 @@ class Engine:
             return Rejection("bad_target", "target is in base contact with an opponent")
         if ab.has(t, ab.MAGIC_IMMUNITY):
             return Rejection("magic_immune", f"{t.short_name} is immune to Magic effects")
-        if not in_front_arc(f.position, f.facing, arc_target_point(f, t), f.arc_half_angle):
+        if not in_front_arc(f.position, f.facing, t.position, f.arc_half_angle):
             return Rejection("out_of_arc", "target not in firer's front arc")
         if distance(f.position, t.position) > f.range + 1e-9:
             return Rejection("out_of_range", "target beyond range")
@@ -1600,6 +1670,9 @@ class Engine:
                 continue
             if circles_overlap(drop_circles, o.circles()):
                 return Rejection("end_on_base", "levitated figure may not end on a base")
+        if self.state.terrain and terr.footprint_in_blocking(self.state.terrain, drop_circles):
+            return Rejection("in_blocking",
+                             "levitated figure may not be placed in blocking terrain")
         events: list[dict] = []
         pushing = self._consume_nonpass(f)
         t.position = dest
@@ -1612,33 +1685,50 @@ class Engine:
 
     def _free_contact_position(self, anchor: Figure, fig: Figure) -> tuple[Vec, float]:
         """A legal (position, facing) touching the anchor for a returning figure
-        (§Necromancy). Probes 16 bearings around EACH of the anchor's circles;
-        the placed figure faces outward, so a mounted revenant's rear circle
-        trails back toward the anchor's far side and gets the full legality
-        check (bounds/overlap — touching others is fine, overlap is not)."""
+        (§Necromancy). Probes 16 bearings around EACH of the anchor's circles,
+        trying several facings per spot — a mounted revenant facing OUTWARD
+        would drop its rear circle exactly on the anchor's centre (full
+        overlap), so the inward facing (rear trailing away) is tried first.
+        Every candidate, including the fallbacks, passes the full footprint
+        legality check (bounds / overlap / blocking terrain)."""
+        def legal(p: Vec, facing: float) -> bool:
+            circles = fig.circles(p, facing)
+            if not self.state.board.contains_circles(circles):
+                return False
+            if circles_overlap(circles, anchor.circles()):
+                return False
+            if any(
+                o.uid not in (anchor.uid, fig.uid)
+                and circles_overlap(circles, o.circles())
+                for o in self.state.living()
+            ):
+                return False
+            if self.state.terrain and terr.footprint_in_blocking(
+                self.state.terrain, circles
+            ):
+                return False
+            return True
+
         for ac, ar in anchor.circles():
             gap = ar + fig.base_radius
             for k in range(16):
                 ang = 2 * math.pi * k / 16
                 p = Vec(ac.x + gap * math.cos(ang), ac.y + gap * math.sin(ang))
-                facing = ang  # outward
-                circles = fig.circles(p, facing)
-                if not self.state.board.contains_circles(circles):
-                    continue
-                if any(
-                    o.uid not in (anchor.uid, fig.uid)
-                    and circles_overlap(circles, o.circles())
-                    for o in self.state.living()
-                ) or circles_overlap(circles, anchor.circles()):
-                    continue
-                if self.state.terrain and terr.footprint_in_blocking(
-                    self.state.terrain, circles
-                ):
-                    continue
-                return p, facing
-        fallback = Vec(anchor.position.x,
-                       anchor.position.y + anchor.base_radius + fig.base_radius)
-        return fallback, math.pi / 2
+                # Inward first (rear trails outward, always anchor-clear for a
+                # mounted revenant), then the perpendiculars, then outward.
+                for facing in (ang + math.pi, ang + math.pi / 2, ang - math.pi / 2, ang):
+                    if legal(p, facing):
+                        return p, normalize_angle(facing)
+        # Last resort: widen the ring straight above the anchor, still fully
+        # legality-checked — never return a known-overlapping placement.
+        for extra in (0.0, fig.base_radius, 2 * fig.base_radius, 4 * fig.base_radius):
+            p = Vec(anchor.position.x,
+                    anchor.position.y + anchor.base_radius + fig.base_radius + extra)
+            if legal(p, -math.pi / 2):
+                return p, -math.pi / 2
+        return (Vec(anchor.position.x,
+                    anchor.position.y + anchor.base_radius + fig.base_radius),
+                -math.pi / 2)
 
     # ------------------------------------------------------------------ #
     # Formations (P4-R11..R16, R29)
@@ -1783,9 +1873,18 @@ class Engine:
                             "must_stop_in_hindering",
                             f"{g.short_name} must stop on entering hindering terrain",
                         )
-        if not self._positions_cohesive(
-            [g.circles(d, fac) for g, d, fac in zip(figs, dests, facings)]
-        ):
+        end_footprints = [g.circles(d, fac) for g, d, fac in zip(figs, dests, facings)]
+        # Members may not end overlapping EACH OTHER either — a mounted member's
+        # rear circle swings on the destination re-face and can land on a fellow
+        # member (the earlier loop only checks against non-members).
+        for i in range(len(figs)):
+            for j in range(i + 1, len(figs)):
+                if circles_overlap(end_footprints[i], end_footprints[j]):
+                    return Rejection(
+                        "end_on_base",
+                        f"{figs[i].short_name} would end on {figs[j].short_name}'s base",
+                    )
+        if not self._positions_cohesive(end_footprints):
             return Rejection("bad_formation", "formation must stay cohesive (one touching group) at the end")
         events: list[dict] = []
         pushers = self._token_formation(figs)
@@ -1798,10 +1897,12 @@ class Engine:
             if g.is_alive:
                 self._apply_pole_arm(g, events)
         # Free spin (P4-R9): members can't start in enemy contact (rejected above),
-        # so every opponent now touching a member was just contacted.
+        # so every opponent now touching a member was just contacted. The mounted
+        # exception is DEFENDER-side only — a mounted MEMBER contacting a standard
+        # defender still grants the spin (mirrors _newly_contacted_opponents).
         spun: set[int] = set()
         for g in figs:
-            if not g.is_alive or ab.is_mounted(g):
+            if not g.is_alive:
                 continue
             for o in self.state.opposing_contacts(g):
                 if o.uid not in spun and not ab.is_mounted(o):
@@ -2069,6 +2170,10 @@ class Engine:
     # ------------------------------------------------------------------ #
     def end_turn(self) -> Result:
         events = []
+        # An armed rider dies with the turn — and its move half's deferred
+        # pushing click must land before the turn flips (P4-R4).
+        if getattr(self, "_pending_rider", None) is not None:
+            self._expire_rider(events)
         active = self.state.active_player
         for f in self.state.figures.values():
             if f.owner == active:

@@ -360,6 +360,8 @@ def _support_candidates(engine, figure, cands, aids):
     # contact dots and the engine would have accepted the heal.
     if ab.HEALING in aids and not state.opposing_contacts(figure):
         for fr in state.friends_of(figure):
+            if ab.INVULNERABILITY in fr.active_ability_ids():
+                continue  # cannot be healed (card text) — the heal would zero out
             if _wounded(fr) and not state.opposing_contacts(fr) \
                     and figures_in_base_contact(figure, fr):
                 # Healing ignores all modifiers, so the hit chance is raw attack
@@ -384,8 +386,8 @@ def _support_candidates(engine, figure, cands, aids):
         for fr in state.friends_of(figure):
             if not _wounded(fr) or state.opposing_contacts(fr):
                 continue
-            if ab.MAGIC_IMMUNITY in fr.active_ability_ids():
-                continue
+            if fr.active_ability_ids() & {ab.MAGIC_IMMUNITY, ab.INVULNERABILITY}:
+                continue  # magic-immune or unhealable (Invulnerability card text)
             if distance(figure.position, fr.position) > figure.range + 1e-9:
                 continue
             if not in_front_arc(figure.position, figure.facing, fr.position, figure.arc_half_angle):
@@ -763,6 +765,28 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
                              {"target": ally.uid, "intent_hint": "heal_approach",
                               "in_reach_after": False})
 
+    # ---- Gallop (P5 §2.1): Charge/Bound doubles the move budget when the
+    # rider is forfeited. Without this probe the AI could never use the 2x
+    # branch its own threat model and prompt advertise — offered only when the
+    # nearest enemy sits beyond the 1x envelope, so it never competes with a
+    # rider-arming approach.
+    cb_kind = ab.charge_bound_kind(figure)
+    if cb_kind and enemies and not demoralized and not free:
+        nearest = min(enemies, key=lambda e: distance(figure.position, e.position))
+        d = distance(figure.position, nearest.position)
+        if d > eff_speed + 1.0:
+            step = min(2 * eff_speed,
+                       max(0.0, d - (figure.base_radius + nearest.base_radius)))
+            if step > eff_speed + 0.5:
+                dest = _clamp_to_board(
+                    engine, _point_toward(figure.position, nearest.position, step),
+                    figure.base_radius)
+                add_move(dest, _facing_toward(dest, nearest.position),
+                         f"Gallop toward {nearest.short_name} (2x speed — forfeits "
+                         f"the free strike this turn)",
+                         {"target": nearest.uid, "intent_hint": "approach",
+                          "gallop": True})
+
 
 # ====================================================================== #
 # Formation candidates (P4-R11..R16, R29) — turn-level, not per-figure.
@@ -828,11 +852,15 @@ def _formation_translation(engine: Engine, cluster: list[Figure], off: Vec,
         dests.append((nd.x, nd.y))
         facings.append(fac)
     # Rigid translation preserves front-dot geometry, but the re-facing at the
-    # destination swings mounted rear circles — re-check end cohesion so the
-    # engine never rejects a proposal we made (mirror of _apply_formation_move).
-    if not engine._positions_cohesive([
-        f.circles(Vec(*d), fc) for f, d, fc in zip(cluster, dests, facings)
-    ]):
+    # destination swings mounted rear circles — re-check end cohesion AND
+    # member-vs-member overlap so the engine never rejects a proposal we made
+    # (mirror of _apply_formation_move).
+    end_footprints = [f.circles(Vec(*d), fc) for f, d, fc in zip(cluster, dests, facings)]
+    for i in range(len(cluster)):
+        for j in range(i + 1, len(cluster)):
+            if circles_overlap(end_footprints[i], end_footprints[j]):
+                return None
+    if not engine._positions_cohesive(end_footprints):
         return None
     return dests, facings
 
@@ -917,7 +945,8 @@ def _make_close_formations(engine: Engine, members: list[Figure], cands: list[Ca
         attackers = [
             f for f in members
             if figures_in_base_contact(f, t)
-            and in_front_arc(f.position, f.facing, t.position, f.arc_half_angle)
+            and in_front_arc(f.position, f.facing, arc_target_point(f, t),
+                             f.arc_half_angle)
         ]
         if len(attackers) < 2:
             continue

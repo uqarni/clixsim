@@ -494,11 +494,14 @@ export default function App() {
             setFxSeq((n) => n + 1);
           }
         }
-        setView(res.view);
         setArmed(null);
         setMoveGhost(null);
         setPendingMove(null);
       }
+      // The response always carries the authoritative view — adopt it on
+      // rejection too, or engine-side expiries (rider offers, spin windows)
+      // leave the client rendering stale state.
+      if (res.view) setView(res.view);
     },
     [log, view],
   );

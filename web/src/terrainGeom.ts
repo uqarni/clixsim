@@ -220,11 +220,12 @@ export function moveBlockReason(
   for (const t of terrain) {
     if (!hindersMove(t)) continue;
     if (startCs.some((c) => circleTouchesPoly(c, radius, t.polygon as Pt[]))) continue; // started in it
-    // Entry-stop mirrors "ends when the base crosses COMPLETELY into" (Unl.
-    // p.12): flag a pass-through only when every circle's sweep crosses and no
-    // circle ends touching — a long base straddling a small feature keeps going.
+    // Entry-stop mirror of the ENGINE's footprint_hindering_entry_violation:
+    // ANY circle sweeping into the piece without ANY circle ending in touch is
+    // a violation (an every-circles test showed green ghosts for mounted moves
+    // the engine rejects when only the front circle clips a bush).
     if (
-      sweeps.every(([a, b]) => sweptCircleCrossesPoly(a, b, radius, t.polygon as Pt[])) &&
+      sweeps.some(([a, b]) => sweptCircleCrossesPoly(a, b, radius, t.polygon as Pt[])) &&
       !destCs.some((c) => circleTouchesPoly(c, radius, t.polygon as Pt[]))
     ) {
       return t.low_wall ? "stop at the low wall" : "entering hindering ends the move — stop inside";
