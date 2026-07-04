@@ -91,8 +91,14 @@ def _clamp_to_board(engine: Engine, p: Vec, radius: float) -> Vec:
 
 
 def _contact_point(engine: Engine, mover: Figure, target: Figure) -> Vec:
-    gap = mover.base_radius + target.base_radius
-    return _point_toward(target.position, mover.position, gap)
+    """Front-dot destination that puts the mover's FRONT circle in contact with
+    the target's NEAREST circle (a mounted target's rear circle is often the
+    closer approach; a mounted mover charges in face-first). The mover's own
+    rear placement is validated by _move_illegal at the candidate's facing."""
+    near = min(target.circles(),
+               key=lambda c: distance(c[0], mover.position))
+    gap = mover.base_radius + near[1]
+    return _point_toward(near[0], mover.position, gap)
 
 
 def _wounded(f: Figure) -> bool:
@@ -578,9 +584,12 @@ def _move_candidates(engine, figure, enemies, cands, demoralized, free: bool):
             # Flank: a second contact point on the target's REAR arc (+1 attack,
             # no retaliation facing). Only reachable on oblique approaches — the
             # straight-segment move rule forbids crossing the target's base.
+            # "Behind" a mounted target means behind its REAR circle — the
+            # trailing half of the peanut, 2r deeper than the front dot.
+            rear_c = target.circles()[-1][0]
             behind = Vec(
-                target.position.x - math.cos(target.facing) * (figure.base_radius + target.base_radius),
-                target.position.y - math.sin(target.facing) * (figure.base_radius + target.base_radius),
+                rear_c.x - math.cos(target.facing) * (figure.base_radius + target.base_radius),
+                rear_c.y - math.sin(target.facing) * (figure.base_radius + target.base_radius),
             )
             if (not contact_rear
                     and distance(figure.position, behind) <= eff_speed + 1e-9):

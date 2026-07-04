@@ -89,6 +89,9 @@ class HeuristicAI:
 def _heuristic_reason(cand: Candidate) -> str:
     a = cand.annotation
     hit = a.get("hit_odds")
+    if cand.kind in ("charge_strike", "bound_shot"):
+        odds = f" ({round(hit * 100)}% hit)" if isinstance(hit, (int, float)) else ""
+        return f"The free Charge/Bound follow-up — costs nothing{odds}."
     if cand.kind in ("close", "ranged", "weapon_master", "magic_blast", "flame_lightning",
                      "shockwave", "close_formation", "ranged_formation"):
         odds = f" ({round(hit * 100)}% hit)" if isinstance(hit, (int, float)) else ""

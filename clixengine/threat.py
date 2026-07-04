@@ -114,7 +114,10 @@ def expected_incoming_clicks(engine, mover: Figure, at: Vec) -> tuple[float, flo
                 per = ab.damage_after_defenses(mover, e.damage, "ranged", False)
                 imm += odds * per
                 continue
-        reach = e.speed + (e.range if e.range > 0
+        # Charge/Bound enemies close at DOUBLE speed (P5 §2.1) — their kill
+        # zone is far deeper than the printed speed suggests.
+        e_speed = e.speed * (2 if ab.charge_bound_kind(e) else 1)
+        reach = e_speed + (e.range if e.range > 0
                            else e.base_radius + mover.base_radius)
         if d <= reach:
             eff_def = ab.effective_defense(engine.state, mover, "close", 0)

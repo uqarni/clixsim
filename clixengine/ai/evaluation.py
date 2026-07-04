@@ -15,7 +15,7 @@ from ..candidates import Candidate
 from ..engine import Engine
 from ..geometry import Vec, distance, in_base_contact, in_front_arc
 from ..probability import hit_probability
-from ..state import Figure, GameState
+from ..state import Figure, GameState, figure_gap, figures_in_base_contact
 from ..threat import clicks_to_demoralized
 
 # Support abilities that make a target a force multiplier: a click of damage
@@ -48,7 +48,8 @@ def evaluate_state(engine: Engine, player: str) -> float:
     threat = 0.0
     for f in state.living(player):
         for e in state.opponents_of(f):
-            reach = f.range if f.is_ranged else (f.speed + f.base_radius + e.base_radius)
+            spd = f.speed * (2 if ab.charge_bound_kind(f) else 1)
+            reach = f.range if f.is_ranged else (spd + f.base_radius + e.base_radius)
             if distance(f.position, e.position) <= reach:
                 threat += 0.5
     return score + threat
@@ -268,10 +269,10 @@ def _support_count(engine: Engine, figure: Figure, target_uid) -> float:
     for fr in engine.state.living(figure.owner):
         if fr.uid == figure.uid or fr.is_demoralized:
             continue
-        if in_base_contact(fr.position, fr.base_radius, t.position, t.base_radius):
+        if figures_in_base_contact(fr, t):
             n += 1.0
         elif fr.damage > 0 and not engine.state.opposing_contacts(fr):
-            gap = distance(fr.position, t.position) - (fr.base_radius + t.base_radius)
+            gap = figure_gap(fr, t)
             if gap <= fr.speed + 0.5:
                 n += 0.5  # can pile on the same turn
     return n
@@ -312,7 +313,7 @@ def _move_value(engine: Engine, figure: Figure, cand: Candidate) -> float:
         if hint == "flank":
             support += 0.25  # rear arc: +1 attack, no front-arc reply
     if figure.is_ranged:
-        contact = figure.base_radius + 0.55
+        contact = 2 * figure.base_radius  # nearest-enemy edge band (radii are uniform)
         in_band_after = contact < new <= figure.range
         in_band_now = contact < cur <= figure.range
         if hint == "kite":
@@ -364,8 +365,8 @@ def _charge_pole_arm_penalty(engine: Engine, figure: Figure, dest: Vec) -> float
     a full material penalty would wrongly make the AI pass on a lone Pole Arm defender
     (one-ply scoring can't yet see the follow-up attack payoff — see FUT-AI lookahead)."""
     for p in engine.state.opponents_of(figure):
-        if ab.has(p, ab.POLE_ARM) and in_base_contact(
-            dest, figure.base_radius, p.position, p.base_radius
+        if ab.has(p, ab.POLE_ARM) and figures_in_base_contact(
+            figure, p, a_pos=dest
         ) and in_front_arc(p.position, p.facing, dest, p.arc_half_angle):
             clicks = ab.damage_after_defenses(figure, 1, "ability", False)
             return min(clicks * _vpc(figure), 0.5)
@@ -399,6 +400,11 @@ def score_candidate(engine: Engine, figure: Figure, cand: Candidate) -> float:
         # can't afford solo tempo benefit most — the whole point of formations).
         return 0.6 * cand.annotation.get("size", len(cand.annotation.get("members", []))) \
             - _formation_push_cost(engine, cand)
+    if k in ("charge_strike", "bound_shot"):
+        # Armed Charge/Bound rider (P5 §2.1): a FREE attack the move already
+        # paid for — skipping it forfeits it, so value it like the attack plus
+        # a bonus, and exempt it from the push cost (no token, no budget).
+        return _attack_value(engine, figure, cand) + 0.5
     if k in ("close", "ranged", "weapon_master", "magic_blast"):
         val = _attack_value(engine, figure, cand)
     elif k == "flame_lightning":

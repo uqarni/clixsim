@@ -36,6 +36,7 @@ from .build import (
     heuristic_army,
     pool_figures,
     sample_sealed_pool,
+    set_pool_expansions,
 )
 from .candidates import generate_candidates, generate_formation_candidates
 from .chat import build_system, chat_reply
@@ -328,10 +329,17 @@ def _auto_deploy_llm(eng: Engine) -> None:
         spacing = 1.11  # touching -> formations are live immediately
         x0 = w / 2 - spacing * (len(members) - 1) / 2
         for i, f in enumerate(members):
+            # A mounted figure facing the human (-y from the top edge) trails
+            # its rear circle UP toward the edge: the front dot must sit at
+            # y <= h - 3r or the capsule leaves the board (P5-R11) and every
+            # nudge would be rejected, silently stranding it in the draft row.
+            y = rows_y[r_idx]
+            if f.mounted:
+                y = min(y, h - 3 * f.base_radius)
             placed = False
             for nudge in (0.0, 0.6, -0.6, 1.2, -1.2, 2.4, -2.4):
                 res = eng.deploy_figure(
-                    "llm", f.uid, (x0 + spacing * i + nudge, rows_y[r_idx]),
+                    "llm", f.uid, (x0 + spacing * i + nudge, y),
                     -math.pi / 2)
                 if getattr(res, "ok", False):
                     placed = True
@@ -435,10 +443,11 @@ def _brief(fid: int) -> dict:
 
 def _construct_stream(mode: str, points: int, opponent: str, seed: int,
                       human_ids: list[int] | None = None, terrain: bool = True,
-                      deploy: bool = True):
+                      deploy: bool = True, expansions: list[str] | None = None):
     """Server-sent events: settle the human army (drafted by the client, or auto-
     built), stream the LLM drafting its own army with reasoning, then finalize."""
     db = SESSION.db
+    set_pool_expansions(expansions)  # New Game set checkboxes scope the pools
     budget = 200 if mode == "sealed" else max(100, points)
 
     def sse(obj: dict) -> str:
@@ -576,10 +585,11 @@ def _construct_stream(mode: str, points: int, opponent: str, seed: int,
 @app.get("/api/new_game_stream")
 def new_game_stream(mode: str = "preconstructed", points: int = 200,
                     opponent: str = "llm", seed: int = 1, human_ids: str = "",
-                    terrain: bool = True, deploy: bool = True):
+                    terrain: bool = True, deploy: bool = True, expansions: str = ""):
     ids = [int(x) for x in human_ids.split(",") if x.strip()] or None
+    exps = [e.strip() for e in expansions.split(",") if e.strip()] or None
     return StreamingResponse(
-        _construct_stream(mode, points, opponent, seed, ids, terrain, deploy),
+        _construct_stream(mode, points, opponent, seed, ids, terrain, deploy, exps),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -591,9 +601,12 @@ def chat(req: ChatReq):
 
 
 @app.get("/api/roster")
-def roster():
-    """Full drafting roster (all set pieces) for the preconstructed builder."""
+def roster(expansions: str = ""):
+    """Full drafting roster for the preconstructed builder, scoped to the
+    requested sets (comma-separated; empty = the current default)."""
     db = SESSION.db
+    exps = [e.strip() for e in expansions.split(",") if e.strip()] or None
+    set_pool_expansions(exps)
     figs = sorted(pool_figures(db),
                   key=lambda f: (f.faction, -f.points, f.short_name))
     return {"figures": [_fig_brief(db, f) for f in figs]}

@@ -81,6 +81,15 @@ strongly prefer it over single moves when advancing a group. A \
 touch the TARGET, not each other — flank freely). Movement and ranged \
 formations DO need members touching each other, so keep same-faction figures \
 cohesive when advancing; scattering them throws the advantage away.
+- CAVALRY (figures marked "mounted": double peanut bases). They break away on \
+anything but a 1, deal 1 click of Shake Off to enemies on their rear arc when \
+they do, and never get a free spin — so hit-and-run is their game, and basing \
+one barely pins it. Charge/Bound figures move up to DOUBLE speed, or move \
+normal speed and get a FREE attack: a candidate kind "charge_strike" or \
+"bound_shot" is that free attack, already paid for — take the best one \
+essentially always; skipping it wastes it (any other action forfeits it). \
+Enemy Charge/Bound threat ranges are 2x their printed speed. Charge/Bound \
+figures cannot join formations while the ability is on (cancel it to form up).
 
 Respond with ONLY the chosen candidate id and a one-line rationale."""
 

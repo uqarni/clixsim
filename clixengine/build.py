@@ -25,7 +25,10 @@ def _role(f: FigureDef) -> str:
     return "ranged" if f.is_ranged else "melee"
 
 
-_FORMATION_BARRED = {ab.FLIGHT, ab.AQUATIC, ab.QUICKNESS}
+# Flight/Aquatic/Quickness bar movement formations; Charge/Bound bar ANY
+# formation (all optional — cancelable in play, so this is a drafting hint,
+# not a hard truth; the brief stays conservative like the originals).
+_FORMATION_BARRED = {ab.FLIGHT, ab.AQUATIC, ab.QUICKNESS, ab.CHARGE, ab.BOUND}
 
 
 def _formation_capable(f: FigureDef) -> bool:
@@ -60,6 +63,9 @@ def _fig_brief(db: FigureDB, f: FigureDef) -> dict:
         # Movement formations need grounded, non-Mage-Spawn figures — the
         # drafter used to justify picks with formation plans the engine forbids.
         "formation_capable": _formation_capable(f),
+        # Mounted cavalry (P5): double base, break-away on 1, Shake Off,
+        # no free spin. Also drives the client's roster badge.
+        "mounted": bool(getattr(f, "mounted", False)),
         "abilities": _top_abilities(db, f),
         # starting-click stats + printed range so the drafter can compare figures
         "stats": {
@@ -73,10 +79,20 @@ def _fig_brief(db: FigureDB, f: FigureDef) -> dict:
 # --------------------------------------------------------------------------- #
 # Draft/sealed pool scope
 # --------------------------------------------------------------------------- #
-# Sets eligible for pools. Lancers joins once the engine + client fully
-# support mounted double bases (docs/lancers-plan.md rollout order) — until
-# then the DB carries the figures but pools don't offer them.
-POOL_EXPANSIONS: set[str] = {"Rebellion"}
+# Sets known to the pool system, and the ACTIVE selection (mutated per game by
+# set_pool_expansions from the New Game screen's checkboxes). Lancers joins the
+# default once the capsule stack fully ships (docs/lancers-plan.md rollout).
+KNOWN_EXPANSIONS: tuple[str, ...] = ("Rebellion", "Lancers")
+DEFAULT_POOL_EXPANSIONS: frozenset[str] = frozenset({"Rebellion"})
+POOL_EXPANSIONS: set[str] = set(DEFAULT_POOL_EXPANSIONS)
+
+
+def set_pool_expansions(expansions: list[str] | None) -> None:
+    """Select the sets the CURRENT game drafts from (per-game, from the New
+    Game config). Empty/None or all-unknown names fall back to the default."""
+    chosen = {e for e in (expansions or []) if e in KNOWN_EXPANSIONS}
+    POOL_EXPANSIONS.clear()
+    POOL_EXPANSIONS.update(chosen or DEFAULT_POOL_EXPANSIONS)
 
 
 def pool_figures(db: FigureDB) -> list[FigureDef]:
@@ -231,7 +247,15 @@ means BIG pieces, not more copies of the cheapest figure.
 DRAFT A HEALER when the pool offers one (Healing/Magic Healing/Necromancy): \
 every archived attrition loss traces to the enemy repairing damage the army \
 could not. Candidates carry "formation_capable" — only plan formations around \
-figures where it is true."""
+figures where it is true.
+
+CAVALRY ("mounted": true — double-base Lancers figures) are hit-and-run \
+pieces: they break away on anything but a 1, deal Shake Off damage when they \
+disengage, and Charge/Bound lets them move DOUBLE speed or move-and-attack in \
+one action. They cannot join formations while Charge/Bound shows, so treat \
+them as fast independent strikers alongside your formation block, not inside \
+it. Two or three cavalry make a devastating flanking wing; a healer keeps \
+them cycling."""
 
 # A per-game drafting doctrine keeps armies varied across games (the model
 # otherwise converges on the same "best" picks every time).
@@ -295,12 +319,14 @@ def _planning_digest(db: FigureDB, figs: list[FigureDef]) -> list[dict]:
         move_cap = sum(1 for m in members if _formation_capable(m))
         ranged_cap = 0 if fac == "Mage Spawn" else sum(1 for m in members if m.is_ranged)
         top = sorted(members, key=lambda m: -m.points)[:4]
+        mounted_n = sum(1 for m in members if getattr(m, "mounted", False))
         out.append({
             "faction": fac,
             "distinct_figures": len(members),
             "movement_formation_capable": move_cap,
             "ranged_formation_capable": ranged_cap,
             "formation_capable": max(move_cap, ranged_cap),  # best formation potential
+            **({"mounted": mounted_n} if mounted_n else {}),  # cavalry available
             "has_healer": any(m.all_ability_ids() & _HEAL_IDS for m in members),
             "top_pieces": [{"name": m.short_name, "points": m.points, "role": _role(m)}
                            for m in top],
