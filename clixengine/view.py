@@ -153,6 +153,9 @@ def game_view(engine: Engine) -> dict:
             "victory_points": engine.victory_points(),
             "board": {"width": state.board.width, "height": state.board.height},
             "ability_coverage": engine.ability_coverage(),
+            # Armed Charge/Bound follow-up attack (P5 §2.1): {"uid", "kind"} —
+            # the client offers the free strike/shot for this figure.
+            "pending_rider": getattr(engine, "_pending_rider", None),
         },
         # sorted by uid for stable client diffing; includes eliminated figures
         "figures": [figure_view(engine, f) for f in sorted(state.figures.values(), key=lambda x: x.uid)],

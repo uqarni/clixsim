@@ -265,12 +265,14 @@ def intent_from_dict(d: dict):
         return RangedIntent(
             attacker_uid=d["attacker_uid"], target_uids=_tup(d["target_uids"]),
             variant=d.get("variant", "normal"), formation_uids=_tup(d.get("formation_uids")),
+            rider=bool(d.get("rider", False)),  # Bound follow-up (P5 §2.1)
         )
     if kind == "close":
         return CloseIntent(
             attacker_uid=d["attacker_uid"], target_uid=d["target_uid"],
             variant=d.get("variant", "normal"), formation_uids=_tup(d.get("formation_uids")),
             heal_d6=bool(d.get("heal_d6", False)),
+            rider=bool(d.get("rider", False)),  # Charge follow-up (P5 §2.1)
         )
     if kind == "pass":
         return PassIntent(figure_uid=d["figure_uid"])

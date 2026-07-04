@@ -88,6 +88,13 @@ class Engine:
         # enters base contact, consumed by the spin, and expired when the mover acts
         # again or a new turn begins — so a spin can't be redeemed out of context.
         self._pending_free_spins: set[int] = set()
+        # Charge/Bound (P5 §2.1): active-player figures in enemy contact at the
+        # START of the turn (the card keys the rider branch on "did not start
+        # the turn in base contact"), and the armed free follow-up attack —
+        # {"uid": int, "kind": "close"|"ranged"} — set by a qualifying move,
+        # resolved through the free-spin window, cleared by any other intent.
+        self._turn_start_contacted: set[int] = set()
+        self._pending_rider: dict | None = None
 
     # ------------------------------------------------------------------ #
     # Ability telemetry (X6)
@@ -497,10 +504,19 @@ class Engine:
 
     def actionable_figures(self) -> list[Figure]:
         can = [f for f in self.state.living(self.state.active_player) if self.can_act(f)]
+        # An armed Charge/Bound rider keeps its figure actionable even though it
+        # already acted (and even at zero budget) — the follow-up attack is free.
+        pr = getattr(self, "_pending_rider", None)
+        if pr is not None:
+            rf = self.state.figures.get(pr["uid"])
+            if rf is not None and rf.is_alive and rf.owner == self.state.active_player:
+                can = can + [rf] if rf not in can else can
         if self._actions_remaining() > 0:
             return can
-        # No budget left, but Quickness figures may still take a free move.
-        return [f for f in can if ab.has(f, ab.QUICKNESS)]
+        # No budget left, but Quickness figures may still take a free move —
+        # and an armed rider still strikes.
+        return [f for f in can
+                if ab.has(f, ab.QUICKNESS) or (pr is not None and f.uid == pr["uid"])]
 
     def _actions_remaining(self) -> int:
         return self.state.actions_per_turn() + self._bonus_actions - self._actions_spent
@@ -672,14 +688,15 @@ class Engine:
         if not figure.is_demoralized:
             cluster = self._same_faction_cluster(figure)
             barred = [g for g in cluster
-                      if g.active_ability_ids() & (ab.FREE_MOVEMENT_IDS | {ab.QUICKNESS})]
+                      if g.active_ability_ids() & (ab.FREE_MOVEMENT_IDS | {ab.QUICKNESS, ab.CHARGE, ab.BOUND})]
             eligible = len(cluster) - len(barred)
             if barred and len(cluster) >= 2:
                 names = ", ".join(sorted(g.short_name for g in barred))
                 hints.append(
-                    f"Movement formations exclude Flight/Aquatic/Quickness (card text): "
-                    f"{names}. Those are optional abilities — cancel them (dial panel) "
-                    f"and the group can form up."
+                    f"Formations exclude Flight/Aquatic/Quickness (movement) and "
+                    f"Charge/Bound (any formation) by card text: {names}. Those are "
+                    f"optional abilities — cancel them (dial panel) and the group "
+                    f"can form up."
                 )
             elif eligible == 2:
                 hints.append("Form up: a movement formation needs 3–5 same-faction figures "
@@ -697,6 +714,14 @@ class Engine:
         # toggles don't expire it.
         if not isinstance(intent, (FreeSpinIntent, ToggleAbilityIntent)):
             self._pending_free_spins.clear()
+        # An unredeemed Charge/Bound rider expires the moment anything OTHER
+        # than the rider itself or the interposed free spin resolves — it is
+        # part of the move action, not a banked attack.
+        if getattr(self, "_pending_rider", None) is not None and not (
+            isinstance(intent, (FreeSpinIntent, ToggleAbilityIntent))
+            or getattr(intent, "rider", False)
+        ):
+            self._pending_rider = None
         if isinstance(intent, PassIntent):
             return self._apply_pass(intent)
         if isinstance(intent, MoveIntent):
@@ -826,6 +851,24 @@ class Engine:
             return Rejection("already_acted", f"{f.short_name} already acted this turn")
         return f
 
+    def _rider_precheck(self, figure_uid: int, kind: str) -> Figure | Rejection:
+        """Gate a Charge/Bound rider attack (P5 §2.1): it must be the armed
+        follow-up for exactly this figure and kind. Deliberately skips
+        _precheck's already_acted/no_actions gates — the rider belongs to the
+        move action already paid for — and the caller must NOT re-token,
+        re-push, or re-spend budget for it."""
+        pr = getattr(self, "_pending_rider", None)
+        if pr is None or pr["uid"] != figure_uid or pr["kind"] != kind:
+            return Rejection("no_rider", "no Charge/Bound follow-up is armed for this figure")
+        f = self.state.figures.get(figure_uid)
+        if f is None or not f.is_alive:
+            return Rejection("eliminated", "rider attacker is gone")
+        if f.owner != self.state.active_player:
+            return Rejection("not_your_figure", "rider attacker is not the active player's")
+        if ab.charge_bound_kind(f) != kind:
+            return Rejection("no_ability", "Charge/Bound is no longer showing")
+        return f
+
     def _consume_nonpass(self, figure: Figure, free: bool = False) -> bool:
         """Mark a non-pass action; return True if this is a *pushing* action.
         ``free`` (Quickness) marks the figure as acted & tokened without spending
@@ -884,9 +927,15 @@ class Engine:
             return Rejection("off_board", "destination is off the board")
         flies = ab.ignores_figure_bases(f)  # Flight/Aquatic pass through bases & terrain
         pieces = self.state.terrain
+        # Charge/Bound: a move action may cover up to TWICE the speed value
+        # (the rider-attack branch caps at 1x — checked where the rider arms).
+        # Doubling applies before the hindering halving: the halving is made
+        # "after all other adjustments to the speed value" (§Hindering).
+        base_speed = f.speed * (2 if ab.charge_bound_kind(f) else 1)
         # Speed may be halved by starting in hindering terrain (§Hindering: any
         # part of the base touching; fliers exempt).
-        eff_speed = f.speed if flies else terr.footprint_effective_speed(pieces, f.speed, f.circles())
+        eff_speed = base_speed if flies else terr.footprint_effective_speed(
+            pieces, base_speed, f.circles())
         dist = distance(f.position, dest)
         if dist > eff_speed + 1e-9:
             extra = " (halved by hindering)" if eff_speed < f.speed else ""
@@ -994,6 +1043,7 @@ class Engine:
                         self._on_eliminated(c, events)
 
         start = f.position
+        start_circles = f.circles()  # pre-move footprint (hindering start-halving)
         if broke_away:
             f.position = dest
             # Anti-thrash memory (plan 2.6): remember where the figure came
@@ -1028,6 +1078,22 @@ class Engine:
             self._apply_pushing_damage(f, events)
         self._check_victory(events)
 
+        # Charge/Bound rider (P5 §2.1): arm the free follow-up attack when the
+        # figure moved at most its NORMAL speed and did not start the turn in
+        # enemy contact. It resolves as a separate intent AFTER the free-spin
+        # window — the defender's spin legally interposes before the strike.
+        kind = ab.charge_bound_kind(f)
+        if (kind and broke_away and f.is_alive and not self.state.ended
+                and f.uid not in getattr(self, "_turn_start_contacted", set())):
+            flies = ab.ignores_figure_bases(f)
+            normal_speed = f.speed if flies else terr.footprint_effective_speed(
+                self.state.terrain, f.speed, start_circles)
+            if dist <= normal_speed + 1e-9:
+                self._pending_rider = {"uid": f.uid, "kind": kind}
+                events.append(self.log.emit(
+                    "rider_armed", figure=f.uid, kind=kind,
+                    ability="Charge" if kind == "close" else "Bound"))
+
         summary = (
             f"{f.short_name} moves to ({f.position.x:.1f},{f.position.y:.1f})"
             if broke_away
@@ -1060,17 +1126,32 @@ class Engine:
     # -- Ranged ------------------------------------------------------------
     def _apply_ranged(self, intent: RangedIntent) -> Result | Rejection:
         if intent.formation_uids:
+            if getattr(intent, "rider", False):
+                return Rejection("bad_rider", "a Bound rider cannot be a formation attack")
             return self._apply_ranged_formation(intent)
-        f = self._precheck(intent.attacker_uid)
-        if isinstance(f, Rejection):
-            return f
+        rider = getattr(intent, "rider", False)
+        if rider:
+            # Bound (P5 §2.1): the free follow-up shot from the just-resolved
+            # move. "As if he had been given a ranged combat action" — every
+            # normal gate below applies (incl. P4-R23: bounding INTO contact
+            # forfeits the shot). Skips _precheck (the figure already acted).
+            if intent.variant != "normal":
+                return Rejection("bad_rider", "a Bound rider is a normal ranged attack")
+            f = self._rider_precheck(intent.attacker_uid, "ranged")
+            if isinstance(f, Rejection):
+                return f
+            self._pending_rider = None  # consumed, hit or miss
+        else:
+            f = self._precheck(intent.attacker_uid)
+            if isinstance(f, Rejection):
+                return f
         if f.range <= 0:
             return Rejection("no_range", f"{f.short_name} has no ranged attack")
         if f.is_demoralized:
             return Rejection("demoralized", f"{f.short_name} is demoralized (move/pass only)")
         if not ab.can_make_ranged_attack(f):
             return Rejection("berserk", f"{f.short_name} (Berserk) cannot make ranged attacks")
-        if f.action_tokens >= 2:
+        if not rider and f.action_tokens >= 2:
             return Rejection("pushed_out", f"{f.short_name} cannot act a third consecutive turn")
         if self.state.opposing_contacts(f):
             return Rejection("in_contact", "cannot fire while in base contact (P4-R23)")
@@ -1109,7 +1190,9 @@ class Engine:
                 return Rejection("no_lof", reason)
 
         events: list[dict] = []
-        pushing = self._consume_nonpass(f)
+        # A rider consumes no action/token and never re-pushes — the move half
+        # of the same action already did all the bookkeeping.
+        pushing = False if rider else self._consume_nonpass(f)
         d1, d2, total = self.rng.roll_2d6("attack", f"{f.short_name} ranged")
         multi = len(targets) > 1
         for t in targets:
@@ -1137,13 +1220,27 @@ class Engine:
     # -- Close -------------------------------------------------------------
     def _apply_close(self, intent: CloseIntent) -> Result | Rejection:
         if intent.formation_uids:
+            if getattr(intent, "rider", False):
+                return Rejection("bad_rider", "a Charge rider cannot be a formation attack")
             return self._apply_close_formation(intent)
-        f = self._precheck(intent.attacker_uid)
-        if isinstance(f, Rejection):
-            return f
+        rider = getattr(intent, "rider", False)
+        if rider:
+            # Charge (P5 §2.1): the free follow-up strike from the just-resolved
+            # move, "as if he had been given a close combat action" — normal
+            # gates apply (front-arc contact, demoralized). Skips _precheck.
+            if intent.variant != "normal":
+                return Rejection("bad_rider", "a Charge rider is a normal close attack")
+            f = self._rider_precheck(intent.attacker_uid, "close")
+            if isinstance(f, Rejection):
+                return f
+            self._pending_rider = None  # consumed, hit or miss
+        else:
+            f = self._precheck(intent.attacker_uid)
+            if isinstance(f, Rejection):
+                return f
         if f.is_demoralized:
             return Rejection("demoralized", f"{f.short_name} is demoralized (move/pass only)")
-        if f.action_tokens >= 2:
+        if not rider and f.action_tokens >= 2:
             return Rejection("pushed_out", f"{f.short_name} cannot act a third consecutive turn")
         if intent.variant == "weapon_master" and not ab.has(f, ab.WEAPON_MASTER):
             return Rejection("no_ability", f"{f.short_name} lacks Weapon Master")
@@ -1160,7 +1257,9 @@ class Engine:
             return Rejection("out_of_arc", "target not in attacker's front arc (P4-R27)")
 
         events: list[dict] = []
-        pushing = self._consume_nonpass(f)
+        # A rider consumes no action/token and never re-pushes — the move half
+        # of the same action already did all the bookkeeping.
+        pushing = False if rider else self._consume_nonpass(f)
 
         rear = contact_is_rear(t, f)
         atk = f.attack + (1 if rear else 0)
@@ -1583,6 +1682,16 @@ class Engine:
         if figs[0].definition.faction == MAGE_SPAWN_FACTION:
             return Rejection("bad_formation",
                              "Mage Spawn cannot form formations (no Shyft present)")
+        # Charge/Bound card text: "This warrior may not be part of ANY
+        # formation" — movement AND combat. Both are optional: cancel to join.
+        barred = [g for g in figs if ab.charge_bound_kind(g)]
+        if barred:
+            names = ", ".join(sorted(g.short_name for g in barred))
+            return Rejection(
+                "bad_formation",
+                f"Charge/Bound bars any formation (card text): {names} — cancel "
+                f"the ability (dial panel) to let them join",
+            )
         return tuple(figs)
 
     def _token_formation(self, figs) -> list:
@@ -1611,7 +1720,7 @@ class Engine:
         figs = self._validate_formation(uids, "move")
         if isinstance(figs, Rejection):
             return figs
-        if any(g.active_ability_ids() & (ab.FREE_MOVEMENT_IDS | {ab.QUICKNESS}) for g in figs):
+        if any(g.active_ability_ids() & (ab.FREE_MOVEMENT_IDS | {ab.QUICKNESS, ab.CHARGE, ab.BOUND}) for g in figs):
             return Rejection("bad_formation", "Flight/Aquatic/Quickness may not join a movement formation")
         if any(g.is_demoralized for g in figs):
             return Rejection("bad_formation", "a demoralized figure may not join a formation")
@@ -1931,6 +2040,13 @@ class Engine:
         self._actions_spent = 0
         self._bonus_actions = 0
         self._pending_free_spins.clear()  # free-spin offers don't survive a turn boundary
+        self._pending_rider = None
+        # Charge/Bound turn-start snapshot: the rider branch is only open to a
+        # figure that "did not start the TURN in base contact" (card text) —
+        # contact at action time is the wrong test (levitation can change it).
+        self._turn_start_contacted = {
+            f.uid for f in self.state.living(player) if self.state.opposing_contacts(f)
+        }
         for f in self.state.figures.values():
             if f.owner == player and f.is_alive:
                 f.begin_owner_turn()

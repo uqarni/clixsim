@@ -29,6 +29,10 @@ STANDARD_BASE_RADIUS = 0.55
 
 # Demoralized is encoded as a dial ability on a figure's final click (§Demoralized).
 DEMORALIZED_ABILITY_ID = 95
+# Invulnerability's card text: "This warrior cannot be healed." Gated at the
+# heal choke point below so every heal source (Healing, Magic Healing,
+# Regeneration, Command, Vampirism) obeys it without per-caller checks.
+INVULNERABILITY_ABILITY_ID = 101
 
 
 @dataclass
@@ -174,8 +178,11 @@ class Figure:
 
     def heal_clicks(self, n: int) -> int:
         """Heal ``n`` clicks (counter-clockwise), never past Starting Position
-        (§Healing). Cannot revive an eliminated figure via normal healing."""
+        (§Healing). Cannot revive an eliminated figure via normal healing.
+        An Invulnerable figure cannot be healed at all (§Invulnerability)."""
         if n <= 0 or self.eliminated:
+            return 0
+        if INVULNERABILITY_ABILITY_ID in self.active_ability_ids():
             return 0
         start = self.definition.starting_click
         before = self.current_click

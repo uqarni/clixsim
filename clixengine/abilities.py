@@ -47,9 +47,10 @@ WEAPON_MASTER = 126
 # Abilities with a real engine effect in this build. Everything referenced by the
 # roster but absent here is flagged by ability-coverage telemetry.
 IMPLEMENTED_ABILITY_IDS: set[int] = {
-    AQUATIC, BATTLE_ARMOR, BERSERK, COMMAND, DEFEND, DEMORALIZED,
-    FLAME_LIGHTNING, FLIGHT, HEALING, MAGIC_BLAST, MAGIC_ENHANCEMENT, MAGIC_HEALING,
-    MAGIC_IMMUNITY, MAGIC_LEVITATION, NECROMANCY, POLE_ARM, QUICKNESS, REGENERATION,
+    AQUATIC, BATTLE_ARMOR, BERSERK, BOUND, CHARGE, COMMAND, DEFEND, DEMORALIZED,
+    FLAME_LIGHTNING, FLIGHT, HEALING, INVULNERABILITY, MAGIC_BLAST,
+    MAGIC_ENHANCEMENT, MAGIC_HEALING, MAGIC_IMMUNITY, MAGIC_LEVITATION,
+    NECROMANCY, POLE_ARM, QUICKNESS, REGENERATION,
     SHOCKWAVE, STEALTH, TOUGHNESS, VAMPIRISM, WEAPON_MASTER,
 }
 # Stealth is LIVE since terrain shipped: a line of fire to a Stealth figure
@@ -58,9 +59,9 @@ TERRAIN_DEPENDENT_IDS: set[int] = set()
 # Whole effect depends on the capture subsystem (FUT-CAP), which is out of scope:
 # reported separately so coverage isn't overstated.
 CAPTURE_PENDING_IDS: set[int] = {BATTLE_FURY}
-# Lancers trio, implementation staged in docs/lancers-plan.md P4 — flagged (not
-# silently ignored) until then; move to IMPLEMENTED_ABILITY_IDS when they land.
-FLAGGED_ABILITY_IDS: set[int] = {BOUND, CHARGE, INVULNERABILITY}
+# Roster abilities awaiting implementation (none right now — the Lancers trio
+# Bound/Charge/Invulnerability shipped with plan P4). Never silently ignored.
+FLAGGED_ABILITY_IDS: set[int] = set()
 
 # Abilities that grant free (non-formation) movement: pass through figure bases,
 # only fail break-away on a natural 1 (§Flight / §Aquatic).
@@ -92,9 +93,11 @@ def _magic_immune(figure) -> bool:
 
 # --- break-away ------------------------------------------------------------
 def break_away_min(figure) -> int:
-    """Minimum d6 needed to break away: normally 4; Flight/Aquatic (card text)
-    and mounted warriors (P5-R3) fail only on a 1."""
-    if is_mounted(figure) or figure.active_ability_ids() & FREE_MOVEMENT_IDS:
+    """Minimum d6 needed to break away: normally 4; Flight/Aquatic and
+    Charge/Bound (card text) and mounted warriors (P5-R3) fail only on a 1."""
+    if is_mounted(figure) or figure.active_ability_ids() & (
+        FREE_MOVEMENT_IDS | {CHARGE, BOUND}
+    ):
         return 2
     return 4
 
@@ -116,7 +119,12 @@ def effective_defense(state, target, attack_type: str, terrain_mod: int = 0) -> 
     ranged), Defend (may use a base-contact friendly's higher defense value), and a
     terrain modifier (hindering / height advantage, computed by the engine)."""
     base = target.defense
-    ba = attack_type == "ranged" and has(target, BATTLE_ARMOR)
+    # Battle Armor and Invulnerability: +2 vs ranged attacks that target or can
+    # affect the figure — effective_defense is evaluated per affected figure in
+    # splash/Shockwave paths too, so the "can affect" clause rides along free.
+    ba = attack_type == "ranged" and (
+        has(target, BATTLE_ARMOR) or has(target, INVULNERABILITY)
+    )
     # Defend: swap in the best friendly provider's printed defense if higher.
     from .state import figures_in_base_contact
 
@@ -140,8 +148,11 @@ def damage_after_defenses(target, raw: int, source_type: str, is_magic: bool) ->
     if is_magic and _magic_immune(target):
         return 0
     dmg = raw
-    if has(target, TOUGHNESS) and source_type in ("ranged", "close", "ability"):
-        dmg = max(0, dmg - 1)
+    if source_type in ("ranged", "close", "ability"):
+        if has(target, INVULNERABILITY):
+            dmg = max(0, dmg - 2)  # -2 clicks; not pushing/crit-miss (card text)
+        elif has(target, TOUGHNESS):
+            dmg = max(0, dmg - 1)
     return dmg
 
 
@@ -160,6 +171,19 @@ def ranged_damage_bonus(state, attacker, target) -> int:
         if has(friend, MAGIC_ENHANCEMENT) and figures_in_base_contact(attacker, friend):
             bonus += 1
     return bonus
+
+
+def charge_bound_kind(figure) -> str | None:
+    """The rider-attack kind a figure's active Charge/Bound grants: "close"
+    (Charge), "ranged" (Bound), or None. If both somehow show, Charge wins
+    (deterministic; no such dial exists — Martyr On Light Warhorse switches
+    between them across clicks, never together)."""
+    ids = figure.active_ability_ids()
+    if CHARGE in ids:
+        return "close"
+    if BOUND in ids:
+        return "ranged"
+    return None
 
 
 def vampirism_heal(attacker) -> int:

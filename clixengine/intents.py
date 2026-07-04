@@ -29,6 +29,9 @@ class RangedIntent:
     # normal | magic_blast | flame_lightning | shockwave | magic_healing
     variant: str = "normal"
     formation_uids: tuple[int, ...] = ()  # ranged formation members
+    # Bound rider (P5 §2.1): a free follow-up shot bound to the figure's own
+    # just-resolved move — consumes no action and places no second token.
+    rider: bool = False
     kind: str = "ranged"
 
 
@@ -39,6 +42,8 @@ class CloseIntent:
     variant: str = "normal"  # normal | weapon_master | healing
     formation_uids: tuple[int, ...] = ()  # close formation members
     heal_d6: bool = False  # Healing: use the 1d6 alternative instead of the damage value
+    # Charge rider (P5 §2.1): free follow-up strike after the figure's own move.
+    rider: bool = False
     kind: str = "close"
 
 

@@ -108,6 +108,12 @@ def generate_candidates(engine: Engine, figure: Figure) -> list[Candidate]:
     has_budget = engine._actions_remaining() > 0
     quick = ab.QUICKNESS in aids  # moves are free; other actions still cost budget
 
+    # ---- armed Charge/Bound rider: the ONLY thing this figure can still do --
+    pr = getattr(engine, "_pending_rider", None)
+    if pr is not None and pr["uid"] == figure.uid:
+        _rider_candidates(engine, figure, pr["kind"], cands)
+        return cands
+
     # ---- attack actions (need a budget action) --------------------------
     if has_budget and not demoralized:
         _close_candidates(engine, figure, cands, aids)
@@ -133,15 +139,15 @@ def generate_candidates(engine: Engine, figure: Figure) -> list[Candidate]:
     if has_budget and not demoralized:
         barred_ref = next(
             (a for a in figure.definition.dial[figure.current_click].abilities
-             if a.id in (ab.FLIGHT, ab.AQUATIC, ab.QUICKNESS) and a.optional
-             and a.id in figure.active_ability_ids()),
+             if a.id in (ab.FLIGHT, ab.AQUATIC, ab.QUICKNESS, ab.CHARGE, ab.BOUND)
+             and a.optional and a.id in figure.active_ability_ids()),
             None,
         )
         if barred_ref is not None and figure.definition.faction != MAGE_SPAWN_FACTION:
             same = [
                 fr for fr in engine.state.friends_of(figure)
                 if fr.definition.faction == figure.definition.faction
-                and not (fr.active_ability_ids() & (ab.FREE_MOVEMENT_IDS | {ab.QUICKNESS}))
+                and not (fr.active_ability_ids() & (ab.FREE_MOVEMENT_IDS | {ab.QUICKNESS, ab.CHARGE, ab.BOUND}))
                 and not engine.state.opposing_contacts(fr)
             ]
             # Cohesion is a CHAIN (P4-R14), not all-touching-the-flyer: walk the
@@ -198,6 +204,34 @@ def generate_candidates(engine: Engine, figure: Figure) -> list[Candidate]:
                 # count for victory — strategically this push loses the figure.
                 c.annotation["push_would_demoralize"] = True
     return cands
+
+
+def _rider_candidates(engine, figure, kind: str, cands: list) -> None:
+    """The armed Charge/Bound follow-up (P5 §2.1): a FREE attack — the move
+    already paid the action. Offered for every legal target; skipping it (any
+    other intent) forfeits it, so the AI should almost always take the best one."""
+    if kind == "close":
+        for target, rear in engine.legal_close_targets(figure):
+            cands.append(Candidate(
+                CloseIntent(figure.uid, target.uid, rider=True), "charge_strike",
+                f"Charge! strike {target.short_name}{' (rear)' if rear else ''} — free",
+                {"target": target.uid, "target_name": target.short_name, "rear": rear,
+                 "hit_odds": round(engine.hit_odds(figure.uid, target.uid, rear, "close"), 3),
+                 "expected_clicks": round(engine.expected_damage(
+                     figure.uid, target.uid, rear, attack_type="close"), 2),
+                 "damage": figure.damage, "free": True},
+            ))
+    else:
+        for target in engine.legal_ranged_targets(figure):
+            cands.append(Candidate(
+                RangedIntent(figure.uid, (target.uid,), rider=True), "bound_shot",
+                f"Bound! shoot {target.short_name} — free",
+                {"target": target.uid, "target_name": target.short_name,
+                 "hit_odds": round(engine.hit_odds(figure.uid, target.uid, False, "ranged"), 3),
+                 "expected_clicks": round(engine.expected_damage(
+                     figure.uid, target.uid, False, attack_type="ranged"), 2),
+                 "damage": figure.damage, "free": True},
+            ))
 
 
 def _close_candidates(engine, figure, cands, aids):
@@ -937,7 +971,7 @@ def generate_formation_candidates(
         move_elig = [
             f for f in members
             if not state.opposing_contacts(f) and not f.is_demoralized
-            and not (f.active_ability_ids() & (ab.FREE_MOVEMENT_IDS | {ab.QUICKNESS}))
+            and not (f.active_ability_ids() & (ab.FREE_MOVEMENT_IDS | {ab.QUICKNESS, ab.CHARGE, ab.BOUND}))
         ]
         for cluster in _cohesive_clusters(move_elig):
             # A DFS component's prefix is itself connected, so [:5] is a valid
